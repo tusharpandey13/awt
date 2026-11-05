@@ -1,0 +1,22 @@
+{"seq":1,"ts":"2030-01-02T09:00:12Z","kind":"intake","ref":{"type":"url","locator":"https://example.com/thread/1"},"summary":"Task created from a chat thread"}
+{"seq":2,"ts":"2030-01-02T09:05:40Z","kind":"decision","ref":{"type":"file","locator":"decisions.md#D1"},"summary":"Keep a single changelog"}
+{"seq":3,"ts":"2030-01-02T10:15:03Z","kind":"commit","ref":{"type":"git-sha","repo":"parsekit/parsekit-core","locator":"a1b2c3d"},"summary":"Add parser skeleton"}
+{"seq":4,"ts":"2030-01-02T10:15:03Z","kind":"github","ref":{"type":"pr","repo":"parsekit/parsekit-core","locator":"12"},"summary":"Open PR for parser skeleton"}
+{"seq":5,"ts":"2030-01-03T00:00:00Z","kind":"note","summary":"Waiting for review"}
+{"seq":6,"ts":"2030-01-03","kind":"doc","ref":{"type":"file","locator":"artifacts/DESIGN-parser.md"},"summary":"Draft design"}
+{"seq":7,"ts":"2030-01-03T11:30:00Z","kind":"plan","ref":{"type":"file","locator":"artifacts/PLAN-lexer.md"},"summary":"Plan for the lexer rewrite"}
+{"seq":8,"ts":"2030-01-03T11:45:00Z","kind":"event","ref":{"type":"pr","repo":"parsekit/parsekit-core","locator":"12"},"summary":"Review requested changes"}
+{"seq":9,"ts":"2030-01-03T12:00:00Z","kind":"github","summary":"Replied to review comments"}
+{"seq":10,"ts":"2030-01-03T12:10:00Z","kind":"note","summary":"Long summary that embeds a payload instead of a pointer: table of five items, each with a status, an assignee and a reason, followed by a long paragraph of explanatory prose. "}
+{"seq":11,"ts":"2030-01-04T08:00:00Z","kind":"build","ref":{"type":"environment","locator":"preview-1"},"summary":"Built the docs preview"}
+{"seq":11,"ts":"2030-01-04T08:30:00Z","kind":"run","ref":{"type":"file","locator":"scratch/bench/RUN.md"},"summary":"Ran the benchmark suite"}
+{"seq":15,"ts":"2030-01-04T08:20:00Z","kind":"note","summary":"Timestamp is earlier than the previous row"}
+{"seq":16,"ts":"2030-01-04T09:00:00Z","kind":"doc","ref":{"type":"file","locator":"/abs/path/outside/the/task.md"},"summary":"File ref is an absolute path"}
+{"seq":17,"ts":"2030-01-04T09:10:00Z","status":"done","kind":"note","summary":"Row carries an unknown top-level key"}
+{"seq":18,"ts":"2030-01-04T09:20:00Z","summary":"Row without a kind"}
+{"seq":19,"ts":"2030-01-04T09:30:00Z","kind":"comm","ref":{"type":"chat","locator":"C0000/p1"},"summary":"Posted status update"}
+{"seq":20,"ts":"2030-01-04T09:30:00Z","kind":"doc","ref":{"type":"file","locator":"artifacts/NOTES-a.md"},"summary":"Batch-written row A"}
+{"seq":21,"ts":"2030-01-04T09:30:00Z","kind":"doc","ref":{"type":"file","locator":"artifacts/NOTES-b.md"},"summary":"Batch-written row B"}
+{"seq":22,"ts":"2030-01-04T09:30:00Z","kind":"doc","ref":{"type":"file","locator":"artifacts/NOTES-c.md"},"summary":"Batch-written row C"}
+{"seq":23,"ts":"2030-01-04T10:00:00Z","kind":"decision","ref":{"type":"file","locator":"decisions.md#D9"},"summary":"Decision whose anchor does not exist"}
+{"seq":24,"ts":"2030-01-04T10:05:00Z","kind":"github","ref":{"type":"pr","repo":"parsekit/parsekit-core","locator":"13","summary":"Unclosed ref object (malformed line)"}

@@ -1,0 +1,32 @@
+id: sample-task
+title: "Sample task showing typical drift"
+status: active
+created: 2030-01-02
+tags: [sample]
+
+sources:
+  slack: context/slack-kickoff.md
+  slack: context/slack-followup.md
+  confluence: context/design-page.md
+  confluence: context/requirements-page.md
+  meeting: context/notes-weekly.md
+
+repos:
+  - repo: parsekit/parsekit-core
+    branch: "feature branch for the parser"
+    notes: "Status note: one open PR against main, the parser skeleton is merged and the lexer rewrite is pending review. Head is a1b2c3d, CI is green, release 1.2.0 is the latest tag. Two follow-up branches exist locally and have not been pushed. Keep this branch rebased on main until the rewrite lands."
+  - repo: parsekit/parsekit-cli
+    branch: task/sample-task
+    readonly: true
+
+jira:
+  snapshot: "2030-01-05"
+  tickets: [TKT-101, TKT-102]
+  state: "TKT-101 in progress, TKT-102 closed"
+
+links:
+  - https://example.com/design
+  - "see the thread from last Tuesday about naming"
+
+artifacts:
+  - artifacts/DESIGN-parser.md

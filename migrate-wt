@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+import sys
+sys.dont_write_bytecode = True
+sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
+import argparse, json, os, re, runpy, shutil, subprocess
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+AWT = os.path.join(HERE, "awt")
+SKIPN = {".git": "git metadata", "node_modules": "bulk dir", ".venv": "bulk dir", "venv": "bulk dir", "target": "bulk dir",
+         "dist": "bulk dir", "__pycache__": "bulk dir", ".flowly": "tool state"}
+BIG = 50 * 1024 * 1024
+URL = re.compile(r"https?://[^\s\"'\]\),>]+")
+OVERTURN = re.compile(r"\b(?:overturns?|overrides?|reverses|replaces|supersedes|reverts?)\s+(D\d+)\b", re.I)
+
+def cut(s, cap, ptr):
+    s = " ".join(s.split())
+    return s if len(s) <= cap else s[:cap - len(ptr) - 1].rstrip() + "~" + ptr
+
+def read(p):
+    with open(p, encoding="utf-8", errors="replace") as g:
+        return g.read()
+
+def sections(txt):
+    out, cur = {}, None
+    for ln in txt.splitlines():
+        m = re.match(r"#{1,6}\s+(.*)", ln)
+        if m:
+            cur = m.group(1).strip().lower()
+            out.setdefault(cur, [])
+        elif cur is not None:
+            out[cur].append(ln)
+    return out
+
+def first_para(txt):
+    para = []
+    for ln in txt.splitlines():
+        if ln.startswith("#") or (not para and not ln.strip()):
+            if para:
+                break
+            continue
+        if not ln.strip():
+            break
+        para.append(ln.strip())
+    return " ".join(para)
+
+class Plan:
+    def __init__(self, src, tid):
+        self.src, self.tid, self.title, self.status = src, tid, None, None
+        self.files, self.skipped, self.links, self.ops, self.problems, self.imported, self.seen = [], [], [], [], [], [], set()
+        self.dst = set()
+
+    def ref(self, target, title, kind=None, why=None):
+        if target in self.seen:
+            return
+        self.seen.add(target)
+        a = ["ref", target, "--title", cut(title, 120, "")]
+        a += ["--kind", kind] if kind else []
+        a += ["--why", cut(why, 200, "")] if why else []
+        self.ops.append(dict(argv=a, what="ref " + target))
+
+    def place(self, rel):
+        top = rel.split("/")[0]
+        if rel in ("task.yml", "decisions.md", "log.jsonl", "AGENTS.md", "HANDOFF.md"):
+            d = "legacy/" + rel
+        elif rel == "TASK.md":
+            d = "docs/TASK.md"
+        elif top == "context":
+            d = rel
+        elif top in ("artifacts", "docs") and "/" in rel:
+            d = "docs/" + rel.split("/", 1)[1]
+        elif top in ("tmp", "scratch") and "/" in rel:
+            d = "misc/old-scratch/" + rel.split("/", 1)[1]
+        else:
+            d = "misc/" + rel
+        n, stem = 1, os.path.splitext(d)
+        while d in self.dst or d == "legacy/MIGRATION.md":
+            d, n = "%s.dup%d%s" % (stem[0], n, stem[1]), n + 1
+        self.dst.add(d)
+        return d
+
+    def scan(self):
+        for dp, dns, fns in os.walk(self.src):
+            r = os.path.relpath(dp, self.src)
+            keep = []
+            for d in sorted(dns):
+                rel = os.path.normpath(os.path.join(r, d)).replace("./", "")
+                full = os.path.join(dp, d)
+                if os.path.islink(full):
+                    self.link(rel, full)
+                elif d in SKIPN:
+                    self.skipped.append((rel, SKIPN[d]))
+                elif os.path.lexists(os.path.join(full, ".git")):
+                    self.skipped.append((rel, "nested git repo"))
+                    self.ref(full, "nested repo " + rel, "nested-repo", "skipped by migration; lives at this path")
+                else:
+                    keep.append(d)
+            dns[:] = keep
+            for f in sorted(fns):
+                rel = os.path.normpath(os.path.join(r, f))
+                full = os.path.join(dp, f)
+                if os.path.islink(full):
+                    self.link(rel, full)
+                elif f == ".git":
+                    self.skipped.append((rel, "git metadata"))
+                elif not os.path.isfile(full):
+                    self.skipped.append((rel, "special file"))
+                elif os.path.getsize(full) > BIG:
+                    self.skipped.append((rel, "over 50 MB"))
+                else:
+                    self.files.append((full, self.place(rel), rel))
+
+    def link(self, rel, full):
+        t = os.readlink(full)
+        real = os.path.realpath(full)
+        if rel.startswith("refs" + os.sep) and os.path.exists(real):
+            self.ref(real, "link " + os.path.basename(rel), "link", "from legacy refs/ symlink")
+            self.links.append((rel, t, "recorded as ref"))
+        else:
+            self.links.append((rel, t, "dangling, reported only" if not os.path.exists(real) else "not followed"))
+
+    def parse(self):
+        s = self.src
+        have = lambda n: os.path.isfile(os.path.join(s, n))
+        goal = None
+        if have("TASK.md"):
+            goal = cut(first_para(read(os.path.join(s, "TASK.md"))), 250, " [docs/TASK.md]")
+        if have("task.yml"):
+            self.parse_yml(read(os.path.join(s, "task.yml")))
+        if have("decisions.md"):
+            self.parse_dec(read(os.path.join(s, "decisions.md")))
+        if have("log.jsonl"):
+            self.parse_log(read(os.path.join(s, "log.jsonl")))
+        h = next((n for n in ("AGENTS.md", "HANDOFF.md") if have(n)), None)
+        if h:
+            self.parse_handoff(h, read(os.path.join(s, h)))
+        self.goal = goal or self.title or "Migrated task " + self.tid
+        if self.status:
+            self.ops.append(dict(argv=["status", self.status], what="status " + self.status))
+
+    def parse_yml(self, txt):
+        sec = None
+        for ln in txt.splitlines():
+            m = re.match(r"([A-Za-z_][\w-]*):\s*(.*)$", ln)
+            if m:
+                sec = m.group(1)
+                v = m.group(2).split(" #")[0].strip().strip("\"'")
+                if sec == "title" and v:
+                    self.title = v
+                if sec == "status" and v:
+                    self.status = "done" if v in ("done", "archived") else None  # active is the default
+                continue
+            body = ln.strip()
+            if not body or body.startswith("#"):
+                continue
+            item = re.match(r"-\s+(.*)$", body)
+            kv = re.match(r"([\w-]+):\s*(.*)$", body)
+            clean = lambda x: x.split(" #")[0].strip().strip("\"'")
+            if sec == "repos" and kv and kv.group(1) == "repo" or sec == "repos" and item and item.group(1).startswith("repo:"):
+                v = clean(body.split("repo:", 1)[1])
+                self.ref(v, "repo " + v, "repo-ref", "task.yml repos")
+            elif sec in ("sources", "links") and (item or kv and sec == "sources"):
+                k, v = ("source", clean(item.group(1))) if item else (kv.group(1), clean(kv.group(2)))
+                if v:
+                    self.ref(v, "%s (task.yml %s)" % (k, sec), "file" if v.startswith("context/") else None)
+            for u in URL.findall(ln):
+                self.ref(u, "url in task.yml " + (sec or ""))
+
+    def parse_dec(self, txt):
+        ents = []
+        for blk in re.split(r"(?m)^(?=## )", txt):
+            m = re.match(r"## (D\d+)\b[:\s.-]*(.*)", blk)
+            if m:
+                ents.append((int(m.group(1)[1:]), m.group(1), m.group(2).strip(), blk))
+        nums = [e[0] for e in ents]
+        if nums != sorted(nums):
+            self.problems.append("decisions.md: headings not in ascending order (%s); imported in numeric order" % ", ".join(e[1] for e in ents))
+        dup = {e[1] for e in ents if [x[1] for x in ents].count(e[1]) > 1}
+        for d in sorted(dup):
+            self.problems.append("decisions.md: duplicate heading %s; every copy imported" % d)
+        ents.sort(key=lambda e: e[0])
+        done, gone = {}, set()
+        for n, lab, title, blk in ents:
+            def fld(k):
+                m = re.search(r"(?mi)^%s:\s*(.*(?:\n(?![A-Za-z]+:|##).+)*)" % k, blk)
+                return m.group(1).strip() if m else ""
+            ptr = " [legacy/decisions.md %s]" % lab
+            choice = cut(title + (". " + fld("Choice") if fld("Choice") else ""), 300, ptr)
+            why = cut("[legacy %s%s] %s" % (lab, " dup" if lab in dup else "", fld("Why") or fld("Context") or "no why in legacy"), 300, ptr)
+            sm = re.search(r"supersedes:\s*(D\d+)", blk, re.I)
+            sup = None
+            if sm:
+                t = sm.group(1).upper()
+                if t in done and t not in gone:
+                    sup = t
+                else:
+                    self.problems.append("%s supersedes %s but %s is not imported/current; no link" % (lab, t, t))
+            else:
+                for o in OVERTURN.findall(blk):
+                    if o.upper() != lab:
+                        self.problems.append("%s overturns %s in prose only (no supersedes link); not linked" % (lab, o.upper()))
+            if sup:
+                gone.add(sup)
+            done[lab] = True
+            self.ops.append(dict(argv=["decide", choice, "--why", why], sup=sup, lab=lab, what="decision " + lab))
+
+    def parse_log(self, txt):
+        for i, ln in enumerate(txt.splitlines(), 1):
+            if not ln.strip():
+                continue
+            try:
+                row = json.loads(ln)
+                r = row.get("ref") if isinstance(row, dict) else None
+                loc = r.get("locator") if isinstance(r, dict) else None
+            except Exception:
+                self.problems.append("log.jsonl line %d is malformed JSON; kept in legacy, no ref rows from it" % i)
+                continue
+            if isinstance(loc, str) and URL.match(loc):
+                self.ref(loc, "log seq %s: %s" % (row.get("seq", i), row.get("summary", "")), None, "from legacy log.jsonl")
+
+    def parse_handoff(self, name, txt):
+        sec = sections(txt)
+        pick = lambda k: " ".join(re.sub(r"<!--.*?-->", "", "\n".join(next((v for h, v in sec.items() if k in h), []))).split())
+        now, nxt = pick("carry-forward"), re.sub(r"^-\s*\[.\]\s*", "", pick("next action"))
+        if now or nxt:
+            ptr = " [legacy/%s]" % name
+            self.ops.append(dict(argv=["state", "--now", cut(now or "none recorded", 700, ptr), "--next", cut(nxt or "none recorded", 300, ptr)], what="state"))
+
+def run_awt(dest, argv):
+    r = subprocess.run([sys.executable, "-I", os.path.join(dest, "awt"), "--dir", dest, "--by", "migrate"] + argv,
+                       capture_output=True, text=True, cwd=dest)
+    return r
+
+def scan_secrets(p, pats):
+    with open(p, "rb") as g:
+        b = g.read(5000000).decode("latin-1")
+    return next((n for n, rx in pats if rx.search(b)), None)
+
+def execute(pl, dest, pats):
+    os.makedirs(dest, exist_ok=True)
+    shutil.copy2(AWT, os.path.join(dest, "awt"))
+    res = dict(copied=set(), failed=[], refused=[], secrets=[])
+    for d in ("legacy", "docs", "context", "misc"):
+        os.makedirs(os.path.join(dest, d), exist_ok=True)
+    r = run_awt(dest, ["init", "--goal", pl.goal, "--done", "migrated from legacy; see legacy/MIGRATION.md"])
+    if r.returncode:
+        res["refused"].append(("init with goal", r.stderr.strip().splitlines()[0] if r.stderr.strip() else "failed"))
+        run_awt(dest, ["init"])
+    for src, d, rel in pl.files:
+        try:
+            os.makedirs(os.path.dirname(os.path.join(dest, d)), exist_ok=True)
+            shutil.copy2(src, os.path.join(dest, d))
+            res["copied"].add(rel)
+            n = scan_secrets(src, pats)
+            if n:
+                res["secrets"].append((rel, n))
+        except OSError as e:
+            res["failed"].append((rel, "copy failed: %s" % e.strerror))
+    ids = {}
+    for op in pl.ops:
+        r = run_awt(dest, op["argv"] + (["--supersedes", ids[op["sup"]]] if op.get("sup") in ids else []))
+        m = re.match(r"(d-\w+) decided", r.stdout)
+        if m:
+            ids[op["lab"]] = m.group(1)
+        if r.returncode:
+            res["refused"].append((op["what"], (r.stderr.strip().splitlines() or ["failed"])[0]))
+    return res
+
+def report(pl, res, dest):
+    skipped = pl.skipped + res["failed"]
+    L = ["# Migration report", "", "Source: `%s`" % pl.src, "", "## Imported", "", "- %d files copied" % len(res["copied"]),
+         "- %d records written" % (len(pl.ops) - len(res["refused"])),
+         "- decisions: " + (", ".join(o["lab"] for o in pl.ops if o.get("lab")) or "none")]
+    L += ["", "## Problems", ""] + ["- " + p for p in pl.problems]
+    L += ["- awt refused `%s`: %s" % x for x in res["refused"]]
+    L += ["- file contains a secret-shaped string (%s), copied unchanged: `%s`" % (n, p) for p, n in res["secrets"]]
+    L += ["", "## Symlinks", ""] + ["- `%s` -> `%s` (%s)" % x for x in pl.links]
+    L += ["", "## Skipped", ""] + ["- `%s` -- %s" % x for x in skipped]
+    with open(os.path.join(dest, "legacy", "MIGRATION.md"), "w", encoding="utf-8") as g:
+        g.write("\n".join(L) + "\n")
+    return skipped
+
+def verify(pl, res, skipped):
+    sk, bad = [s[0] for s in skipped], []
+    for dp, dns, fns in os.walk(pl.src):
+        r = os.path.relpath(dp, pl.src)
+        cov = lambda rel: any(rel == s or rel.startswith(s + os.sep) for s in sk)
+        dns[:] = [d for d in dns if not cov(os.path.normpath(os.path.join(r, d)))]
+        for f in fns:
+            rel = os.path.normpath(os.path.join(r, f))
+            if not os.path.islink(os.path.join(dp, f)) and rel not in res["copied"] and not cov(rel):
+                bad.append(rel)
+    return bad
+
+def main():
+    ap = argparse.ArgumentParser(prog="migrate-wt")
+    ap.add_argument("old")
+    ap.add_argument("new")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    old, new = os.path.realpath(a.old), os.path.abspath(a.new)
+    if not os.path.isdir(old):
+        sys.exit("error: OLD is not a directory: " + old)
+    if os.path.exists(new) and (not os.path.isdir(new) or os.listdir(new)):
+        sys.exit("error: NEW exists and is not empty: " + new)
+    if os.path.realpath(new) == old or os.path.realpath(new).startswith(old + os.sep):
+        sys.exit("error: NEW must not be inside OLD")
+    td = os.path.join(old, "tasks")
+    isd = lambda d: os.path.isdir(os.path.join(td, d)) and not os.path.islink(os.path.join(td, d))
+    ids = sorted(filter(isd, os.listdir(td))) if os.path.isdir(td) else []
+    tracker = bool(ids)
+    plans = []
+    for i in (ids or [os.path.basename(old)]):
+        pl = Plan(os.path.join(td, i) if tracker else old, i)
+        pl.scan()
+        pl.parse()
+        plans.append(pl)
+    top = []
+    if tracker:
+        top = [(e, "outside tasks/ in tracker layout, not migrated") for e in sorted(os.listdir(old)) if e != "tasks"]
+        top += [("tasks/" + e, "not a task directory") for e in sorted(os.listdir(td)) if e not in ids]
+    if a.dry_run:
+        for pl in plans:
+            print("task %s: %d files, %d skipped, %d records" % (pl.tid, len(pl.files), len(pl.skipped), len(pl.ops)))
+            print("\n".join(["  copy %s -> %s" % (os.path.relpath(s, old), d) for s, d, _ in pl.files]
+                             + ["  skip %s (%s)" % s for s in pl.skipped] + ["  awt " + o["what"] for o in pl.ops]))
+        for s in top:
+            print("skip %s (%s)" % s)
+        return 0
+    sv = sys.path[:]
+    pats = runpy.run_path(AWT, run_name="awt_lib")["SECRETS"]
+    sys.path[:] = sv
+    os.makedirs(os.path.dirname(new), exist_ok=True)
+    tmp = new + ".migrating-%d" % os.getpid()
+    code = 0
+    try:
+        os.makedirs(tmp)
+        for pl in plans:
+            dest = os.path.join(tmp, pl.tid) if tracker else tmp
+            res = execute(pl, dest, pats)
+            bad = verify(pl, res, report(pl, res, dest))
+            if bad:
+                code = 1
+                print("error: unaccounted files in %s: %s" % (pl.tid, bad[:10]), file=sys.stderr)
+            print("task %s: %d copied, %d skipped, %d problems, %d refused" % (pl.tid, len(res["copied"]), len(pl.skipped) + len(res["failed"]), len(pl.problems), len(res["refused"])))
+        if tracker:
+            with open(os.path.join(tmp, "MIGRATION.md"), "w", encoding="utf-8") as g:
+                g.write("# Tracker migration\n\n## Skipped\n\n" + "".join("- `%s` -- %s\n" % s for s in top))
+        if os.path.isdir(new):
+            os.rmdir(new)
+        os.rename(tmp, new)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return code
+
+if __name__ == "__main__":
+    sys.exit(main())

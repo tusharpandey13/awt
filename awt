@@ -1,0 +1,1321 @@
+#!/usr/bin/env python3
+import sys
+sys.dont_write_bytecode = True
+sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
+import argparse, datetime, fcntl, hashlib, json, os, re, shlex, signal, socket, subprocess, time
+
+VERSION = "0.1.0"
+HOST = socket.gethostname()
+ROOT = None
+BY = "agent"
+ROWMAX = 4096
+TOTAL = 4400
+BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200)
+K = dict(hits=40, big=2000000, head=4096, title=60, line=160, timeout=300, margin=30, newer=8, walk=20000)
+CAPS = {
+    "task.goal": 250, "task.done_means": 250, "state.scope": 40, "state.now": 700, "state.next": 300,
+    "note.text": 280, "decision.choice": 300, "decision.why": 300, "decision.tags": 40, "question.text": 400,
+    "answer.text": 400, "ref.target": 1000, "ref.title": 120, "ref.why": 200, "ref.kind": 40, "ref.branch": 200,
+    "capture.from": 40, "capture.title": 120, "capture.ref": 1000, "doc.why": 200, "effect.target": 200,
+    "effect.why": 200, "effect.reason": 200, "effect.ref": 1000, "effect.run": 1000, "effect.snapshot": 1000,
+    "effect.verify": 1000,
+}
+REQ = {
+    "task": ["goal", "done_means"], "status": ["status"], "state": ["now", "next"], "note": ["id", "text"],
+    "decision": ["id", "choice", "why"], "question": ["id", "text"], "answer": ["ref", "text"],
+    "ref": ["target", "title", "kind", "access"], "capture": ["path", "from", "title", "sha"],
+    "doc": ["path", "action", "by_doc"], "effect": ["id", "step"],
+}
+ENUM = {"status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
+        "effect.step": ("planned", "claimed", "sent", "unknown", "dropped")}
+SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
+SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
+           "legacy", "context", "docs", "outbox", "misc"}
+IGNORE = ["scratch/", ".awt/claims/", ".awt/blobs/", ".awt/runs/"]
+SECRETS = [(n, re.compile(p)) for n, p in [
+    ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
+    ("github-pat", r"github_pat_[A-Za-z0-9_]{20,}"), ("slack-token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
+    ("sk-key", r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"), ("private-key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    ("jwt", r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")]]
+
+BLOCK_BEGIN, BLOCK_END = "<!-- awt:begin -->", "<!-- awt:end -->"
+AGENTS_BLOCK = BLOCK_BEGIN + r'''
+# Task workspace (awt)
+
+Everything about this task lives here. Keep records with `./awt`. Never hand-edit `.awt/`.
+
+**Start:** unless you are a subagent with its own brief, run `./awt resume` and follow it.
+**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel workstreams: add `--scope <name>`.
+
+| You have | Do |
+|---|---|
+| A link to something readable later (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Prefer this to copying. |
+| A link you cannot open | Still record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
+| Text with no usable link (pasted chat, meeting notes, research) | `./awt capture --from slack --title "..." [file]` |
+| A plan, ADR, result or other working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
+| A decision | `./awt decide "the choice" --why "the reason"`. Reversing one: add `--supersedes <id>` |
+| A small fact worth keeping | `./awt note "..."` |
+| A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
+| Anything else | `misc/`. Throwaway work: `scratch/`. |
+
+**Anything leaving this machine** (message, comment, PR, ticket edit, published doc) goes through the outbox. Never send it directly.
+
+1. Write the draft in `outbox/`.
+2. `./awt effect plan --target "slack:#eng" --body outbox/x.md`. Add `--run '<cmd>'` only if a command can send it.
+3. Stop and show the person. They send it or approve `./awt effect apply`. Then `./awt effect mark <id> sent`.
+
+Effect state `unknown` means it may have been sent. Never resend, use `--again` or mark it. Ask a person.
+
+**Find things:** `./awt list`, `./awt find "term"`. Check before asking.
+**Stuck or refused:** read the `fix:` line, then `./awt help agents`.
+**Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
+''' + BLOCK_END + "\n"
+README = '''# {goal}
+
+Workspace for one piece of agent-operated work, managed by [awt](https://github.com/tusharpandey13/awt).
+
+- `./awt resume`: where things stand
+- `./awt list`, `./awt find <term>`: everything known about this task
+- `context/` inbound material, `docs/` working docs, `outbox/` drafts going out, `misc/` the rest, `scratch/` throwaway
+- `./awt effect mark <id> sent` after you send something from `outbox/`
+'''
+SETTINGS = '''{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt resume --hook" } ] }
+    ]
+  },
+  "permissions": {
+    "ask": [ "Bash(./awt effect apply *)", "Bash(awt effect apply *)" ]
+  }
+}
+'''
+AGENT_REF = r'''# awt agent reference
+
+Lookup only. Search for the refusal text or the verb. Commands run from the task root as `./awt`.
+
+## Which command
+
+| Situation | Command |
+|---|---|
+| Starting, not a subagent | `./awt resume` |
+| Need to know if it is already recorded | `./awt find "term"` |
+| List one kind of thing | `./awt list refs` (also context docs outbox misc decisions questions effects notes state) |
+| See old/superseded/answered/terminal items | `./awt list decisions --all` |
+| Small fact for later, not a decision | `./awt note "text"` |
+| Choice that replaces an earlier choice | `./awt decide "new" --why "r" --supersedes d-7f3a9c21` |
+| Choice every later agent must obey | `./awt decide "..." --why "..." --tag rule` |
+| Text too long for a field | Write `docs/<name>.md`, then reference its path in the field |
+| Slack/chat you can only see pasted | `./awt capture --from slack --title "t" notes.txt` |
+| Same content on stdin | `./awt capture --from slack --title "t" -` |
+| Doc replaced by a better one | `./awt supersede docs/old.md docs/new.md --why "r"` |
+| Sent message may have failed | `./awt effect show <id>`, then ask a person |
+| Check workspace health | `./awt doctor` |
+| Commit the task dir (person asked) | `./awt save "message"` |
+| Task finished | `./awt status done` |
+
+## Syntax
+
+```
+./awt state --now "T" --next "T" [--scope S]
+./awt note "T"
+./awt decide "CHOICE" --why "T" [--supersedes ID] [--tag T]...
+./awt ask "T"
+./awt answer q-1a2b3c4d "T"
+./awt ref TARGET --title "T" [--why "T"] [--kind K] [--no-access]
+./awt capture --from SRC --title "T" [--ref URL] [FILE]
+./awt supersede docs/old.md docs/new.md [--why "T"]
+./awt status active|paused|done
+./awt find "term"
+./awt effect plan --target T (--body FILE | --run CMD) [--class additive|overwrite] [--snapshot CMD] [--verify CMD] [--after ID]... [--again] [--why T]
+./awt effect show ID
+./awt effect apply ID --target T [--timeout SECONDS]
+./awt effect mark ID sent|not-sent|dropped [--ref URL] [--why T]
+```
+
+Example, manual Slack message (normal case):
+
+```
+./awt effect plan --target "slack:#eng" --body outbox/release-note.md
+./awt effect mark e-3c91d0aa sent --ref https://example.slack.com/archives/C1/p1
+```
+
+Example, scripted send with check:
+
+```
+./awt effect plan --target "jira:TKT-1" --body outbox/c.md --run 'jira-cli comment TKT-1 "$(cat "$AWT_BODY")"' --verify 'jira-cli show TKT-1 | grep -q done'
+```
+
+`apply` is gated by a permission prompt for a person. Do not run it without approval. Each `plan` prints the exact next command: copy it.
+
+## Refusals
+
+Every refusal prints `error:` and `fix:`. Read the `fix:` first.
+
+| Refusal | Meaning | Do |
+|---|---|---|
+| Text over cap | Field too long. Nothing was written. | Write detail to `docs/<name>.md`; put a short summary and the path in the field. Do not split into many rows. |
+| Empty text | Blank after strip. | Supply text. |
+| Identical state | `state` for that scope matches the current one. | Nothing to record. Move on. If work changed, say what changed. |
+| Secret match (names a pattern) | A field holds a credential. Nothing written. No bypass exists. | Remove the secret, refer to it by name or location. If you cannot tell where it is, STOP and ask a person. |
+| Unknown id (exit 4) | Wrong id for `answer`, `--supersedes`, `--after`, `effect`. | `./awt list <section>` and copy the id. |
+| Already answered / already superseded | Duplicate action. | Use the current id the `fix:` names. |
+| Path escapes the root | `--body` or `supersede` path resolves outside the task dir. | Copy the file into `outbox/` or `docs/` and retry. |
+| `apply`: target mismatch | `--target` differs from the plan. | Re-run with the exact target from `effect show`. Never edit the plan to match. |
+| `apply`: body changed | Body file edited after planning. | Re-plan. Show the person the new body: they approved the old one. |
+| `apply`: manual effect | No `--run`. A person sends. | Show the body path, wait, then `effect mark <id> sent`. |
+| `apply`: `--after` not sent | A prerequisite is not `sent`. | Resolve that effect first. |
+| `plan`: open `unknown` on target | An earlier send on this target may have happened. | STOP and ask a person. Do not add `--again`. |
+| `plan`: same key, dropped | Person dropped this exact send. | Only if a person wants it again: `--again`. |
+| `overwrite` without `--snapshot` | No way back. | Add `--snapshot CMD`, or ask whether the action should be `additive`. |
+| `status done` refused | Lists open questions and effects (`planned`, `claimed`, `unknown`). | Resolve each. For questions, a person must answer. For `unknown`, STOP and ask. Never mark `sent` or `dropped` to get past it. |
+| `mark`: effect is `claimed`, pid alive | A send is running now. | Wait. |
+| Exit 3 | No write permission. | Give the printed command to a person. |
+| Exit 4, no `.awt/` | Not in a task. | `cd` to the task dir or pass `--dir`. Do not run `init` unless told. |
+
+## Effect states
+
+| State | You may | You must not |
+|---|---|---|
+| `planned` | Show the person; wait for approval; `mark dropped` if the person cancels | Send it yourself |
+| `claimed` | Wait | `mark` anything |
+| `sent` | Proceed; cite `--ref` if known | Plan the same send again |
+| `unknown` | Run `effect show <id>`, report to a person, wait for them | Resend. Plan on that target. Mark it yourself. Run `status done`. |
+| `dropped` | Move on | Revive without a person asking |
+| `conflict` | Report to a person | Mark it |
+
+`unknown` means the message may already be out. Resending can duplicate it. Only a person who has checked the real target may run `mark <id> sent` or `mark <id> not-sent`. `not-sent` makes it `planned` again for another attempt; the person decides that, not you.
+
+`--again` is not a retry. It creates a new, separate send that bypasses the duplicate check. A failed or `unknown` send is never retried with `--again`. Use it only when a person wants a deliberate second identical message.
+
+## Subagents
+
+Worker, with a brief:
+- Skip `./awt resume`. Read the brief.
+- Write output to `docs/<brief>.out.md`. Never name a file starting with REPORT, SUMMARY, FINDINGS or ANALYSIS: Claude Code refuses those for subagents.
+- Use `note`, `decide`, `ref`, `capture`, `ask`: parallel writes are safe.
+- Do not run `state`, `status`, `effect apply` or `effect mark`. Do not write a handoff.
+- Plan effects only if the brief says so. Never send.
+
+Orchestrator:
+- Owns `state` and `status`. Run `./awt state` once after collecting worker output, with `--next` naming the next step.
+- Links worker files from `state` text by path (`docs/<brief>.out.md`).
+
+## Big tasks: relay
+
+If `./relay` exists and the work splits into parts, do not run them all in one session. Write a plan file (`./relay help` shows the format) with small units, a cheap model for reading, and a `check` command wherever a test can decide. Show the person the plan and `./relay run <plan>`, then stop. Afterwards `./awt resume` shows the result. Workers cannot send anything.
+
+## Wrong moves
+
+- Editing or deleting anything under `.awt/`. Use verbs. A bad row is quarantined, not fatal.
+- Copying a page or thread you can link: use `ref`. Use `capture` only when no link works.
+- Writing a second handoff such as `docs/HANDOFF.md`. `state` is the handoff.
+- Sending directly (curl, `gh`, `slack` CLI, API call) instead of through `effect`.
+- Putting long text in `--now`, `--why`, `note`. Write `docs/`, reference the path.
+- Using `--again` or a fresh `plan` to get around an `unknown` effect.
+- Re-asking or re-researching without `./awt find` first.'''
+
+USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
+  init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
+  state --now T --next T      note T                   decide C --why T         ask T
+  answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
+  supersede OLD NEW           status active|paused|done
+  effect plan|show|apply|mark doctor                   save MESSAGE
+exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
+agent reference: awt help agents"""
+
+
+# ---------- basics ----------
+def die(msg, fix=None, code=1):
+    print("error: " + msg, file=sys.stderr)
+    if fix:
+        print("fix: " + fix, file=sys.stderr)
+    sys.exit(code)
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def epoch(ts):
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0
+
+
+def ago(ts):
+    s = max(0, int(time.time() - epoch(ts)))
+    return "just now" if s < 60 else "%dm ago" % (s // 60) if s < 3600 else "%dh ago" % (s // 3600) if s < 86400 else "%dd ago" % (s // 86400)
+
+
+def sha(b):
+    return hashlib.sha256(b).hexdigest()
+
+
+def secret(s):
+    return next((n for n, rx in SECRETS if rx.search(s)), None)
+
+
+def new_id(p):
+    return "%s-%s" % (p, os.urandom(4).hex())
+
+
+def P(*a):
+    return os.path.join(ROOT, *a)
+
+
+def out(s):
+    print(s)
+
+
+def inside(path):
+    p = os.path.realpath(path)
+    if not os.path.lexists(path) and not os.path.isabs(path):
+        p = os.path.realpath(P(path))
+    if p != ROOT and not p.startswith(ROOT + os.sep):
+        die("path escapes the task root: " + path, "keep it inside " + ROOT)
+    return p
+
+
+def rel(p):
+    return os.path.relpath(p, ROOT)
+
+
+def cwd():
+    try:
+        return os.path.realpath(os.getcwd())
+    except OSError:
+        return None
+
+
+def realdir(d):
+    if os.path.realpath(P(d)) != P(d):
+        die("%s/ is a symlink or sits behind one" % d, "replace it with a real directory inside " + ROOT)
+
+
+def find_root(explicit=None):
+    c = explicit or os.environ.get("AWT_DIR")
+    if c:
+        c = os.path.realpath(os.path.expanduser(c))
+        return c if os.path.isdir(os.path.join(c, ".awt")) else None
+    d = os.path.dirname(os.path.realpath(__file__))
+    if os.path.isdir(os.path.join(d, ".awt")):
+        return d
+    d = cwd()
+    while d:
+        if os.path.isdir(os.path.join(d, ".awt")):
+            return d
+        if os.path.dirname(d) == d:
+            return None
+        d = os.path.dirname(d)
+
+
+# ---------- the one writer ----------
+def check(typ, f):
+    for k in REQ[typ]:
+        if k not in f:
+            die("%s needs %s" % (typ, k), "give a value for " + k, 2)
+    for k, v in f.items():
+        for s in (v if isinstance(v, list) else [v]):
+            if not isinstance(s, str):
+                continue
+            try:
+                s.encode("utf-8")
+            except UnicodeEncodeError:
+                die("%s.%s is not valid UTF-8" % (typ, k), "pass UTF-8 text")
+            if not s.strip():
+                die("%s.%s is empty" % (typ, k), "give it a value")
+            cap = CAPS.get("%s.%s" % (typ, k))
+            if cap and len(s) > cap:
+                die("%s.%s is %d chars, cap is %d" % (typ, k, len(s), cap),
+                    "put the detail in docs/ and reference it from a shorter text")
+            n = secret(s)
+            if n:
+                die("%s.%s matches secret pattern %s" % (typ, k, n), "remove the secret; reference where it lives instead")
+
+
+def emit(typ, **f):
+    f = {k: v for k, v in f.items() if v is not None}
+    check(typ, dict(f, by=BY))
+    row = dict(v=1, ts=now(), type=typ, host=HOST, by=BY)
+    row.update(f)
+    data = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(data) > ROWMAX:
+        die("event is %d bytes, max %d" % (len(data), ROWMAX), "put the detail in docs/ and reference it")
+    p = P(".awt", "events.jsonl")
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        with open(p, "rb") as g:
+            if g.seek(0, 2):
+                g.seek(-1, 2)
+                if g.read(1) != b"\n":
+                    data = b"\n" + data
+        if os.write(fd, data) != len(data):
+            die("short write to events.jsonl", "check disk space and rerun")
+    finally:
+        os.close(fd)
+    return row
+
+
+# ---------- the one reader ----------
+def valid(r):
+    if not isinstance(r, dict):
+        return False
+    for k, v in r.items():
+        if k in ("v", "attempt", "pid", "timeout"):
+            ok = type(v) is int
+        elif k in ("tags", "after"):
+            ok = isinstance(v, list) and all(isinstance(x, str) for x in v)
+        else:
+            ok = isinstance(v, str)
+        if not ok:
+            return False
+    t = r.get("type")
+    if "ts" not in r or t not in REQ or any(k not in r for k in REQ[t]):
+        return False
+    for k, vals in ENUM.items():
+        if k.split(".")[0] == t and r.get(k.split(".")[1]) not in vals:
+            return False
+    try:
+        json.dumps(r, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def claim_path(e):
+    return P(".awt", "claims", "%s.%s" % (e["key"], e["attempt"]))
+
+
+def alive(e):
+    pid = e.get("pid")
+    if e.get("chost") != HOST or not isinstance(pid, int) or not 0 < pid < 2 ** 31:
+        return False
+    if time.time() > e["cts"] + e["to"] + K["margin"]:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def fold_effect(D, r):
+    i, s, n = r["id"], r["step"], r.get("attempt", 1)
+    e = D["eff"].get(i)
+    if e is None:
+        if s != "planned" or not r.get("target") or not r.get("key"):
+            return False
+        e = D["eff"][i] = dict(r, attempt=n, hist=[], claims=0, manual=not r.get("run"))
+    else:
+        cur, crashed = e["step"], e["step"] == "planned" and os.path.exists(claim_path(e))
+        if s == "planned":
+            ok = n == e["attempt"] + 1 and (cur in ("unknown", "claimed") or crashed)
+        else:
+            ok = n == e["attempt"] and (
+                (s == "claimed" and cur in ("planned", "claimed") and not e["manual"])
+                or (s == "sent" and (cur == "unknown" or cur == "claimed" or (cur == "planned" and (e["manual"] or crashed))))
+                or (s == "unknown" and cur == "claimed") or (s == "dropped" and cur == "planned"))
+        if not ok:
+            return False
+        e["attempt"] = n
+        if s == "planned":
+            e["claims"] = 0
+    e["step"] = s
+    if s == "claimed":
+        e["claims"] += 1
+        e["pid"], e["chost"], e["cts"], e["to"] = r.get("pid"), r.get("host"), epoch(r["ts"]), r.get("timeout", K["timeout"])
+    e["hist"].append(r)
+    return True
+
+
+def derive(e):
+    s = e["step"]
+    if s == "claimed":
+        return "conflict" if e["claims"] > 1 else "claimed" if alive(e) else "unknown"
+    if s == "planned" and os.path.exists(claim_path(e)):
+        return "unknown"
+    return s
+
+
+def load():
+    unread = None
+    try:
+        with open(P(".awt", "events.jsonl"), "rb") as g:
+            raw = g.read()
+    except FileNotFoundError:
+        raw = b""
+    except OSError as x:
+        raw, unread = b"", x.strerror or str(x)
+    rows, bad, bad_lines = [], 0, []
+    for n, ln in enumerate(raw.split(b"\n"), 1):
+        if not ln.strip():
+            continue
+        try:
+            r = json.loads(ln.decode("utf-8"))
+        except (ValueError, RecursionError):
+            bad += 1
+            bad_lines.append(n)
+            continue
+        if valid(r):
+            rows.append(r)
+        else:
+            bad += 1
+            bad_lines.append(n)
+    D = dict(rows=rows, task=None, status="active", states={}, hist=[], notes=[], dec={}, sup={}, q={}, ans={},
+             refs={}, caps=[], docs=[], eff={}, bad_lines=bad_lines, unread=unread)
+    for r in rows:
+        t = r["type"]
+        if t == "task":
+            D["task"] = r
+        elif t == "status":
+            D["status"] = r["status"]
+        elif t == "state":
+            D["states"].pop(r.get("scope", "main"), None)
+            D["states"][r.get("scope", "main")] = r
+            D["hist"].append(r)
+        elif t == "note":
+            D["notes"].append(r)
+        elif t == "decision":
+            D["dec"][r["id"]] = r
+            if "supersedes" in r:
+                D["sup"][r["supersedes"]] = r["id"]
+        elif t == "question":
+            D["q"][r["id"]] = r
+        elif t == "answer":
+            D["ans"].setdefault(r["ref"], r)
+        elif t == "ref":
+            D["refs"][r["target"]] = r
+        elif t == "capture":
+            D["caps"].append(r)
+        elif t == "doc":
+            D["docs"].append(r)
+        elif t == "effect" and not fold_effect(D, r):
+            bad += 1
+    for e in D["eff"].values():
+        e["state"] = derive(e)
+    D["bad"] = bad
+    D["open_q"] = [q for i, q in D["q"].items() if i not in D["ans"]]
+    D["cur_dec"] = [d for i, d in D["dec"].items() if i not in D["sup"]]
+    return D
+
+
+def current_superseder(D, i):
+    while i in D["sup"]:
+        i = D["sup"][i]
+    return i
+
+
+def get_eff(D, i):
+    if i not in D["eff"]:
+        die("no effect " + i, "./awt list effects", 4)
+    return D["eff"][i]
+
+
+# ---------- filesystem views ----------
+def entries(tops):
+    res = []
+    for top in tops:
+        p = P(top)
+        if os.path.islink(p) or os.path.isfile(p):
+            res.append(top)
+            continue
+        for dp, dns, fns in os.walk(p):
+            dns[:] = sorted(d for d in dns if d != ".git")
+            for n in list(dns):
+                if os.path.islink(os.path.join(dp, n)):
+                    dns.remove(n)
+                    res.append(rel(os.path.join(dp, n)))
+            res += [rel(os.path.join(dp, n)) for n in fns]
+    return sorted(res)
+
+
+def section_files(name, all_):
+    if name == "misc":
+        tops = ["misc", "legacy"] + sorted(n for n in os.listdir(ROOT) if n not in SKIPTOP)
+    else:
+        tops = [name]
+    res = entries([t for t in tops if os.path.lexists(P(t))])
+    if not all_:
+        res = [x for x in res if not x.startswith("docs/_superseded/")]
+    return res
+
+
+def file_title(path, caps):
+    p = P(path)
+    if os.path.islink(p):
+        return "-> " + os.readlink(p)
+    if path in caps:
+        return caps[path][:K["title"]]
+    if not os.path.isfile(p):
+        return "(not a regular file)"
+    try:
+        with open(p, "rb") as g:
+            b = g.read(K["head"])
+    except OSError:
+        return "(unreadable)"
+    if b"\0" in b:
+        return "(binary)"
+    lines = [x.strip() for x in b.decode("utf-8", "replace").splitlines() if x.strip()]
+    h = next((x for x in lines if x.startswith("# ")), lines[0] if lines else "")
+    return h.lstrip("# ")[:K["title"]] if h.startswith("# ") else h[:K["title"]]
+
+
+def newer_files(since):
+    found, seen = [], 0
+    for dp, dns, fns in os.walk(ROOT):
+        dns[:] = [d for d in dns if d != ".git" and not (dp == ROOT and d in (".awt", "scratch"))]
+        for n in fns:
+            seen += 1
+            try:
+                m = os.lstat(os.path.join(dp, n)).st_mtime
+            except OSError:
+                continue
+            if m > since:
+                found.append((m, rel(os.path.join(dp, n))))
+        if seen > K["walk"]:
+            break
+    return [p for _, p in sorted(found, reverse=True)]
+
+
+def git(path, *args):
+    return subprocess.run(["git", "-C", path] + list(args), capture_output=True, text=True, timeout=10)
+
+
+# ---------- brief and listing ----------
+def cut(s, n=None):
+    n = n or K["line"]
+    return s if len(s) <= n else s[:n - 1] + "~"
+
+
+def fit(head, lines, key, sect):
+    budget, o, n = BUDGET[key], [head], len(head) + 1
+    reserve = len("+999 more: ./awt list " + sect) + 1
+    for i, ln in enumerate(lines):
+        if n + len(ln) + 1 + (reserve if i < len(lines) - 1 else 0) > budget:
+            o.append("+%d more: ./awt list %s" % (len(lines) - i, sect))
+            break
+        o.append(ln)
+        n += len(ln) + 1
+    return "\n".join(o) + "\n"
+
+
+def eff_next(e):
+    q = shlex.quote
+    if e["state"] == "planned":
+        return ("./awt effect apply %s --target %s" % (e["id"], q(e["target"]))) if e.get("run") else \
+            ("send %s by hand, then ./awt effect mark %s sent" % (e.get("body", "it"), e["id"]))
+    return "ask a person, then ./awt effect mark %s sent|not-sent  (see ./awt effect show %s)" % (e["id"], e["id"])
+
+
+def brief(scope=None):
+    D, o = load(), []
+    t = D["task"]
+    o.append(fit("# awt task", ["Goal: " + cut(t["goal"], 250), "Done means: " + cut(t["done_means"], 250), "Status: " + D["status"]]
+                 if t else ["Goal: (none recorded) ./awt init --goal \"...\" --done \"...\"", "Status: " + D["status"]], "goal", "state"))
+    sts = sorted(reversed(list(D["states"].values())), key=lambda r: not scope or r.get("scope", "main") == scope, reverse=True)
+    if sts:
+        s = sts[0]
+        o.append(fit("## State", ["[%s] %s\nnow: %s\nnext: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"])] +
+                     ["[%s] %s: %s" % (x.get("scope", "main"), ago(x["ts"]), cut(x["now"], 100)) for x in sts[1:]], "state", "state"))
+    if D["open_q"]:
+        o.append(fit("## Open questions", ["%s: %s" % (q["id"], cut(q["text"])) for q in D["open_q"]], "questions", "questions"))
+    att = [e for e in D["eff"].values() if e["state"] in ("planned", "unknown", "conflict")]
+    if att:
+        o.append(fit("## Effects needing attention", [cut("%s %s %s: %s" % (e["id"], e["state"], e["target"], eff_next(e))) for e in att], "effects", "effects"))
+    ch = []
+    if sts:
+        since = epoch(sts[0]["ts"])
+        nf = newer_files(since)
+        if nf:
+            ch += ["%d files newer than state:" % len(nf)] + ["  " + cut(x) for x in nf[:K["newer"]]]
+        for r in D["refs"].values():
+            if r["kind"] == "repo" and r.get("host") == HOST and r.get("path"):
+                try:
+                    lg = git(r["path"], "log", "--since=%d" % int(since), "--format=%s", "-n", "5")
+                    dirty = git(r["path"], "status", "--porcelain")
+                    if lg.returncode or dirty.returncode:
+                        raise OSError("git failed")
+                    subj = [x for x in lg.stdout.splitlines() if x]
+                    ch.append(cut("repo %s: %d new commits%s; %d dirty" % (os.path.basename(r["path"]), len(subj), (" (" + "; ".join(subj) + ")") if subj else "", len(dirty.stdout.splitlines()))))
+                except Exception:
+                    ch.append("repo %s: git unavailable (degraded)" % os.path.basename(r["path"]))
+    else:
+        ch.append("No state yet; cannot tell what changed.")
+    o.append(fit("## Changes since newest state", ch, "changes", "context"))
+    if D["cur_dec"]:
+        ds = D["cur_dec"][::-1]
+        ds.sort(key=lambda d: "rule" not in (d.get("tags") or []))
+        o.append(fit("## Decisions", ["%s %s%s" % (d["id"], "[rule] " if "rule" in (d.get("tags") or []) else "", cut(d["choice"], 120)) for d in ds], "decisions", "decisions"))
+    refs = list(D["refs"].values())
+    inv = "Inventory: %d refs (%d no-access), " % (len(refs), sum(r["access"] == "none" for r in refs)) + ", ".join(
+        "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))
+    if D["bad"]:
+        inv += "; %d quarantined rows" % D["bad"]
+    o.append(fit("## More", [cut(inv, 140), "./awt list | ./awt find <term>"] + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % D["unread"]] if D["unread"] else []), "inventory", "state"))
+    if not sts:
+        o.append('No handoff yet. Before stopping: ./awt state --now "..." --next "..."\n')
+    return "".join(o)
+
+
+def listing(name, D, all_):
+    if name in ("context", "docs", "outbox", "misc"):
+        caps = {c["path"]: c["title"] for c in D["caps"]}
+        est = {e["body"]: e["state"] for e in D["eff"].values() if e.get("body")}
+        return [("%s  %s" % (f, file_title(f, caps))).rstrip() + ("  [%s]" % est[f] if f in est else "") if not os.path.islink(P(f))
+                else "%s %s" % (f, file_title(f, caps)) for f in section_files(name, all_)]
+    if name == "refs":
+        return ["%s [%s%s] %s  %s" % (r["kind"], r["access"], ", " + r["path"] + "@" + r.get("branch", "") if r["kind"] == "repo" else "", r["title"], r["target"]) for r in D["refs"].values()]
+    if name == "decisions":
+        return ["%s%s %s -- %s" % (d["id"], " [%s]" % ",".join(d["tags"]) if d.get("tags") else "", d["choice"], d["why"]) + (" (superseded by %s)" % current_superseder(D, d["id"]) if d["id"] in D["sup"] else "")
+                for d in D["dec"].values() if all_ or d["id"] not in D["sup"]]
+    if name == "questions":
+        return ["%s %s" % (q["id"], q["text"]) + (" => " + D["ans"][i]["text"] if i in D["ans"] else "") for i, q in D["q"].items() if all_ or i not in D["ans"]]
+    if name == "effects":
+        return ["%s %s %s attempt=%s%s" % (e["id"], e["state"], e["target"], e["attempt"], " body=" + e["body"] if e.get("body") else "")
+                for e in D["eff"].values() if all_ or e["state"] not in ("sent", "dropped")]
+    if name == "notes":
+        return ["%s %s" % (n["id"], n["text"]) for n in D["notes"]]
+    rows = D["hist"] if all_ else list(D["states"].values())
+    return ["[%s] %s now: %s | next: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"]) for s in rows]
+
+
+# ---------- verbs ----------
+def create(path, text):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as g:
+        g.write(text)
+    return True
+
+
+def find_claude_md(d):
+    home = os.path.realpath(os.path.expanduser("~/.claude"))
+    while True:
+        if os.path.realpath(d) != home and os.path.isfile(os.path.join(d, "CLAUDE.md")):
+            return os.path.join(d, "CLAUDE.md")
+        if os.path.dirname(d) == d:
+            return None
+        d = os.path.dirname(d)
+
+
+def cmd_init(a):
+    global ROOT
+    ROOT = a.dir or os.environ.get("AWT_DIR") or cwd()
+    if not ROOT:
+        die("the current directory no longer exists", "cd to a real directory or pass --dir PATH")
+    ROOT = os.path.realpath(os.path.expanduser(ROOT))
+    if bool(a.goal) != bool(a.done):
+        die("--goal and --done go together", "give both", 2)
+    for d in ("context", "docs", "outbox", "misc", "scratch", ".awt/claims", ".awt/blobs", ".awt/runs"):
+        os.makedirs(P(d), exist_ok=True)
+    os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
+    made = []
+    ag = P("AGENTS.md")
+    if not os.path.exists(ag):
+        create(ag, AGENTS_BLOCK)
+        made.append("AGENTS.md")
+    else:
+        with open(ag, encoding="utf-8", errors="replace") as g:
+            txt = g.read()
+        if BLOCK_BEGIN not in txt:
+            with open(ag, "a", encoding="utf-8") as g:
+                g.write(("" if not txt or txt.endswith("\n") else "\n") + "\n" + AGENTS_BLOCK)
+            made.append("AGENTS.md(block)")
+    t = load()["task"]
+    if create(P("README.md"), README.format(goal=(a.goal or (t or {}).get("goal") or "Task workspace").splitlines()[0])):
+        made.append("README.md")
+    gi = P(".gitignore")
+    have = open(gi, encoding="utf-8", errors="replace").read() if os.path.exists(gi) else ""
+    miss = [x for x in IGNORE if x not in have.splitlines()]
+    if miss:
+        with open(gi, "a", encoding="utf-8") as g:
+            g.write(("" if not have or have.endswith("\n") else "\n") + "\n".join(miss) + "\n")
+        made.append(".gitignore")
+    os.makedirs(P(".claude"), exist_ok=True)
+    if create(P(".claude", "settings.json"), SETTINGS):
+        made.append(".claude/settings.json")
+    else:
+        print("note: .claude/settings.json exists; merge this snippet yourself:\n" + SETTINGS)
+    cm = find_claude_md(ROOT)
+    if cm:
+        print("warning: %s exists; Claude Code may then skip AGENTS.md. Add the line @AGENTS.md to it." % cm, file=sys.stderr)
+    if a.goal and (not t or (t["goal"], t["done_means"]) != (a.goal, a.done)):
+        emit("task", goal=a.goal, done_means=a.done)
+        made.append("task")
+    out("init %s: %s" % (ROOT, " ".join(made) or "nothing to change"))
+
+
+def cmd_resume(a):
+    if a.hook:
+        try:
+            r = find_root(a.dir)
+            if r:
+                globals()["ROOT"] = r
+                sys.stdout.write(brief())
+        except BaseException as x:
+            if isinstance(x, KeyboardInterrupt):
+                raise
+        return
+    sys.stdout.write(brief(getattr(a, "scope", None)))
+
+
+def cmd_list(a):
+    D = load()
+    for s in ([a.section] if a.section else SECTIONS):
+        ls = listing(s, D, a.all)
+        out("## %s (%d)" % (s, len(ls)))
+        for x in ls:
+            out(x)
+
+
+def cmd_find(a):
+    term, hits = a.term.lower(), []
+
+    def snip(text, i):
+        return text[max(0, i - 40):i + 80].replace("\n", " ")
+
+    for r in load()["rows"]:
+        text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by"))
+        i = text.lower().find(term)
+        if i >= 0:
+            hits.append("event:%s: %s" % (r.get("id") or r["type"], snip(text, i)))
+    me = os.path.realpath(__file__)
+    for dp, dns, fns in os.walk(ROOT):
+        dns[:] = sorted(d for d in dns if d not in (".git", "scratch") and not (dp == ROOT and d == ".awt") and not os.path.islink(os.path.join(dp, d)))
+        for n in sorted(fns):
+            p = os.path.join(dp, n)
+            if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n == "awt"):
+                continue
+            try:
+                if not os.path.isfile(p) or os.path.getsize(p) > K["big"]:
+                    continue
+                with open(p, "rb") as g:
+                    b = g.read()
+            except OSError:
+                continue
+            if b"\0" in b:
+                continue
+            for ln, line in enumerate(b.decode("utf-8", "replace").splitlines(), 1):
+                i = line.lower().find(term)
+                if i >= 0:
+                    hits.append("%s:%d: %s" % (rel(p), ln, snip(line, i)))
+    for h in hits[:K["hits"]]:
+        out(h)
+    if len(hits) > K["hits"]:
+        out("+%d more" % (len(hits) - K["hits"]))
+
+
+def cmd_state(a):
+    scope = a.scope or "main"
+    cur = load()["states"].get(scope)
+    if cur and cur["now"] == a.now and cur["next"] == a.next:
+        die("state for scope %s is unchanged" % scope, "change --now or --next, or skip the update")
+    emit("state", scope=scope, now=a.now, next=a.next)
+    out("state %s updated" % scope)
+
+
+def cmd_note(a):
+    i = new_id("n")
+    emit("note", id=i, text=a.text)
+    out(i + " noted")
+
+
+def cmd_decide(a):
+    D = load()
+    if a.supersedes:
+        if a.supersedes not in D["dec"]:
+            die("unknown decision " + a.supersedes, "./awt list decisions --all", 4)
+        if a.supersedes in D["sup"]:
+            die("%s is already superseded" % a.supersedes, "supersede the current one: --supersedes " + current_superseder(D, a.supersedes))
+    i = new_id("d")
+    emit("decision", id=i, choice=a.choice, why=a.why, supersedes=a.supersedes, tags=a.tag)
+    out(i + " decided")
+
+
+def cmd_ask(a):
+    i = new_id("q")
+    emit("question", id=i, text=a.text)
+    out(i + " asked")
+
+
+def cmd_answer(a):
+    D = load()
+    if a.id not in D["q"]:
+        die("unknown question " + a.id, "./awt list questions", 4)
+    if a.id in D["ans"]:
+        die(a.id + " is already answered", "ask a new question with ./awt ask")
+    emit("answer", ref=a.id, text=a.text)
+    out(a.id + " answered")
+
+
+def infer_kind(t):
+    lt = t.lower()
+    host = re.sub(r"^\w+://", "", lt).split("/")[0]
+    if os.path.exists(os.path.join(os.path.expanduser(t), ".git")):
+        return "repo"
+    if "slack.com" in lt:
+        return "slack"
+    if "atlassian.net/wiki" in lt or "confluence" in lt:
+        return "confluence"
+    if "atlassian.net/browse" in lt or "jira" in host or re.fullmatch(r"[A-Z]+-[0-9]+", t):
+        return "jira"
+    if "/pull/" in lt or "/merge_requests/" in lt:
+        return "pr"
+    return "link" if re.match(r"^\w+://", lt) else "other"
+
+
+def cmd_ref(a):
+    kind = a.kind or infer_kind(a.target)
+    extra = {}
+    if kind == "repo":
+        p = os.path.abspath(os.path.expanduser(a.target))
+        try:
+            br = git(p, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "unknown"
+        except Exception:
+            br = "unknown"
+        extra = dict(path=p, branch=br)
+    emit("ref", target=a.target, title=a.title, kind=kind, why=a.why, access="none" if a.no_access else "ok", **extra)
+    out("ref %s %s" % (kind, a.target))
+
+
+def cmd_capture(a):
+    if a.file and a.file != "-":
+        try:
+            with open(a.file, "rb") as g:
+                raw = g.read()
+        except OSError as x:
+            die("cannot read %s: %s" % (a.file, x.strerror), "give a readable FILE, or pipe the text in", 4)
+    else:
+        raw = sys.stdin.buffer.read()
+    body, n = raw.decode("utf-8", "replace").strip(), 0
+    if not body:
+        die("capture body is empty", "pipe the text in or pass FILE")
+    for name, rx in SECRETS:
+        body, k = rx.subn("[REDACTED:%s]" % name, body)
+        n += k
+    h = sha(body.encode("utf-8"))
+    D = load()
+    for c in D["caps"]:
+        if c["sha"] == h:
+            return out("%s already captured (no change)" % c["path"])
+    slug = re.sub(r"[^a-z0-9]+", "-", a.title.lower()).strip("-")[:50].strip("-") or "capture"
+    base = time.strftime("%Y%m%d", time.gmtime()) + "-" + slug
+    path, i = "context/%s.md" % base, 1
+    while os.path.exists(P(path)):
+        i += 1
+        path = "context/%s-%d.md" % (base, i)
+    check("capture", dict(path=path, **{"from": a.from_, "title": a.title, "sha": h}, **({"ref": a.ref} if a.ref else {})))
+    head = "---\nsource: %s\ntitle: %s\ncaptured: %s\nref: %s\n---\n\n" % (a.from_, a.title, now(), a.ref or "")
+    realdir("context")
+    tmp = P("context", ".tmp-" + os.urandom(4).hex())
+    create(tmp, head + body + "\n")
+    os.rename(tmp, P(path))
+    emit("capture", path=path, title=a.title, sha=h, ref=a.ref, **{"from": a.from_})
+    out("%s captured%s" % (path, " (%d secrets redacted)" % n if n else ""))
+
+
+def cmd_supersede(a):
+    old, new = inside(a.old), inside(a.new)
+    for p in (old, new):
+        if not p.startswith(P("docs") + os.sep):
+            die("%s is not under docs/" % rel(p), "only docs/ files can be superseded")
+        if not os.path.isfile(p):
+            die("%s does not exist" % rel(p), "check the path", 4)
+    if old == new:
+        die("OLD and NEW are the same file", "give two different docs")
+    dst = P("docs", "_superseded", os.path.basename(old))
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    realdir("docs/_superseded")
+    stem, ext = os.path.splitext(dst)
+    i = 1
+    while os.path.lexists(dst):
+        i += 1
+        dst = "%s-%d%s" % (stem, i, ext)
+    check("doc", dict(path=rel(old), action="supersede", by_doc=rel(new), **({"why": a.why} if a.why else {})))
+    os.rename(old, dst)
+    emit("doc", path=rel(old), action="supersede", by_doc=rel(new), why=a.why)
+    out("%s superseded by %s (moved to %s)" % (rel(old), rel(new), rel(dst)))
+
+
+def cmd_status(a):
+    if a.value == "done":
+        D = load()
+        bl = ["question %s open" % q["id"] for q in D["open_q"]] + [
+            "effect %s is %s" % (e["id"], e["state"]) for e in D["eff"].values() if e["state"] in ("planned", "claimed", "unknown", "conflict")]
+        if bl:
+            die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first")
+    emit("status", status=a.value)
+    out("status " + a.value)
+
+
+# ---------- effects ----------
+def eff_plan(a):
+    fcntl.flock(os.open(P(".awt", "events.jsonl"), os.O_RDONLY | os.O_CREAT, 0o644), fcntl.LOCK_EX)  # held to exit: check-then-write must not interleave
+    D = load()
+    if not a.body and not a.run:
+        die("need --body or --run", "add --body outbox/x.md and/or --run CMD", 2)
+    body = bsha = None
+    if a.body:
+        p = inside(a.body)
+        if not os.path.isfile(p):
+            die("--body must be a regular file: " + a.body, "write the draft into outbox/ first")
+        body = rel(p)
+        with open(p, "rb") as g:
+            bsha = sha(g.read())
+    if a.cls == "overwrite" and not a.snapshot:
+        die("overwrite effects need --snapshot", "add --snapshot 'CMD that prints the current content'")
+    for x in a.after or []:
+        get_eff(D, x)
+    nonce = os.urandom(8).hex() if a.again else ""
+    key = sha(json.dumps([a.target, a.run or "", bsha or "", a.cls, nonce]).encode())
+    for e in D["eff"].values():
+        if e["key"] == key:
+            if e["state"] == "dropped":
+                die("%s was dropped" % e["id"], "plan it again with --again")
+            return out("%s %s (already planned, nothing written)" % (e["id"], e["state"]))
+    if not a.again:
+        for e in D["eff"].values():
+            if e["target"] == a.target and e["state"] in ("unknown", "conflict"):
+                die("%s on %s is %s; it may already have been sent" % (e["id"], a.target, e["state"]),
+                    "check with a person, ./awt effect mark %s sent|not-sent, or plan with --again" % e["id"])
+    i = new_id("e")
+    emit("effect", id=i, step="planned", attempt=1, target=a.target, key=key, body=body, body_sha=bsha, run=a.run,
+         **{"class": a.cls}, snapshot=a.snapshot, verify=a.verify, after=a.after, why=a.why)
+    nxt = "./awt effect apply %s --target %s" % (i, shlex.quote(a.target)) if a.run else \
+        "send %s by hand, then ./awt effect mark %s sent" % (body, i)
+    out("%s planned; next: %s" % (i, nxt))
+
+
+def eff_show(a):
+    e = get_eff(load(), a.id)
+    for k, v in e.items():
+        if k not in ("hist", "claims", "chost", "manual"):
+            out("%s: %s" % (k, v))
+    out("history:")
+    for r in e["hist"]:
+        out("  %s %s attempt=%s %s" % (r["ts"], r["step"], r.get("attempt", 1), r.get("reason") or r.get("ref") or r.get("why") or ""))
+    if e.get("body"):
+        out("body path: " + e["body"])
+        try:
+            with open(P(e["body"]), encoding="utf-8", errors="replace") as g:
+                out("----\n" + g.read())
+        except OSError:
+            out("(body unreadable)")
+
+
+def sh(cmd, env, logf, timeout):
+    p = subprocess.Popen(["sh", "-c", cmd], cwd=ROOT, env=env, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        return p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait()
+        return "timeout"
+
+
+def eff_apply(a):
+    if a.timeout < 1:
+        die("--timeout must be at least 1", "give a number of seconds, 1 or more", 2)
+    D = load()
+    e = get_eff(D, a.id)
+    if e["state"] != "planned":
+        die("%s is %s, not planned" % (a.id, e["state"]), "never resend an unknown effect; ask a person, then ./awt effect mark %s sent|not-sent" % a.id)
+    if not e.get("run"):
+        die("%s is manual; no command to run (body: %s)" % (a.id, e.get("body")), "send it by hand, then ./awt effect mark %s sent" % a.id)
+    if a.target != e["target"]:
+        die("--target does not match the planned target", "use --target " + shlex.quote(e["target"]))
+    for x in e.get("after") or []:
+        if D["eff"].get(x, {}).get("state") != "sent":
+            die("prerequisite %s is not sent" % x, "send %s first" % x)
+    bpath = ""
+    if e.get("body"):
+        bpath = P(e["body"])
+        try:
+            with open(bpath, "rb") as g:
+                ok = sha(g.read()) == e.get("body_sha")
+        except OSError:
+            ok = False
+        if not ok:
+            die("body changed since planning", "plan again: ./awt effect plan --target %s --body %s ..." % (shlex.quote(e["target"]), e["body"]))
+    env = dict(os.environ, AWT_BODY=bpath, AWT_TARGET=e["target"])
+    for d in ("blobs", "runs", "claims"):
+        os.makedirs(P(".awt", d), exist_ok=True)
+    if e.get("snapshot"):
+        try:
+            r = subprocess.run(["sh", "-c", e["snapshot"]], cwd=ROOT, env=env, capture_output=True, timeout=a.timeout)
+        except subprocess.TimeoutExpired:
+            die("snapshot timed out after %ss; nothing was consumed" % a.timeout, "fix the --snapshot command and plan again")
+        if r.returncode or not r.stdout:
+            die("snapshot failed or printed nothing; nothing was consumed", "fix the --snapshot command and plan again")
+        with open(P(".awt", "blobs", sha(r.stdout)), "wb") as g:
+            g.write(r.stdout)
+    e2 = load()["eff"][a.id]
+    if (e2["step"], e2["attempt"]) != ("planned", e["attempt"]):
+        die("%s changed while it was being prepared (now %s)" % (a.id, e2["step"]), "check ./awt effect show " + a.id)
+    try:
+        os.close(os.open(claim_path(e), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+    except FileExistsError:
+        die("someone else is sending %s" % a.id, "check ./awt effect show " + a.id)
+    emit("effect", id=a.id, step="claimed", attempt=e["attempt"], pid=os.getpid(), timeout=a.timeout * (2 if e.get("verify") else 1))
+    log = P(".awt", "runs", "%s.%s.log" % (a.id, e["attempt"]))
+    with open(log, "wb") as lg:
+        rc = sh(e["run"], env, lg, a.timeout)
+        reason = None
+        if rc == "timeout":
+            reason = "timeout after %ss" % a.timeout
+        elif rc != 0:
+            reason = "exit code %s" % rc
+        elif e.get("verify"):
+            vr = sh(e["verify"], env, lg, a.timeout)
+            if vr != 0:
+                reason = "verify failed (%s)" % vr
+    if reason:
+        emit("effect", id=a.id, step="unknown", attempt=e["attempt"], reason=reason)
+        die("%s is unknown: %s (log %s)" % (a.id, reason, rel(log)), "it may have been sent; ask a person, then ./awt effect mark %s sent|not-sent" % a.id)
+    emit("effect", id=a.id, step="sent", attempt=e["attempt"], via="apply")
+    out("%s sent (log %s)" % (a.id, rel(log)))
+
+
+def eff_mark(a):
+    e = get_eff(load(), a.id)
+    st, n = e["state"], e["attempt"]
+    if st == "claimed":
+        die("%s is being sent by a live process" % a.id, "wait for it to finish")
+    legal = {"planned": ["sent"] if e["manual"] else [], "unknown": ["sent", "not-sent"], "conflict": ["sent", "not-sent"]}
+    if a.to == "dropped" and st == "planned":
+        pass
+    elif a.to not in legal.get(st, []):
+        die("cannot mark %s %s from %s" % (a.id, a.to, st), "legal marks from %s: %s" % (st, ", ".join(legal.get(st, []) + (["dropped"] if st == "planned" else [])) or "none (terminal)"))
+    if a.to == "not-sent":
+        emit("effect", id=a.id, step="planned", attempt=n + 1, why=a.why)
+    else:
+        emit("effect", id=a.id, step=a.to, attempt=n, ref=a.ref, why=a.why, via="mark")
+    out("%s %s" % (a.id, a.to))
+
+
+# ---------- doctor and save ----------
+def netmount(path):
+    try:
+        best = ("", "")
+        for ln in subprocess.run(["mount"], capture_output=True, text=True, timeout=5).stdout.splitlines():
+            m = re.match(r"(.+?) on (.+?) \((\w[\w.]*)", ln)
+            if m and (path == m.group(2) or path.startswith(m.group(2).rstrip("/") + "/")) and len(m.group(2)) >= len(best[0]):
+                best = (m.group(2), m.group(3))
+        return best[1] in ("nfs", "smbfs", "afpfs", "cifs", "webdav", "osxfuse", "macfuse") or best[1].startswith("fuse.")
+    except Exception:
+        return False
+
+
+def cmd_doctor(a):
+    global ROOT
+    res = []
+
+    def line(level, msg):
+        res.append(level)
+        out("%s %s" % (level, msg))
+
+    line("ok" if sys.version_info >= (3, 9) else "fail", "python %d.%d" % sys.version_info[:2])
+    ROOT = find_root(a.dir)
+    if not ROOT:
+        line("fail", "no task root (./awt init)")
+        sys.exit(1)
+    line("ok", "task root " + ROOT)
+    pr = P(".awt", ".probe-%d" % os.getpid())
+    try:
+        fd = os.open(pr, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o644)
+        os.write(fd, b"a")
+        os.lseek(fd, 0, 0)
+        os.write(fd, b"b")
+        os.close(fd)
+        with open(pr, "rb") as g:
+            good = g.read() == b"ab"
+        try:
+            os.close(os.open(pr, os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+            good = False
+        except FileExistsError:
+            pass
+        os.unlink(pr)
+        line("ok" if good else "fail", "O_APPEND and O_EXCL behave")
+    except OSError as x:
+        line("fail", "O_APPEND/O_EXCL probe failed: %s" % x)
+    ag = P("AGENTS.md")
+    has = os.path.exists(ag) and BLOCK_BEGIN in open(ag, encoding="utf-8", errors="replace").read()
+    line("ok" if has else "fail", "AGENTS.md has the awt block" if has else "AGENTS.md lacks the awt block (./awt init)")
+    try:
+        r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30)
+        line("ok" if r.returncode == 0 and r.stdout.strip() else "fail", "resume --hook prints a brief")
+    except Exception as x:
+        line("fail", "resume --hook did not run: %s" % x)
+    D = load()
+    line("fail" if D["unread"] else "ok", "events.jsonl unreadable: %s (fix .awt/events.jsonl)" % D["unread"] if D["unread"] else "events.jsonl is readable")
+    line("warn" if D["bad"] else "ok", "%d quarantined rows%s" % (D["bad"], " (.awt/events.jsonl lines: %s)" % ", ".join(map(str, D["bad_lines"][:20])) if D["bad_lines"] else ""))
+    odd = any(m in ROOT for m in ("iCloud", "Dropbox", "OneDrive", "Google Drive")) or netmount(ROOT)
+    line("warn" if odd else "ok", "path is a sync folder or network mount" if odd else "path is local")
+    cm = find_claude_md(ROOT)
+    line("warn" if cm else "ok", "CLAUDE.md at %s may hide AGENTS.md (add @AGENTS.md)" % cm if cm else "no CLAUDE.md in the way")
+    try:
+        with open(P(".claude", "settings.json"), encoding="utf-8") as g:
+            st = g.read()
+        good = "awt resume --hook" in st and "awt effect apply" in st
+    except OSError:
+        good = False
+    line("ok" if good else "warn", "settings has the awt hook and ask rule" if good else ".claude/settings.json lacks the awt hook or ask rule")
+    x = os.access(P("awt"), os.X_OK)
+    line("ok" if x else "warn", "awt is executable" if x else "awt is not executable here (chmod +x awt)")
+    try:
+        rem = git(ROOT, "remote").stdout.split() if git(ROOT, "rev-parse", "--show-toplevel").stdout.strip() == ROOT else []
+    except Exception:
+        rem = []
+    line("warn" if rem else "ok", "git remote %s: task data would be pushed if committed; check it is private" % rem[0] if rem else "no git remote")
+    bad = [e["id"] for e in D["eff"].values() if e["state"] in ("unknown", "conflict")]
+    line("warn" if bad else "ok", "open unknown/conflict effects: " + " ".join(bad) if bad else "no unknown effects")
+    sys.exit(1 if "fail" in res else 0)
+
+
+def cmd_save(a):
+    def g(*x):
+        try:
+            return subprocess.run(["git", "-C", ROOT] + list(x), capture_output=True, text=True)
+        except FileNotFoundError:
+            die("git is not installed or not on PATH", "install git; awt never installs it")
+    r = g("rev-parse", "--show-toplevel")
+    if r.returncode:
+        die("not a git repo", "git init  (in %s; awt never runs it)" % ROOT)
+    if os.path.realpath(r.stdout.strip()) != ROOT:
+        die("task sits inside another repo (%s)" % r.stdout.strip(), "git init  (in %s)" % ROOT)
+    nested = []
+    for dp, dns, fns in os.walk(ROOT):
+        dns[:] = [d for d in dns if d != ".git"]
+        if dp != ROOT and (".git" in os.listdir(dp)):
+            nested.append(rel(dp))
+            dns[:] = []
+    if g("add", "-A", "--", ".", *[":(exclude)" + n for n in nested]).returncode:
+        die("git add failed", "run git status in " + ROOT)
+    held = []
+    for f in [x for x in g("diff", "--cached", "--name-only", "-z").stdout.split("\0") if x]:
+        try:
+            if os.path.getsize(P(f)) > K["big"]:
+                continue
+            with open(P(f), "rb") as fh:
+                b = fh.read()
+        except OSError:
+            continue
+        n = None if b"\0" in b else secret(b.decode("utf-8", "replace"))
+        if n:
+            g("reset", "-q", "--", f)
+            held.append("%s (%s)" % (f, n))
+    for n in nested:
+        print("note: nested git repo not saved: " + n, file=sys.stderr)
+    for h in held:
+        print("note: unstaged, looks like a secret: " + h, file=sys.stderr)
+    if g("diff", "--cached", "--quiet").returncode == 0:
+        return out("nothing to commit")
+    r = g("commit", "--no-gpg-sign", "-q", "-m", a.message)
+    if r.returncode:
+        die("git commit failed: " + (r.stderr or r.stdout).strip(), "set git user.name and user.email")
+    out("saved %s" % g("rev-parse", "--short", "HEAD").stdout.strip())
+
+
+# ---------- main ----------
+def build():
+    p = argparse.ArgumentParser(prog="awt", add_help=False)
+    sp = p.add_subparsers(dest="verb")
+
+    def V(parent, name, pos=(), opt=()):
+        q = parent.add_parser(name)
+        for n, kw in pos:
+            q.add_argument(n, **kw)
+        for fl, kw in opt:
+            q.add_argument(*fl, **kw)
+        return q
+    T, F = {}, dict(action="store_true")
+    V(sp, "init", opt=[(("--goal",), T), (("--done",), T)])
+    V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {})])
+    V(sp, "list", [("section", dict(nargs="?", choices=SECTIONS))], [(("--all",), F)])
+    V(sp, "find", [("term", T)])
+    V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])
+    V(sp, "note", [("text", T)])
+    V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append"))])
+    V(sp, "ask", [("text", T)])
+    V(sp, "answer", [("id", T), ("text", T)])
+    V(sp, "ref", [("target", T)], [(("--title",), dict(required=True)), (("--why",), T), (("--kind",), T), (("--no-access",), F)])
+    V(sp, "capture", [("file", dict(nargs="?"))], [(("--from",), dict(required=True, dest="from_")), (("--title",), dict(required=True)), (("--ref",), T)])
+    V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
+    V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
+    V(sp, "doctor")
+    V(sp, "save", [("message", T)])
+    V(sp, "help")
+    es = V(sp, "effect").add_subparsers(dest="eop")
+    V(es, "plan", opt=[(("--target",), dict(required=True)), (("--body",), T), (("--run",), T), (("--class",), dict(dest="cls", choices=["additive", "overwrite"], default="additive")),
+                       (("--snapshot",), T), (("--verify",), T), (("--after",), dict(action="append")), (("--again",), F), (("--why",), T)])
+    V(es, "show", [("id", T)])
+    V(es, "apply", [("id", T)], [(("--target",), dict(required=True)), (("--timeout",), dict(type=int, default=K["timeout"]))])
+    V(es, "mark", [("id", T), ("to", dict(choices=["sent", "not-sent", "dropped"]))], [(("--ref",), T), (("--why",), T)])
+    return p
+
+
+def main(argv):
+    global ROOT, BY
+    BY = os.environ.get("AWT_BY") or "agent"
+    for f in (sys.stdout, sys.stderr):
+        f.reconfigure(encoding="utf-8", errors="backslashreplace")
+    rest, d, i = [], None, 0
+    while i < len(argv):
+        x = argv[i]
+        if x in ("--dir", "--by") and i + 1 < len(argv):
+            if x == "--dir":
+                d = argv[i + 1]
+            else:
+                BY = argv[i + 1]
+            i += 2
+            continue
+        if x.startswith("--dir=") or x.startswith("--by="):
+            if x.startswith("--dir="):
+                d = x[6:]
+            else:
+                BY = x[5:]
+        else:
+            rest.append(x)
+        i += 1
+    if rest[:1] == ["--version"]:
+        return out("awt " + VERSION)
+    if rest[:2] == ["help", "agents"]:
+        return out(AGENT_REF)
+    if not rest or rest[0] in ("help", "--help", "-h"):
+        return out(USAGE)
+    a = build().parse_args(rest)
+    a.dir = d
+    if a.verb is None or (a.verb == "effect" and not a.eop):
+        die("missing verb", USAGE.splitlines()[0], 2)
+    if a.verb == "help":
+        return out(USAGE)
+    if a.verb == "init":
+        return cmd_init(a)
+    if a.verb == "resume" and a.hook:
+        return cmd_resume(a)
+    ROOT = find_root(d)
+    if not ROOT:
+        if a.verb == "doctor":
+            return cmd_doctor(a)
+        die("no task found", "./awt init", 4)
+    globals()[("eff_" + a.eop) if a.verb == "effect" else ("cmd_" + a.verb)](a)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+        sys.stdout.flush()
+    except PermissionError as x:
+        print("error: permission denied: %s" % x.filename, file=sys.stderr)
+        print("fix: a person should run: %s" % shlex.join(["./awt"] + sys.argv[1:]), file=sys.stderr)
+        sys.exit(3)
+    except BrokenPipeError:
+        sys.exit(0)
+    except Exception as x:
+        die("%s: %s" % (type(x).__name__, x), "run ./awt doctor; if the cause is not the path or file named above, report this line")
