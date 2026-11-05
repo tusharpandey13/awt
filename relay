@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""relay: run a plan of small, fresh `claude -p` workers in an awt task directory.
+
+No long-lived orchestrator: this script orders the work, tests decide pass or fail,
+and each worker starts from `./awt resume --scope <unit>` plus file pointers.
+"""
+import sys
+sys.dont_write_bytecode = True
+sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
+import argparse, concurrent.futures, hashlib, json, os, re, shlex, signal, subprocess, threading, time
+
+USAGE = """relay run PLAN [--jobs N] [--dry-run]   run units whose inputs are done; finished units are skipped
+relay status PLAN                       show each unit
+relay help                              this text
+
+PLAN is JSON: {"defaults": {...}, "units": [{...}, ...]}
+Unit fields:
+  id            required, [a-z0-9-]+
+  task          required, what the worker must do
+  needs         unit ids that must finish first
+  inputs        files the worker should read
+  model         default sonnet
+  effort        default medium
+  check         shell command run in the task root; exit 0 means passed
+                without one, the unit passes when docs/<id>.out.md exists
+  retry_effort  rerun once at this effort if the check fails; default high; null disables
+  max_turns     default 40
+  budget_usd    per-attempt spending cap; optional
+  timeout       per-attempt seconds; default 1800
+  tools         default "Bash,Read,Write,Edit,Glob,Grep"
+  settings      file or JSON passed to claude --settings; optional
+
+Editing a unit reruns it. Workers cannot approve `./awt effect apply`: non-interactive
+sessions are denied by the task's ask rule, so sending stays with a person.
+Worker logs: .awt/runs/relay-<id>.<attempt>.jsonl
+Exit: 0 all passed, 1 a unit failed or is blocked, 2 bad plan or usage."""
+
+DEFAULTS = {"model": "sonnet", "effort": "medium", "max_turns": 40, "timeout": 1800, "retry_effort": "high",
+            "tools": "Bash,Read,Write,Edit,Glob,Grep", "needs": [], "inputs": [], "check": None, "budget_usd": None, "settings": None}
+PROMPT = """You are a relay worker: one fresh session doing one unit of a larger task. Other workers handle the rest.
+
+Unit: {id}
+Task: {task}
+{inputs}{retry}
+Where the task stands:
+{brief}
+
+Rules:
+- Do only this unit. Read only the files you need.
+- Write your full result to docs/{id}.out.md. Make its first line `verdict: ` and a short outcome.
+- Record real decisions with ./awt decide. Put drafts for anything leaving this machine in outbox/ and run ./awt effect plan. Never send anything.
+- If a person must decide something, run ./awt ask and finish what you can.
+- Before stopping: ./awt state --scope {id} --now "..." --next "...".
+- Your final message is one line. Everything else belongs in files."""
+lock = threading.Lock()
+
+
+def die(msg, code=2):
+    print("error: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def load_plan(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            plan = json.load(f)
+    except (OSError, ValueError) as e:
+        die("cannot read plan: %s" % e)
+    if not isinstance(plan, dict) or not isinstance(plan.get("units"), list) or not plan["units"]:
+        die('plan needs a non-empty "units" list')
+    base = dict(DEFAULTS, **plan.get("defaults", {}))
+    units = {}
+    for raw in plan["units"]:
+        if not isinstance(raw, dict) or not isinstance(raw.get("task"), str) or not raw["task"].strip():
+            die("every unit needs a task")
+        u = dict(base, **raw)
+        unknown = set(raw) - set(DEFAULTS) - {"id", "task"}
+        if unknown:
+            die("unit %s has unknown fields: %s" % (raw.get("id"), ", ".join(sorted(unknown))))
+        if not re.fullmatch(r"[a-z0-9-]+", str(u.get("id", ""))):
+            die("bad unit id: %r" % u.get("id"))
+        if u["id"] in units:
+            die("duplicate unit id: " + u["id"])
+        units[u["id"]] = u
+    for u in units.values():
+        for n in u["needs"]:
+            if n not in units:
+                die("unit %s needs unknown unit %s" % (u["id"], n))
+    left = {i: set(u["needs"]) for i, u in units.items()}
+    while left:
+        ready = [i for i, n in left.items() if not n]
+        if not ready:
+            die("dependency cycle among: " + ", ".join(sorted(left)))
+        for i in ready:
+            del left[i]
+        for n in left.values():
+            n.difference_update(ready)
+    return units
+
+
+def digest(u):
+    return hashlib.sha256(json.dumps(u, sort_keys=True).encode()).hexdigest()
+
+
+def result_path(uid):
+    return os.path.join(".awt", "runs", "relay-%s.json" % uid)
+
+
+def read_result(u):
+    try:
+        with open(result_path(u["id"]), encoding="utf-8") as f:
+            r = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return r if isinstance(r, dict) and r.get("digest") == digest(u) else None
+
+
+def write_result(u, **fields):
+    tmp = result_path(u["id"]) + ".%d.tmp" % os.getpid()
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(dict(fields, id=u["id"], digest=digest(u)), f)
+    os.replace(tmp, result_path(u["id"]))
+
+
+def awt(*args, by=None):
+    env = dict(os.environ, AWT_BY=by or "relay")
+    return subprocess.run(["./awt"] + list(args), capture_output=True, text=True, env=env, timeout=60)
+
+
+def run_proc(cmd, log, timeout, env=None):
+    """Run in its own process group, so a timeout leaves nothing behind."""
+    with open(log, "wb") as out:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        try:
+            return p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+            return None
+
+
+def session_result(log):
+    last = {}
+    try:
+        with open(log, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("type") == "result":
+                    last = r
+    except OSError:
+        pass
+    return last
+
+
+def attempt(u, n, effort, failure):
+    brief = awt("resume", "--scope", u["id"]).stdout.strip()
+    inputs = "Inputs: %s\n" % ", ".join(u["inputs"]) if u["inputs"] else ""
+    retry = "\nThe previous attempt failed this check:\n%s\nFix that. Earlier work is already on disk.\n" % failure if failure else ""
+    prompt = PROMPT.format(id=u["id"], task=u["task"], inputs=inputs, retry=retry, brief=brief)
+    cmd = [os.environ.get("RELAY_CLAUDE", "claude"), "-p", prompt, "--model", u["model"], "--effort", effort,
+           "--output-format", "stream-json", "--verbose", "--max-turns", str(u["max_turns"]), "--allowedTools", u["tools"]]
+    if u["budget_usd"] is not None:
+        cmd += ["--max-budget-usd", str(u["budget_usd"])]
+    if u["settings"]:
+        cmd += ["--settings", u["settings"] if isinstance(u["settings"], str) else json.dumps(u["settings"])]
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    env["AWT_BY"] = "relay:" + u["id"]
+    log = os.path.join(".awt", "runs", "relay-%s.%d.jsonl" % (u["id"], n))
+    rc = run_proc(cmd, log, u["timeout"], env)
+    res = session_result(log)
+    cost = res.get("total_cost_usd") or 0
+    if rc is None:
+        return False, "timed out after %ss" % u["timeout"], cost
+    if rc != 0 or res.get("is_error"):
+        return False, "worker exited %s: %s" % (rc, str(res.get("result") or res.get("subtype") or "")[:200]), cost
+    if u["check"]:
+        try:
+            c = subprocess.run(["sh", "-c", u["check"]], capture_output=True, text=True, errors="replace", timeout=u["timeout"], stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return False, "check timed out: %s" % u["check"], cost
+        if c.returncode:
+            return False, "check failed (%s):\n%s" % (u["check"], (c.stdout + c.stderr)[-1500:]), cost
+    elif not os.path.isfile(os.path.join("docs", u["id"] + ".out.md")):
+        return False, "worker did not write docs/%s.out.md" % u["id"], cost
+    return True, str(res.get("result") or "").strip(), cost
+
+
+def report(u, status, n, secs, cost, detail):
+    line = detail.strip().splitlines()[0] if detail.strip() else ""
+    with lock:
+        print("%-14s %-8s %-7s %6ds  $%.2f  %s" % (u["id"], u["model"], status, secs, cost, line[:100]), flush=True)
+
+
+def run_unit(u):
+    total, t0, failure, n, ok = 0.0, time.time(), None, 0, False
+    for effort in [u["effort"]] + ([u["retry_effort"]] if u["retry_effort"] else []):
+        n += 1
+        ok, detail, cost = attempt(u, n, effort, failure)
+        total += cost
+        report(u, "ok" if ok else "FAIL", n, time.time() - t0, cost, detail)
+        if ok:
+            break
+        failure = detail
+    write_result(u, status="ok" if ok else "failed", attempts=n, cost=total, secs=round(time.time() - t0), detail=detail[:2000])
+    note = "relay %s %s after %d attempt(s): %s" % (u["id"], "ok" if ok else "FAILED", n, detail.strip().split("\n")[0])
+    awt("note", note[:280], by="relay")
+    return ok
+
+
+def cmd_run(units, jobs, dry):
+    done = {i for i, u in units.items() if (read_result(u) or {}).get("status") == "ok"}
+    if dry:
+        for u in units.values():
+            print("%-14s %-8s %-7s needs: %s" % (u["id"], u["model"], u["effort"], ",".join(u["needs"]) or "-"), "(done)" if u["id"] in done else "")
+        return 0
+    if not os.access("awt", os.X_OK):
+        die("no ./awt here; run relay from the task directory")
+    os.makedirs(os.path.join(".awt", "runs"), exist_ok=True)
+    failed, spent, running = set(), 0.0, {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        while True:
+            blocked = {i for i, u in units.items() if i not in done | failed and set(u["needs"]) & failed}
+            failed |= blocked
+            for i in sorted(blocked):
+                print("%-14s %-8s blocked" % (i, units[i]["model"]), flush=True)
+            for i, u in units.items():
+                if i not in done | failed | set(running.values()) and set(u["needs"]) <= done:
+                    running[pool.submit(run_unit, u)] = i
+            if not running:
+                break
+            finished, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in finished:
+                i = running.pop(fut)
+                try:
+                    (done if fut.result() else failed).add(i)
+                except Exception as e:  # noqa: BLE001  one unit's crash must not lose the others
+                    print("%-14s crashed: %s" % (i, e), flush=True)
+                    failed.add(i)
+    spent = sum((read_result(u) or {}).get("cost") or 0 for u in units.values())
+    print("%s: %d of %d units passed, $%.2f. Next: ./awt resume" % ("done" if not failed else "stopped", len(done), len(units), spent))
+    return 1 if failed else 0
+
+
+def cmd_status(units):
+    for u in units.values():
+        r = read_result(u) or {}
+        print("%-14s %-8s %-8s $%.2f  %s" % (u["id"], u["model"], r.get("status", "pending"), r.get("cost") or 0, str(r.get("detail") or "").split("\n")[0][:100]))
+    return 0
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("help", "--help", "-h"):
+        print(USAGE)
+        return 0
+    ap = argparse.ArgumentParser(prog="relay", usage="see: relay help")
+    ap.add_argument("verb", choices=["run", "status"])
+    ap.add_argument("plan")
+    ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    if a.jobs < 1:
+        die("--jobs must be at least 1")
+    units = load_plan(a.plan)
+    return cmd_run(units, a.jobs, a.dry_run) if a.verb == "run" else cmd_status(units)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
