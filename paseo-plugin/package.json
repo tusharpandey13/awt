@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test:daemon": "AWT_E2E_PASEO=1 node --import tsx --test test/daemon.test.ts",
     "test": "tsc --noEmit && node --import tsx --test test/*.test.ts"
   },
   "dependencies": {

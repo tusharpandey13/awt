@@ -260,8 +260,8 @@ class CliSource(Base):
 @unittest.skipUnless(os.environ.get("AWT_E2E_PASEO") == "1" and shutil.which("paseo"), "set AWT_E2E_PASEO=1 with paseo on PATH to run against a real daemon")
 class RealDaemon(Base):
     def test_m11_real_daemon(self):
-        # Needs a daemon with a temp --home and a scripted agent; see tests/TEST-SPEC.md, Plugin tier 2.
-        self.skipTest("scripted provider not available yet")
+        # Needs a real daemon in a temp --home; see tests/TEST-SPEC.md, Plugin tier 2.
+        self.skipTest("lives in paseo-plugin/test/daemon.test.ts (M11); run with AWT_E2E_PASEO=1 npm test")
 
 
 if __name__ == "__main__":

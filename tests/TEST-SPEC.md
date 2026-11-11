@@ -159,7 +159,7 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P12 Every `resolved` URL in `package-lock.json` is on `registry.npmjs.org`.
 - P13 The workspace label uses `projectDisplayName` from `projects.list`.
 
-Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: a small script in `paseo-plugin/test/fake-agent` that answers fixed prompts, runs `awt` through its shell tool as an agent would, and can spawn a subagent. If a scripted ACP provider turns out not to be possible in the installed version, the first implementation task is to record that and replace the agent with the closest real provider using a cheap model; this is the one place the plan depends on a thing not yet checked.
+Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: `paseo-plugin/test/fake/acp_agent.py`, which runs the shell command in a `RUN: <cmd>` prompt in the environment Paseo launched it with, as an agent would, and echoes anything else. Checked on Paseo 0.15.4: a scripted ACP provider works, and the daemon needs `pluginsEnabled: true` in its config. Run with `npm run test:daemon` in `paseo-plugin/` (D1–D5 and M11). Not covered yet: spawning a subagent, because the fake agent has no way to start one.
 
 - E1 Create workspace and agent with the CLI: nodes appear with their keys, agent's environment contains `AWT_DIR`.
 - E2 The scripted agent runs `awt note`; the row is in its node, not the task's.
