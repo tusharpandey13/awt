@@ -1,6 +1,6 @@
 # awt spec
 
-`awt` (agent work task) turns one directory into a workspace for one piece of agent-operated work. Tests are normative where they exist; this file is the only prose spec. Do not restate its constants elsewhere.
+`awt` (agent work task) turns one directory into a workspace for one piece of agent-operated work. Tests are normative where they exist; this file and `tests/TEST-SPEC.md` (the test plan) are the only prose specs. Do not restate its constants elsewhere.
 
 ## Use case
 
@@ -83,7 +83,7 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 
 | Verb | Behaviour |
 |---|---|
-| `init` | Above. |
+| `init` | Above. `--kind` creates nodes: see Node tree. |
 | `resume [--hook] [--scope S]` | Print the brief. `--hook`: exit 0 and print nothing when no task resolves or on any internal error. Never fails because git failed. |
 | `list [refs\|context\|docs\|outbox\|misc\|decisions\|questions\|effects\|notes\|state] [--all]` | Discoverability. No argument prints all sections. `--all` adds superseded docs and decisions, answered questions, all state history and terminal effects. |
 | `find <term>` | Case-insensitive literal search across event text and all text files in the root (excluding `.awt/`, `.git/`, `scratch/`, the `awt` script, binary files, and files over 2 MB). Prints `path:line: snippet`; event hits print `event:<id or type>: snippet`. Caps at 40 hits, then `+N more`. Exit 0 even with no hits. Does not follow symlinks. |
@@ -104,7 +104,7 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 
 ## Resume brief
 
-Sections in this order, each with a budget in one constants table. Total at most 4,400 chars, tested at maximum fill, labels included. Empty sections are omitted. Truncate at a line boundary with `+N more: ./awt list <section>`.
+Sections in this order, each with a budget in one constants table. Total at most 4,400 chars (5,200 for a node with ancestors or children, see Node tree), tested at maximum fill, labels included. Empty sections are omitted. Truncate at a line boundary with `+N more: ./awt list <section>`.
 
 | # | Section | Budget |
 |---|---|---|
@@ -244,6 +244,158 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 ```
 
 Do not add an `Edit` deny rule for `.awt/`: Claude Code merges those into the OS sandbox, which then stops `awt` writing its own log. A chaos run confirmed this. Hand edits are handled by quarantine.
+
+## Node tree
+
+Status: proposed. Everything in this section is additive: a directory with no parent and no children behaves exactly as described above. Tests for each rule are listed in `tests/TEST-SPEC.md`; a rule without a test is not yet in force.
+
+One directory per task stops working when a task has parts. Putting the parts in one directory makes it too big to resume; making them separate tasks loses the links between them. The tree gives them a place to live while each node stays a normal awt directory.
+
+### Nodes and kinds
+
+A **node** is a directory that contains `.awt/`. The parent of a node is the nearest enclosing directory that is also a node, so the hierarchy is the filesystem: `mv` of a subtree keeps it intact, and no parent pointer is stored (rule 3).
+
+| Kind | Meaning | May contain |
+|---|---|---|
+| `root` | One per machine or project group. Holds the contract (`AGENTS.md`) | `workspace` |
+| `workspace` | A long-lived area of work: a repo, a project, a Paseo workspace. Holds shared `context/`, `docs/` and `rule` decisions | `task` |
+| `task` | One piece of work with a goal and a done-means. The existing layout | `task`, `agent` |
+| `agent` | One chat or subagent. Its own event log, `scratch/`, `out.md` | `agent` (subagents) |
+
+An `agent` directly under a `workspace` is refused. A chat that belongs to no task goes under a task named `main`. A node whose `.awt/` has no `node` row is a legacy `task` with no kind rules enforced. Child directories use reserved names, created on demand: `workspaces/`, `tasks/`, `agents/`.
+
+New row type, written once at creation by `init`:
+
+| Type | Fields |
+|---|---|
+| `node` | `kind`, `name` 60, `key` optional 200 |
+
+`key` is an external identity such as `paseo:workspace/wks_1f2e`. Keys are unique among siblings. The name is cosmetic: the directory is `[a-z0-9-]` slug, max 50, with a numeric suffix on collision, like `capture`.
+
+### Creating nodes
+
+`init --kind root|workspace|task|agent [--name N] [--key K] [--goal T --done T]`
+
+- Without `--kind`, `init` is unchanged.
+- `--kind root`: creates the root in the resolved directory (`--dir`, `AWT_DIR` or `cwd`). Writes the contract in its tree form.
+- Any other kind: the parent is the resolved node. Refuse an illegal kind/parent pair (fix names the legal kinds). `--name` is required.
+- The child is built under `<parent>/<kinds>/.new-<random>/` with its `.awt/events.jsonl` complete, then moved into place with `rename`. A crash leaves only a `.new-*` directory, which no listing shows and `doctor` reports. A `rename` onto an existing directory fails, so two racing creators cannot both win.
+- With `--key`, the check for an existing sibling with that key and the `rename` happen under `flock` on the parent's `.awt/events.jsonl`. A match prints the existing path and exits 0 (idempotent). A different `--name` with an existing key is not a new node; the existing one is returned.
+- `--goal`/`--done` are required for `task`, optional for the others. `workspace` and `agent` get a placeholder goal from `--name` when absent.
+- Output: one line, `init <path relative to the resolved node> <kind>`.
+
+Layout by kind:
+
+| Kind | Creates |
+|---|---|
+| `root` | `.awt/`, `AGENTS.md` (tree form), `README.md`, `workspaces/` |
+| `workspace` | `.awt/`, `context/`, `docs/`, `misc/` |
+| `task` | The `init` layout above, except that `AGENTS.md`, `README.md` and `.claude/settings.json` are not written |
+| `agent` | `.awt/`, `scratch/`, `out.md` created on first write |
+
+`.gitignore` lines for `scratch/` and `.awt/claims|blobs|runs/` are written at every node.
+
+### Resolution
+
+Unchanged: `--dir` > `AWT_DIR` > script directory > walk up from `cwd`. In the tree, agents run in a repository, not in a node, so the harness sets `AWT_DIR` to the agent's node and `AWT_BY` to its id. A shared `awt` on `PATH` replaces the per-directory copy; `./awt` remains valid for a standalone node.
+
+Ancestors are found by walking up from the node, at most 8 levels, resolving symlinks and stopping at a directory already visited. Descendants are found by walking the reserved child directories only, at most 8 levels deep, at most 2,000 nodes, with the same symlink rule. Hitting a limit is reported, never silent.
+
+### Reading across nodes
+
+- `resume`: two sections are added. Sections 1 to 7 keep their budgets and order.
+
+  | # | Section | Budget |
+  |---|---|---|
+  | 8 | Lineage: one line per ancestor, outermost first: kind, name, status, goal cut to 100 chars | 300 |
+  | 9 | Children: one line per direct child with kind, name, status, age and the `now` of its newest state cut to 100 chars. Active first. Overflow: `+N more: awt list nodes` | 500 |
+
+  A node with neither ancestors nor children prints the same brief as before, at most 4,400 chars. Otherwise the maximum is 5,200. Section 6 also lists the `rule`-tagged current decisions of every ancestor, outermost first, each marked with its origin kind. Ancestors' rules count against the section 6 budget.
+- `list nodes [--all]`: every descendant with kind, name, status, key and relative path. `--all` includes `done` nodes.
+- `list tree [--all]`: the same, indented. Nodes with open questions or attention effects are marked.
+- `list <section> --json` and `resume --json`: machine-readable output for the same data, one JSON array or object, UTF-8, stable key names. This is the contract the Paseo plugin and `migrate-paseo` rely on.
+- `find --up|--down|--tree TERM`: searches ancestors, descendants, or both, with the same caps (40 hits in total). Hits are prefixed with the node path relative to the resolved node. Without a flag, only the resolved node is searched, as before.
+- `ref TARGET`: a target that is a directory containing `.awt/` infers `kind=node` and stores a path relative to the referencing node. A `paseo:` target infers `kind=paseo`. Refs to a node outside the tree are allowed and marked `--no-access` if the path is missing on this host.
+- `status done`: refused while a descendant `workspace` or `task` is `active`, or any descendant has an unanswered question or an effect in `planned`, `claimed` or `unknown`. The refusal lists each with its path. A node archived by a harness without being finished is `paused`, not `done`.
+- Each node's event log is separate, so concurrent agents never contend on a log. `by` still names the writer.
+- `doctor` adds: illegal kind nesting, duplicate keys among siblings, a `node` row that disagrees with the directory's place, leftover `.new-*` directories, a `node` row naming a different kind than the reserved parent directory, and `awt` not on `PATH` when `AWT_DIR` is set.
+
+### Agent node contract
+
+- The orchestrating harness creates the node, sets `AWT_DIR` and `AWT_BY`, and passes the rules. The agent does not create its own node.
+- A primary agent runs `awt resume` first. It writes `state` before stopping.
+- A subagent does not resume. Its harness gives it the `rule` decisions of its task, the task path, and `out.md` as the place for its result. It does not write `state`; the parent agent's `resume` shows the child's `out.md` timestamp and leaves reading it to the parent.
+- A subagent's node is created under its parent agent's node. If the parent is unknown, it is created under the task and a `note` records the missing parent.
+
+### Paseo plugin
+
+`paseo-plugin/` is a second target in this repository: a trusted local Paseo plugin (`paseo-plugin.json`, `index.server.ts`, `requirements.paseo` `>=0.14.0`). It contains no awt logic. It runs `awt` as a subprocess with `AWT_DIR`, `AWT_BY` and `--json`, so the CLI and Paseo see the same tree. Core `awt` stays one stdlib Python file; the plugin may use Node and TypeScript.
+
+The plugin never fails an agent. Every hook runs `awt` with a 5 second timeout and catches every error; on failure the agent starts without awt and a `note` is attempted. Background agents are ignored everywhere.
+
+Mapping:
+
+| Paseo | awt | Key |
+|---|---|---|
+| Project | not a node. Recorded as a `ref kind=paseo` on each workspace node | `paseo:project/<id>` |
+| Workspace | `workspace` node | `paseo:workspace/<id>` |
+| none | `task` node. Created by `/task`, or `main` on first agent | `paseo:task/<workspace id>/<n>` |
+| Agent | `agent` node under its task | `paseo:agent/<id>` |
+| Subagent (`parentAgentId`) | `agent` node under the parent agent's node | `paseo:agent/<id>` |
+
+Paseo owns existence and liveness; awt owns goals, decisions, refs and handoffs. Paseo to awt lookup uses metadata `awt.node` (relative path) on workspaces and agents, and `awt.task` on agents. awt to Paseo lookup uses the node's `paseo:` ref. Both are rebuilt from `list nodes --json` keys when metadata is missing.
+
+Hooks:
+
+| Hook | Action |
+|---|---|
+| `workspace.create.after` | Ensure the workspace node, `ref` the repository path, set `awt.node` |
+| `agent.create.before` | Resolve the task (request metadata `awt.task`, else workspace `awt.currentTask`, else `main`). Append the static awt block to `systemPrompt` (at most 600 chars: rules, "call `awt_resume` first", "never `effect apply` unprompted"). For a subagent, append the short subagent block (at most 350 chars) instead |
+| `agent.create.after` | Create the agent node, set `awt.node` and `awt.task` |
+| `agent.open.before` | Set `AWT_DIR` and `AWT_BY`. Attach the `awt_resume` tool (returns `resume` output for this node). Runs on every open, so resumed agents are covered |
+| `agent.turn.after` | If the turn completed, the agent is not a subagent, and its node has no `state` newer than the turn start, send one follow-up asking for `awt state`. At most one per turn chain; the follow-up's own turn never triggers another |
+| `agent.permission.before` | Never approves anything. `awt effect apply` stays pending for a person |
+| `agent.archive.after`, `workspace.archive.after` | `awt status done`; if refused, `paused` |
+
+Commands (second phase): `/task new "goal"`, `/task list`, `/task switch <n>` set `awt.currentTask` on the workspace; a composer pill shows the current task. `/awt migrate` runs the migration with exact workspace ids from the SDK.
+
+Prompt cost: only the static block enters the system prompt, so it caches. The brief is fetched by tool, fresh on every resume. The block is the same text for every agent of a kind, so it is stored once in the plugin, never per node.
+
+Compatibility: the plugin is optional. Without Paseo, `awt init --kind` and `list tree` give the same hierarchy from a shell. Hook names above follow the plugin docs for Paseo 0.14 and later; the first implementation task is to check each payload field named here against a real daemon, in particular whether `parentAgentId` is present in `agent.create.before`.
+
+### migrate-paseo
+
+`migrate-paseo ROOT [--dry-run] [--from SNAPSHOT] [--home PATH] [--host H]`: a separate one-off script like `migrate-wt`, not counted against the verb limit. It is read-only on Paseo and writes only through the `awt` next to it.
+
+Sources, in order of preference:
+1. `--from SNAPSHOT`, a JSON file with `projects`, `workspaces` and `agents`. The plugin writes one from the SDK with exact `workspaceId` and `parentAgentId` for every agent. Tests use the same format.
+2. The `paseo` CLI: `project ls`, `workspace ls`, `ls -a -g` and `inspect <id>` for `ParentAgentId`, all with `--json`. The CLI does not give an agent's workspace id, so agents are matched to workspaces by `cwd`.
+
+Mapping:
+
+| Paseo item | awt result |
+|---|---|
+| Workspace | `workspace` node, name `<project>--<name>`, `ref` repository path, `ref paseo:project/<id>` |
+| Agent, exact workspace id | `agent` node under task `imported` of that workspace |
+| Agent, `cwd` matches exactly one workspace | The same |
+| Agent, `cwd` matches several workspaces, or none | Under workspace `unassigned--<project or cwd basename>`, task `imported`. Listed in the report |
+| Subagent whose parent was imported | Under the parent agent's node |
+| Subagent whose parent is missing, or a parent cycle | Under the task; reported |
+| Archived agent | Imported with `status done`. Archived workspaces appear only through their agents and use the `unassigned` rule |
+| Background agent | Skipped; listed in the report |
+
+Each agent node gets `goal` from its Paseo title (cut to the cap), a `ref kind=paseo` with provider and model in `why`, and nothing else. The timeline is not copied: Paseo keeps it, and rule 3 applies. An agent title that matches the secret scan is imported with the match redacted, and the report names the agent.
+
+Properties:
+- Idempotent: a second run, or a run after a crash, imports only what is missing and appends a `status` row only when it differs. Names are never changed after creation.
+- A lock: a second concurrent run exits 1 with a fix.
+- `legacy/paseo-migration.md` in the root: counts, every ambiguity, every skipped item with its reason.
+- Exit 1 if any Paseo item is neither imported nor listed as skipped, as in `migrate-wt`.
+- `migrate-wt` is unchanged. A tracker output already has the `tasks/<id>/` shape and can be moved under a workspace's `tasks/` directory.
+
+### Templates
+
+The root `AGENTS.md` block is the existing block with these changes, still at most 2 KB: commands are `awt`, not `./awt`; it starts with "Your node is `$AWT_DIR`. Never `cd` into it or hand-edit `.awt/`"; and the subagent line reads "**Subagents:** skip resume, write the result to `$AWT_DIR/out.md`".
 
 ## relay
 
