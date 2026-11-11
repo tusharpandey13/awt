@@ -57,8 +57,8 @@ You mostly talk to your agent. These are the commands you'll use yourself:
 When a task has parts, give them a place instead of one huge directory or a pile of unconnected ones. A node is a directory with `.awt/`; its parent is the nearest enclosing node.
 
 ```sh
-awt init --kind root --dir ~/awt-root
-cd ~/awt-root && awt init --kind workspace --name parsekit
+mkdir ~/awt-root && cd ~/awt-root && awt init --kind root
+awt init --kind workspace --name parsekit
 cd workspaces/parsekit && awt init --kind task --name retry-bug --goal "Fix the retry storm" --done "Merged"
 cd tasks/retry-bug && awt init --kind agent --name chat-1
 awt list tree
