@@ -136,6 +136,32 @@ class Reads(test_tree.TreeBase):
         self.assertEqual(len(capped), 41)
         self.assertRegex(capped[-1], r"^\+\d+ more")
 
+    def test_find_tree_covers_whole_tree(self):  # T25b
+        root, ws, task, agent, sub = self.chain()
+        freeze = self.mk("task", "freeze", ws, "--goal", "g", "--done", "d")
+        fa = self.mk("agent", "fa", freeze)
+        self.ok("decide", "parsekit freezes the lexer API", "--why", "stability", root=freeze)
+        self.ok("note", "parsekit token cache is per-thread", root=fa)
+        out = self.ok("find", "--tree", "parsekit", root=agent).stdout
+        self.assertIn("../../freeze", out)
+        self.assertIn("parsekit freezes the lexer API", out)
+        self.assertIn("../../freeze/agents/fa", out)
+        self.assertEqual(self.ok("find", "--down", "parsekit", root=agent).stdout.strip(), "")
+        self.assertEqual(self.ok("find", "--up", "parsekit", root=agent).stdout.strip(), "")
+        for i in range(30):
+            self.ok("note", "parsekit sibling note %d" % i, root=freeze)
+            self.ok("note", "parsekit own note %d" % i, root=task)
+        capped = self.ok("find", "--tree", "parsekit", root=agent).stdout.splitlines()
+        self.assertEqual(len(capped), 41)
+        self.assertRegex(capped[-1], r"^\+\d+ more")
+
+    def test_find_tree_standalone_falls_back(self):  # T25c
+        node = os.path.join(self.top, "solo")
+        os.makedirs(node)
+        self.ok("init", root=node)
+        self.ok("note", "parsekit standalone fact", root=node)
+        self.assertIn("parsekit standalone fact", self.ok("find", "--tree", "parsekit", root=node).stdout)
+
     def test_ref_kinds(self):  # T26
         root, ws, task, agent, sub = self.chain()
         other = self.mk("task", "other", ws, "--goal", "g", "--done", "d")
