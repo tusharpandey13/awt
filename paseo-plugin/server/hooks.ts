@@ -224,7 +224,9 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       const parentId = parentOf(agent);
       if (parentId) {
         const parent = await tree.find(`paseo:agent/${parentId}`);
-        if (parent && !node.startsWith(parent + "/")) {
+        if (!parent) {
+          await awt(cfg, node, ["note", `started by agent ${parentId}; it has no node, so this node is under the task`], agent.id);
+        } else if (!node.startsWith(parent + "/")) {
           await awt(cfg, node, ["note", `started by agent ${parentId}; its node is ${parent}`], agent.id);
           await awt(cfg, node, ["ref", parent, "--title", "parent agent", "--kind", "node"], agent.id);
         }

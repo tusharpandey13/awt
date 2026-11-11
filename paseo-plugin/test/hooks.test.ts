@@ -95,6 +95,15 @@ test("P4 a subagent opened before its parent is known gets a parent ref and a no
   assert.ok(r.rows(child.env.AWT_DIR, "ref").some((x) => x.kind === "node" && x.target === parent.env.AWT_DIR));
 });
 
+test("P4 a subagent whose parent has no node lands under the task and a note names the missing parent", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.create.after", { agent: agentPayload("agt_c", { parentAgentId: "agt_ghost" }) });
+  const child = r.nodes().find((x) => x.key === "paseo:agent/agt_c")!;
+  assert.ok(child);
+  const notes = r.rows(r.root + "/" + child.path, "note").map((n) => n.text);
+  assert.ok(notes.some((t) => t.includes("agt_ghost")), JSON.stringify(notes));
+});
+
 test("P7 turn.after nudges once for a completed turn with no handoff", async () => {
   const r = mk({}, WS);
   const open = await r.call("agent.open.before", openReq("agt_1"));
