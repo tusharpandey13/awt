@@ -1255,10 +1255,22 @@ def cmd_list(a):
             out(x)
 
 
+def shown(p, top):
+    """Hit prefix usable from the cwd: "" for the cwd itself; relative when the hit is under the cwd or the cwd is in the tree; else absolute."""
+    c, r = cwd(), os.path.realpath(p)
+    under = lambda x, d: x == d or x.startswith(d.rstrip(os.sep) + os.sep)
+    if not c:
+        return r
+    if r == c:
+        return ""
+    return os.path.relpath(r, c) if under(r, c) or under(c, os.path.realpath(top)) else r
+
+
 def cmd_find(a):
     term, start = a.term.lower(), ROOT
-    hits, targets, over = find_in(ROOT, term, ""), [], False
-    top = tree_top(start) if a.tree else start
+    anchor = tree_top(start)
+    hits, targets, over = find_in(ROOT, term, shown(ROOT, anchor)), [], False
+    top = anchor if a.tree else start
     if a.tree and top != start and node_info(top)["kind"] == "root":
         ds, over = descendants(top)
         targets = [top] + [p for p, _ in ds if p != start]
@@ -1269,7 +1281,7 @@ def cmd_find(a):
             ds, over = descendants(start)
             targets += [p for p, _ in ds]
     for p in targets:
-        hits += find_in(p, term, os.path.relpath(p, start))
+        hits += find_in(p, term, shown(p, anchor))
     for h in hits[:K["hits"]]:
         out(h)
     if len(hits) > K["hits"]:

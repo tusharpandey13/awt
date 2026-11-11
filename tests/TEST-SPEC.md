@@ -79,6 +79,7 @@ Names are scenario ids.
 - T23 A standalone node prints the same brief as the previous release, byte for byte (I8).
 - T24 `list nodes`, `list tree`, `--all`, `--json` match each other and the filesystem (I1). A test pins every `--json` key listed in `SPEC.md`.
 - T25 `find --down` finds text in a grandchild's `docs/` and events; `--up` finds it in an ancestor; without a flag, neither. `--tree` searches the whole tree under the nearest root (sibling tasks and their agents too; a standalone node falls back to ancestors plus descendants). Hits capped at 40 in total, prefixed by relative node path.
+- T25d `find` hit prefixes work from the cwd: an agent whose cwd is a repo outside the tree (node via `AWT_DIR`) gets absolute node paths that `--dir` accepts; from inside the tree they stay relative.
 - T26 `ref` on a directory with `.awt/` records `kind=node`, the target's key and a relative path; `ref paseo:agent/x` records `kind=paseo`.
 - T27 A parent's own walks stop at child nodes: with a note and a file in `tasks/x`, the parent's `find` (no flag), `list misc`, resume section 5 and `save` see none of the child's files, and `tasks/` is not listed under `misc`.
 - T28 In a tree node every command the brief prints is `awt`, not `./awt`; a standalone node still prints `./awt`. Section 5 of a task shows commits in its workspace's `repo` ref.

@@ -126,7 +126,7 @@ class Reads(test_tree.TreeBase):
         up = self.ok("find", "--up", "zebra", root=task).stdout
         self.assertIn("top.md", up)
         self.assertNotIn("deep.md", up)
-        both = self.ok("find", "--tree", "zebra", root=task).stdout
+        both = self.ok("find", "--tree", "zebra", root=task, cwd=task).stdout
         self.assertIn("deep.md", both)
         self.assertIn("top.md", both)
         self.assertIn("../../../../docs/top.md", both)
@@ -143,7 +143,7 @@ class Reads(test_tree.TreeBase):
         fa = self.mk("agent", "fa", freeze)
         self.ok("decide", "parsekit freezes the lexer API", "--why", "stability", root=freeze)
         self.ok("note", "parsekit token cache is per-thread", root=fa)
-        out = self.ok("find", "--tree", "parsekit", root=agent).stdout
+        out = self.ok("find", "--tree", "parsekit", root=agent, cwd=agent).stdout
         self.assertIn("../../freeze", out)
         self.assertIn("parsekit freezes the lexer API", out)
         self.assertIn("../../freeze/agents/fa", out)
@@ -155,6 +155,22 @@ class Reads(test_tree.TreeBase):
         capped = self.ok("find", "--tree", "parsekit", root=agent).stdout.splitlines()
         self.assertEqual(len(capped), 41)
         self.assertRegex(capped[-1], r"^\+\d+ more")
+
+    def test_find_prefix_is_usable_from_the_cwd(self):  # T25d
+        root, ws, task, agent, sub = self.chain()
+        freeze = self.mk("task", "freeze", ws, "--goal", "g", "--done", "d")
+        self.ok("decide", "parsekit freeze starts 2031-04-02", "--why", "release train", root=freeze)
+        repo = os.path.join(self.tmp, "parsekit-repo")
+        os.makedirs(repo)
+        env = dict(self.env, AWT_DIR=agent)
+        out = self.ok("find", "--tree", "parsekit freeze", root="", cwd=repo, env=env).stdout
+        m = re.search(r" @(\S+): ", out)
+        self.assertTrue(m, out)
+        self.assertEqual(m.group(1), os.path.realpath(freeze))
+        shown = self.ok("list", "decisions", root=m.group(1), cwd=repo).stdout
+        self.assertIn("2031-04-02", shown)
+        under = self.ok("find", "--tree", "parsekit freeze", root=agent, cwd=root).stdout
+        self.assertIn(" @" + os.path.relpath(os.path.realpath(freeze), os.path.realpath(root)) + ": ", under)
 
     def test_find_tree_standalone_falls_back(self):  # T25c
         node = os.path.join(self.top, "solo")
