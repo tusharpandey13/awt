@@ -386,20 +386,20 @@ class Isolation(TreeBase):
 
     def test_parallel_agents_keep_their_own_logs(self):  # T50
         root, ws, task, agent, sub = self.chain()
-        agents = [self.mk("agent", "a%d" % i, task) for i in range(8)]
+        agents = [self.mk("agent", "a%d" % i, task) for i in range(20)]
 
         def work(i):
             env = dict(self.env, AWT_DIR=agents[i], AWT_BY="agt_%d" % i)
-            for j in range(10):
+            for j in range(50):
                 r = subprocess.run([sys.executable, "-I", test_awt.AWT, "note", "n-%d-%d" % (i, j)], env=env, capture_output=True, text=True, cwd=self.tmp)
                 if r.returncode:
                     return r.stderr
             return ""
-        with cf.ThreadPoolExecutor(8) as ex:
-            self.assertEqual(list(ex.map(work, range(8))), [""] * 8)
+        with cf.ThreadPoolExecutor(20) as ex:
+            self.assertEqual(list(ex.map(work, range(20))), [""] * 20)
         for i, node in enumerate(agents):
             notes = self.rows_of(node, "note")
-            self.assertEqual(sorted(r["text"] for r in notes), sorted("n-%d-%d" % (i, j) for j in range(10)))
+            self.assertEqual(sorted(r["text"] for r in notes), sorted("n-%d-%d" % (i, j) for j in range(50)))
             self.assertEqual({r["by"] for r in notes}, {"agt_%d" % i})
         self.assertEqual(self.rows_of(task, "note"), [])
 

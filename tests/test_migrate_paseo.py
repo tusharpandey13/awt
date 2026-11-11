@@ -1,5 +1,5 @@
 """migrate-paseo (SPEC.md, "migrate-paseo"). End to end: the real script and the real awt in a temp HOME."""
-import hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
+import fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.realpath(os.path.join(HERE, ".."))
@@ -254,6 +254,48 @@ class Shapes(Base):
         p = os.path.join(self.tmp, "s.json")
         write_json(p, snap)
         self.assertEqual(self.mig(snap=p).returncode, 0)  # lands under an unassigned workspace, which is an import
+
+
+    def test_exit_1_when_an_item_is_neither_imported_nor_listed(self):
+        self.ok(snap="basic")  # make the root, then take away the right to add to it
+        ws = os.path.join(self.root, "workspaces")
+        snap = read_json(os.path.join(FIX, "basic.json"))
+        snap["workspaces"].append(dict(id="wks_9", projectId="prj_1", project="parsekit", name="late", cwd="/tmp/parsekit", archived=False))
+        p = os.path.join(self.tmp, "late.json")
+        write_json(p, snap)
+        os.chmod(ws, 0o555)
+        self.addCleanup(os.chmod, ws, 0o755)
+        if os.access(ws, os.W_OK):
+            self.skipTest("directory permissions are not enforced (root)")
+        r = self.mig(snap=p)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("wks_9", self.report().split("## Failed")[1])
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_archived_workspace_with_an_active_child_is_noted_not_forced(self):
+        self.ok(snap="basic")
+        task = os.path.join(self.root, "workspaces", "parsekit-main", "tasks", "imported")
+        self.awt("ask", "who owns the lexer?", node=task)  # the task cannot be finished while this is open
+        snap = read_json(os.path.join(FIX, "basic.json"))
+        snap["workspaces"][0]["archived"] = True
+        p = os.path.join(self.tmp, "arch.json")
+        write_json(p, snap)
+        self.ok(snap=p)
+        n = self.nodes()
+        self.assertEqual(n["workspaces/parsekit-main"][2], "active")
+        self.assertEqual(n["workspaces/parsekit-main/tasks/imported"][2], "active")
+        notes = self.report().split("## Notes")[1].split("##")[0]
+        self.assertRegex(notes, r"workspace wks_1 could not be marked done")
+
+    def test_a_second_run_while_one_holds_the_lock_exits_1_with_a_fix(self):  # C22
+        self.ok(snap="basic")
+        fd = os.open(os.path.join(self.root, "legacy", "paseo-migration.md"), os.O_WRONLY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        r = self.mig(snap="basic")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("another migrate-paseo is running", r.stderr)
+        self.assertIn("fix:", r.stderr)
 
 
 class HomeSource(Base):

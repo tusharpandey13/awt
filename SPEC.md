@@ -36,7 +36,7 @@ context/ docs/ outbox/ misc/ scratch/
 .awt/claims/ .awt/blobs/ .awt/runs/
 ```
 
-`init` is idempotent, never overwrites or deletes anything, and with `--goal`/`--done` on a later run appends a new `task` row. It does not run `git init`. It creates empty dirs without placeholder files. If `CLAUDE.md` exists in the directory or an ancestor (excluding `~/.claude/`), it prints a warning: Claude Code may then skip `AGENTS.md`; add the line `@AGENTS.md` to that file. It never edits that file.
+`init` is idempotent, never overwrites or deletes anything, and with `--goal`/`--done` on a later run appends a new `task` row, unless the latest task row already has the same goal and done-means. It does not run `git init`. It creates empty dirs without placeholder files. If `CLAUDE.md` exists in the directory or an ancestor (excluding `~/.claude/`), it prints a warning: Claude Code may then skip `AGENTS.md`; add the line `@AGENTS.md` to that file. It never edits that file.
 
 ## Task root resolution
 
@@ -65,7 +65,7 @@ Ids: prefix plus 8 random hex characters (`d-7f3a9c21`). Prefixes: `d` decision,
 | `status` | `status`: `active` `paused` `done` |
 | `state` | `scope` 40 (default `main`), `now` 700, `next` 300 |
 | `note` | `id`, `text` 280 |
-| `decision` | `id`, `choice` 300, `why` 300, `supersedes` optional, `tags` optional list |
+| `decision` | `id`, `choice` 300, `why` 300, `supersedes` optional, `tags` optional list, each tag 40 |
 | `question` | `id`, `text` 400 |
 | `answer` | `ref` question id, `text` 400 |
 | `ref` | `target` 1000, `title` 120, `kind`, `why` 200 optional, `access` (`ok` or `none`), plus `path` and `branch` for `kind=repo` |
@@ -346,7 +346,7 @@ Every walk of a node's own files (listing, `find`, resume section 5, `save`) ski
 
 Configuration comes from the daemon's environment: `AWT_BIN` (default `awt`), `AWT_ROOT` (default `${XDG_DATA_HOME:-~/.local/share}/awt`), `AWT_TIMEOUT_MS` (default 5000).
 
-The plugin never fails an agent. Every hook catches every error, and the two hooks the daemon waits for (`agent.create.before`, `agent.open.before`) run under one deadline of `AWT_TIMEOUT_MS` for the whole hook, not per `awt` call. At the deadline, or when the daemon cancels the hook, running `awt` children are killed and the request goes through unchanged: the agent starts without awt. Every `awt` call runs in the daemon's environment. The one permission request it answers is described under Hooks (an agent writing inside its own node).
+The plugin never fails an agent. Every hook catches every error, and the two hooks the daemon waits for (`agent.create.before`, `agent.open.before`) run under one deadline of `AWT_TIMEOUT_MS` for the whole hook, not per `awt` call. At the deadline, or when the daemon cancels the hook, running `awt` children are killed and the request goes through unchanged: the agent starts without awt. Every `awt` call runs in the daemon's environment, minus `AWT_DIR`, and with `--dir NODE --by paseo-plugin` (or the agent id). The one permission request it answers is described under Hooks (an agent writing inside its own node).
 
 Paseo 0.15.4's hook payloads carry no plugin metadata, no `background` flag, and neither the session-open request nor the other hook payloads carry `parentAgentId`: Paseo records a subagent's parent only as the label `paseo.parent-agent-id` (with `paseo.parent-server-id`), which `agent.open.before` receives in `request.labels`. The plugin reads the parent as `parentAgentId ?? labels["paseo.parent-agent-id"]`, remembers the one seen at open for later hooks of that agent, and uses it everywhere a parent is needed (placement, the parent note and ref, the nudge skip). The plugin therefore keeps all identity in awt: a node's `key` is the Paseo id, and nodes are found by key. A key carried by more than one node is an error: the plugin logs it, resolves it to nothing and leaves that agent untouched (no `AWT_DIR`, no tool, no nudge). Cached paths are dropped when the node is gone from disk or `awt` exits nonzero there, and looked up again once.
 

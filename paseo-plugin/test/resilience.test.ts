@@ -23,14 +23,14 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-test("C30 hook storm: 40 agents, each opened twice at once, no duplicates", async () => {
-  const r = mk({}, WS);
-  const ids = Array.from({ length: 40 }, (_, i) => `agt_${i}`);
+test("C30 hook storm: 100 agents, each opened twice at once, no duplicates", async () => {
+  const r = mk({ AWT_TIMEOUT_MS: "120000" }, WS);
+  const ids = Array.from({ length: 100 }, (_, i) => `agt_${i}`);
   const outs = await Promise.all([...ids, ...ids].map((id) => r.call("agent.open.before", openReq(id))));
   const nodes = r.nodes();
   const keys = nodes.map((n) => n.key);
   assert.equal(new Set(keys).size, keys.length);
-  assert.equal(nodes.filter((n) => n.kind === "agent").length, 40);
+  assert.equal(nodes.filter((n) => n.kind === "agent").length, 100);
   assert.equal(nodes.filter((n) => n.kind === "task").length, 1);
   for (const id of ids) {
     const dirs = new Set(outs.filter((o) => o.env.AWT_BY === id).map((o) => o.env.AWT_DIR));
@@ -92,6 +92,11 @@ test("C32 malformed payloads never throw and never leak secrets to disk", async 
     await r.call("agent.open.before", req).catch((e) => assert.fail(`variant ${i} threw: ${e}`));
   }
   await r.call("agent.open.before", openReq("../../escape"));
+  // create.after: a parent that was never seen, null parent and labels, null title
+  for (const [i, v] of [{ parentAgentId: "agt_ghost" }, { parentAgentId: null, labels: null }, { title: null, labels: null }, { parentAgentId: "../../ghost" }].entries()) {
+    await r.call("agent.create.after", { agent: agentPayload(`agt_c${i}`, v) }).catch((e) => assert.fail(`create.after ${i} threw: ${e}`));
+  }
+  assert.equal(r.nodes().filter((n) => n.key?.startsWith("paseo:agent/agt_c")).length, 4);
   for (const f of walk(r.root)) assert.ok(!readFileSync(f, "utf8").includes(AKIA), f);
   for (const n of r.nodes()) assert.ok(!n.path.includes(".."), n.path);
 });
@@ -158,6 +163,10 @@ test("C36 a key carried by two nodes, at two depths, is an error: logged, agent 
   const req = openReq("agt_5");
   assert.deepEqual(await r.call("agent.open.before", req), req.request);
   assert.ok(r.logs.some((l) => l.includes("paseo:agent/agt_5")), r.logs.join("\n"));
+  // an agent whose key is carried twice gets no nudge either
+  await r.call("agent.turn.before", { agent: agentPayload("agt_5"), turnId: "t" });
+  await r.call("agent.turn.after", { agent: agentPayload("agt_5"), turnId: "t", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(r.sent.length, 0);
   const other = await r.call("agent.open.before", openReq("agt_7"));
   assert.ok(other.env.AWT_DIR.endsWith("/" + r.nodes().find((n) => n.key === "paseo:agent/agt_7")!.path.split("/").pop()));
 });

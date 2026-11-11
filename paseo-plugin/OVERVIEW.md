@@ -7,4 +7,4 @@ Keeps one awt node tree for everything you do in Paseo: a workspace node per Pas
 - Archiving an agent or workspace marks its node done (or paused when work is still open).
 - The plugin approves only an agent's writes inside its own node dir, and never blocks an agent: if `awt` fails, the agent starts without it.
 
-Settings come from the environment of the Paseo daemon: `AWT_BIN` (default `awt`), `AWT_ROOT` (default `~/.local/share/awt`), `AWT_TIMEOUT_MS` (default 5000).
+Settings come from the environment of the Paseo daemon: `AWT_BIN` (default `awt`), `AWT_ROOT` (default `${XDG_DATA_HOME:-~/.local/share}/awt`), `AWT_TIMEOUT_MS` (default 5000).

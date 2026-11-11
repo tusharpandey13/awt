@@ -17,7 +17,7 @@ Companion to `SPEC.md`. It covers the node tree, the Paseo plugin and `migrate-p
 | `tests/test_tree.py` | Node tree: init, resolution, reads, status, doctor | always |
 | `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots | always |
 | `tests/test_docs.py` | Existing. Extended: every `awt` command shown in the docs and the tree-form `AGENTS.md` block uses real verbs and flags | always |
-| `tests/chaos.py` | Existing. New attacks in groups `tree`, `migrate`, `plugin` | `--quick` in CI, full nightly |
+| `tests/chaos.py` | Existing. New attacks in groups `tree`, `migrate`; the plugin attacks (C30-C40) are in `paseo-plugin/test/resilience.test.ts` | `--quick` in CI, full nightly |
 | `paseo-plugin/test/*.test.ts` | Plugin hooks, driven by recorded payloads against real `awt` | always (needs Node) |
 | `paseo-plugin/test/daemon.test.ts` | Plugin in a real daemon with a scripted agent | gated: `AWT_E2E_PASEO=1` or auto when `paseo` is on `PATH` |
 | `tests/agentic/scenarios.py` | Existing. New scenarios `tree-resume`, `subagent`, `cross-ref`, `switch-task` | on demand, spends tokens |
@@ -56,7 +56,7 @@ Names are scenario ids.
 - T1 `init --kind root` in an empty dir: `AGENTS.md` is the tree form (`awt`, not `./awt`), 2 KB at most, `workspaces/` exists, exit 0.
 - T2 Create workspace, task, agent, subagent by walking down with `AWT_DIR`. Each lands in the reserved directory with the layout for its kind. Only the task gets `AGENTS.md` (tree form) and `.claude/settings.json` (hook `awt resume --hook`); none gets `README.md`. Workspace and agent without `--goal` get the placeholder `task` row.
 - T3 Illegal pairs are refused with a `fix:` naming legal kinds: task under root, workspace under task, agent under workspace, agent under root.
-- T4 `--name` missing for a non-root kind, or `--goal`/`--done` missing for a task: exit 2. `--kind root` on an existing node: exit 1 with a fix.
+- T4 `--name` missing for a non-root kind, or only one of `--goal`/`--done`: exit 2. A task with neither: exit 1 with a fix. `--kind root` on an existing node: exit 1 with a fix.
 - T5 Name collision with a different key: second node gets a numeric suffix. Same key: same path printed, exit 0, no new rows (I7).
 - T6 Same key with a different name, or under a different parent anywhere in the tree, returns the existing node; nothing is renamed or moved.
 - T7 Slug rules: names with spaces, unicode, `..`, `/`, a leading dot, only punctuation. The directory is always `[a-z0-9-]`, at most 50, never escapes the parent. A name over the 60-char cap is refused with a `fix:`.
@@ -75,7 +75,7 @@ Names are scenario ids.
 - T20 `resume` in a leaf task prints lineage (outermost first) and inherited `rule` decisions with their origin. Non-rule ancestor decisions do not appear.
 - T20a `resume` in an agent node prints its task's goal, done-means, newest state, open questions, attention effects and non-rule decisions (section 10). A task node and a standalone node print no section 10.
 - T21 `resume` in a task with 3 agent children prints one line per child with its newest `now`; active first; an agent with no state but an `out.md` shows its age and size; one with neither shows `no state`.
-- T22 Budgets at maximum fill: 8 ancestors with 600-char goals and 300-char rules, 200 children with 700-char states; and an agent node whose task is full in every section. Results within 5,200 and 7,000 (I6); overflow is `+N more` lines, never a cut line.
+- T22 Budgets at maximum fill: 8 ancestors with goals at the 250-char cap and 300-char rules, 200 children with 700-char states; and an agent node whose task is full in every section. Results within 5,200 and 7,000 (I6); overflow is `+N more` lines, never a cut line.
 - T23 A standalone node prints the same brief as the previous release, byte for byte (I8).
 - T24 `list nodes`, `list tree`, `--all`, `--json` match each other and the filesystem (I1). A test pins every `--json` key listed in `SPEC.md`.
 - T25 `find --down` finds text in a grandchild's `docs/` and events; `--up` finds it in an ancestor; without a flag, neither. `--tree` searches the whole tree under the nearest root (sibling tasks and their agents too; a standalone node falls back to ancestors plus descendants). Hits capped at 40 in total, prefixed by relative node path.
@@ -177,7 +177,7 @@ Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scrip
 - E7 After a turn with no handoff the agent is nudged exactly once (C34 against a real daemon).
 - E8 A handoff recorded during the turn suppresses the nudge.
 
-Not covered by tests yet: E3, E5, E6.
+Not covered by the daemon test: E3, E5, E6. E5 is covered at hook level by P9; E6 only by C31 (awt failing), which leaves requests unchanged.
 
 ## Agentic (spends tokens)
 
