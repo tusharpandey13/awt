@@ -137,10 +137,10 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 
 ## Plugin (`paseo-plugin/test`)
 
-Tier 1, always. A harness loads `index.server.ts`, feeds it recorded payloads from `paseo-plugin/test/payloads/` (one file per hook, captured from a real 0.15 daemon and scrubbed), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
+Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by the installed `@getpaseo/plugin` SDK (so `tsc` catches drift, P11; recordings from a real daemon come with tier 2), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
 
 - P1 `workspace.create.after`: workspace node exists with key, repository ref, `awt.node` metadata set.
-- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 600 chars (350 for a subagent); no brief text enters the prompt.
+- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars; no brief text enters the prompt.
 - P3 `agent.create.before` for a workspace with no task: task `main` is created once, even for two simultaneous agents.
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
@@ -149,7 +149,7 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it recorded payloads fr
 - P8 `agent.permission.before` never returns an approval. `awt effect apply` requests are left to the person.
 - P9 Archive hooks: `done` when allowed, `paused` when refused.
 - P10 Background agents: no node, no prompt change, no env.
-- P11 The recorded payload files still parse against the hook types the installed `@getpaseo/plugin` exports (a drift check).
+- P11 `tsc --noEmit` over the plugin and its tests passes against the installed `@getpaseo/plugin` (a drift check). Run by `npm test`.
 
 Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: a small script in `paseo-plugin/test/fake-agent` that answers fixed prompts, runs `awt` through its shell tool as an agent would, and can spawn a subagent. If a scripted ACP provider turns out not to be possible in the installed version, the first implementation task is to record that and replace the agent with the closest real provider using a cheap model; this is the one place the plan depends on a thing not yet checked.
 

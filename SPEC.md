@@ -329,39 +329,41 @@ Ancestors are found by walking up from the node's real path, at most 8 levels. D
 
 ### Paseo plugin
 
-`paseo-plugin/` is a second target in this repository: a trusted local Paseo plugin (`paseo-plugin.json`, `index.server.ts`, `requirements.paseo` `>=0.14.0`). It contains no awt logic. It runs `awt` as a subprocess with `AWT_DIR`, `AWT_BY` and `--json`, so the CLI and Paseo see the same tree. Core `awt` stays one stdlib Python file; the plugin may use Node and TypeScript.
+`paseo-plugin/` is a second target in this repository: a trusted local Paseo plugin (`paseo-plugin.json`, `index.server.ts`, `server/`). It contains no awt logic of its own. It runs `awt` as a subprocess with `--json`, so the CLI and Paseo see the same tree. Core `awt` stays one stdlib Python file; the plugin is TypeScript.
 
-The plugin never fails an agent. Every hook runs `awt` with a 5 second timeout and catches every error; on failure the agent starts without awt and a `note` is attempted. Background agents are ignored everywhere.
+Configuration comes from the daemon's environment: `AWT_BIN` (default `awt`), `AWT_ROOT` (default `${XDG_DATA_HOME:-~/.local/share}/awt`), `AWT_TIMEOUT_MS` (default 5000).
 
-Mapping:
+The plugin never fails an agent. Every hook runs `awt` with a timeout and catches every error; on failure the agent starts without awt. It registers no `agent.permission.*` hook, so it never answers a permission request.
+
+Paseo 0.15.4's hook payloads carry no plugin metadata, no `background` flag, and the session-open request carries no `parentAgentId`. The plugin therefore keeps all identity in awt: a node's `key` is the Paseo id, and nodes are found by key.
 
 | Paseo | awt | Key |
 |---|---|---|
-| Project | not a node. Recorded as a `ref kind=paseo` on each workspace node | `paseo:project/<id>` |
+| Project | not a node. A `ref kind=paseo` on each workspace node | `paseo:project/<id>` |
 | Workspace | `workspace` node | `paseo:workspace/<id>` |
-| none | `task` node. Created by `/task`, or `main` on first agent | `paseo:task/<workspace id>/<n>` |
-| Agent | `agent` node under its task | `paseo:agent/<id>` |
-| Subagent (`parentAgentId`) | `agent` node under the parent agent's node | `paseo:agent/<id>` |
+| No workspace, or a `cwd` outside any | `workspace` `unassigned--<cwd basename>` | `paseo:unassigned/<hash of cwd>` |
+| none | `task` `main`, created with the workspace | `paseo:task/<workspace id>/main` |
+| Agent | `agent` node under the workspace's current task | `paseo:agent/<id>` |
+| Subagent | `agent` node under the parent agent's node when the parent is known at open time; otherwise under the task, with a `note` and a `ref kind=node` to the parent added at `agent.create.after` | `paseo:agent/<id>` |
 
-Paseo owns existence and liveness; awt owns goals, decisions, refs and handoffs. Paseo to awt lookup uses metadata `awt.node` (relative path) on workspaces and agents, and `awt.task` on agents. awt to Paseo lookup uses the node's `paseo:` ref. Both are rebuilt from `list nodes --json` keys when metadata is missing.
+The current task of a workspace is the latest `state` row with scope `current-task` on the workspace node, whose `now` is a task key. With no such row it is `main`. A person sets it with `awt state --scope current-task --now <task key> --next -`; a later `/task` command can do the same.
 
 Hooks:
 
 | Hook | Action |
 |---|---|
-| `workspace.create.after` | Ensure the workspace node, `ref` the repository path, set `awt.node` |
-| `agent.create.before` | Resolve the task (request metadata `awt.task`, else workspace `awt.currentTask`, else `main`). Append the static awt block to `systemPrompt` (at most 600 chars: rules, "call `awt_resume` first", "never `effect apply` unprompted"). For a subagent, append the short subagent block (at most 350 chars) instead |
-| `agent.create.after` | Create the agent node, set `awt.node` and `awt.task` |
-| `agent.open.before` | Set `AWT_DIR` and `AWT_BY`. Attach the `awt_resume` tool (returns `resume` output for this node). Runs on every open, so resumed agents are covered |
-| `agent.turn.after` | If the turn completed, the agent is not a subagent, and its node has no `state` newer than the turn start, send one follow-up asking for `awt state`. At most one per turn chain; the follow-up's own turn never triggers another |
-| `agent.permission.before` | Never approves anything. `awt effect apply` stays pending for a person |
+| `workspace.create.after` | Ensure the workspace node (refs: working directory, project, workspace) and its `main` task |
+| `agent.create.before` | Append the static awt block (one paragraph, at most 700 chars) to `systemPrompt`, once. Nothing else changes |
+| `agent.open.before` | Only for `purpose: interactive`. Ensure the agent's node. Add `AWT_DIR` (the node) and `AWT_BY` (the agent id) to `env`, and the `awt_resume` tool. Runs on every open, so resumed agents get the same node |
+| `agent.create.after` | Ensure the node (covers an order where it runs before open). When `parentAgentId` is set and the node is not under the parent's, record the parent as above |
+| `agent.turn.before` / `agent.turn.after` | After a completed turn of a non-subagent with no `state` row newer than the turn's start, send one follow-up asking for `awt state`. The turn that answers a follow-up never triggers another |
 | `agent.archive.after`, `workspace.archive.after` | `awt status done`; if refused, `paused` |
 
-Commands (second phase): `/task new "goal"`, `/task list`, `/task switch <n>` set `awt.currentTask` on the workspace; a composer pill shows the current task. `/awt migrate` runs the migration with exact workspace ids from the SDK.
+`awt_resume` takes no input and prints the brief of the calling agent's own node; it cannot read another node.
 
-Prompt cost: only the static block enters the system prompt, so it caches. The brief is fetched by tool, fresh on every resume. The block is the same text for every agent of a kind, so it is stored once in the plugin, never per node.
+Prompt cost: only the static block enters the system prompt, so it caches. The brief arrives by tool, fresh on every call.
 
-Compatibility: the plugin is optional. Without Paseo, `awt init --kind` and `list tree` give the same hierarchy from a shell. Hook names above follow the plugin docs for Paseo 0.14 and later; the first implementation task is to check each payload field named here against a real daemon, in particular whether `parentAgentId` is present in `agent.create.before`.
+Not in this version: `/task` commands and the composer pill, background-agent filtering (needs a Paseo release that reports it), and metadata (`awt.node`). Hook order between `agent.open.before` and `agent.create.after` is unverified against a live daemon; the gated tier 2 tests in `tests/TEST-SPEC.md` are where that is settled.
 
 ### migrate-paseo
 

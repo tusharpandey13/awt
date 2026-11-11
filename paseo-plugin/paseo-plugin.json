@@ -1,0 +1,9 @@
+{
+  "id": "awt",
+  "name": "awt",
+  "description": "Tracks every workspace, task and agent in an awt node tree",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.15.4"
+  }
+}
