@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, afterEach } from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { agentPayload, exists, openReq, rig, type Rig } from "./harness.js";
 import { AWT_BLOCK } from "../server/prompt.js";
@@ -128,9 +128,68 @@ test("P7 no nudge for failed, canceled, subagent or unknown turns", async () => 
   assert.equal(r.sent.length, 0);
 });
 
-test("P8 the plugin registers no permission hook", () => {
-  const r = mk();
-  assert.deepEqual([...r.hooks.keys()].filter((k) => k.includes("permission")), []);
+test("P4 a subagent whose parent is only a label nests under the parent, in open.before and create.after", async () => {
+  const r = mk({}, WS);
+  const parent = await r.call("agent.open.before", openReq("agt_p"));
+  const labels = { "paseo.parent-agent-id": "agt_p", "paseo.parent-server-id": "srv_1" };
+  const child = await r.call("agent.open.before", openReq("agt_c", { labels }));
+  assert.ok(child.env.AWT_DIR.startsWith(parent.env.AWT_DIR + "/agents/"), child.env.AWT_DIR);
+  // later hooks may carry no parentAgentId and no labels: the parent seen at open still applies
+  await r.call("agent.create.after", { agent: agentPayload("agt_c") });
+  assert.equal(r.rows(child.env.AWT_DIR, "note").length, 0);
+  // a payload with only the label works too, even for an agent never opened
+  await r.call("agent.create.after", { agent: { ...agentPayload("agt_d"), labels } });
+  const d = r.nodes().find((x) => x.key === "paseo:agent/agt_d")!;
+  assert.ok((r.root + "/" + d.path).startsWith(parent.env.AWT_DIR + "/agents/"), d.path);
+});
+
+test("P7 no nudge for a subagent known only by its label", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_p"));
+  await r.call("agent.open.before", openReq("agt_c", { labels: { "paseo.parent-agent-id": "agt_p" } }));
+  await r.call("agent.turn.before", { agent: agentPayload("agt_c"), turnId: "t" });
+  await r.call("agent.turn.after", { agent: agentPayload("agt_c"), turnId: "t", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(r.sent.length, 0);
+  await r.call("agent.turn.before", { agent: { ...agentPayload("agt_e"), labels: { "paseo.parent-agent-id": "agt_p" } }, turnId: "t" });
+  await r.call("agent.turn.after", { agent: { ...agentPayload("agt_e"), labels: { "paseo.parent-agent-id": "agt_p" } }, turnId: "t", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(r.sent.length, 0);
+});
+
+const ask = (id: string, requestId: string, over: Record<string, unknown>) => ({ agent: agentPayload(id), request: { id: requestId, provider: "opencode", kind: "tool", ...over } });
+const extDir = (...dirs: string[]) => ({ name: "external_directory", input: { patterns: dirs.map((d) => d + "/*") } });
+
+test("P8 permission: an agent writing inside its own node is allowed, nothing else is touched", async () => {
+  const r = mk({}, WS);
+  const a = await r.call("agent.open.before", openReq("agt_a"));
+  const b = await r.call("agent.open.before", openReq("agt_b"));
+  const own: string = a.env.AWT_DIR;
+  mkdirSync(join(own, "sub"), { recursive: true });
+  const outside = join(r.tmp, "outside");
+  mkdirSync(outside);
+  symlinkSync(outside, join(own, "link"));
+  const allowed = [extDir(own), extDir(join(own, "sub")), extDir(join(own, "not-yet", "deeper")), { name: "write", detail: { type: "write", filePath: join(own, "notes.md") } }];
+  const refused = [
+    extDir(b.env.AWT_DIR), // a sibling
+    extDir(join(own, "..")), // up to the parent
+    extDir(join(own, "sub", "..", "..", "x")),
+    extDir(join(own, "link")), // symlink out
+    { name: "write", detail: { type: "write", filePath: join(own, "link", "f.md") } },
+    extDir(r.root), // AWT_ROOT as a whole
+    extDir(own, r.root), // one bad target spoils the request
+    extDir(own + "-evil"),
+    { name: "external_directory", input: { patterns: [own + "/**/*"] } },
+    { name: "external_directory", input: { patterns: ["rel/*"] } },
+    { name: "external_directory" },
+    { name: "bash", detail: { type: "shell", command: "ls", cwd: own } },
+  ];
+  let n = 0;
+  for (const req of allowed) await r.call("agent.permission.before", ask("agt_a", `ok${n++}`, req));
+  assert.deepEqual(r.answered.map((x) => x.requestId), ["ok0", "ok1", "ok2", "ok3"]);
+  assert.ok(r.answered.every((x) => x.id === "agt_a" && x.behavior === "allow"));
+  for (const req of refused) await r.call("agent.permission.before", ask("agt_a", `no${n++}`, req));
+  await r.call("agent.permission.before", ask("agt_unknown", "u1", extDir(own))); // an agent with no node of its own
+  assert.equal(r.answered.length, 4);
+  assert.deepEqual(r.logs, []);
 });
 
 test("P9 archive hooks mark done, or paused when work is open", async () => {
