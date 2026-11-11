@@ -114,10 +114,16 @@ Same style as today: seeded, one line per attack, a failure prints the seed and 
 
 **plugin** (against the recorded-payload harness, so it runs everywhere)
 - C30 *Hook storm.* 100 `agent.create.*` and `agent.open.before` events at once, with duplicates: 100 nodes, no duplicates.
-- C31 *Awt failing.* `awt` missing, hanging, exiting non-zero or writing garbage on stdout: every hook still returns, within the timeout, with the agent's config unchanged except for the notice.
+- C31 *Awt failing.* `awt` missing, hanging, exiting non-zero or writing garbage on stdout: every hook still returns, within the timeout, with the request unchanged (no prompt block either).
 - C32 *Malformed payloads.* Missing `workspaceId`, `parentAgentId` pointing at an unknown agent, null metadata, huge titles: no throw.
 - C33 *Replay.* Every hook delivered twice and out of order (`after` before `before`): the tree is the same as with one ordered delivery (I7).
-- C34 *Nudge loop.* A completed turn without state triggers one follow-up; the follow-up's turn does not trigger another, even if the agent again records nothing.
+- C34 *Nudge loop.* A completed turn without state triggers one follow-up; no further follow-up until the agent has recorded state, even if it records nothing again.
+- C35 *No dir, no nudge.* An agent that never got an `AWT_DIR` is never nudged.
+- C36 *Duplicate keys.* The same key on nodes at two depths: logged, the agent is untouched, other agents are unaffected.
+- C37 *Slow but working awt.* Each call succeeds but the chain exceeds the deadline: `open.before` returns the request unchanged at the deadline.
+- C38 *Cancel.* An aborted hook signal kills the running `awt` children.
+- C39 *Env.* The harness environment reaches every `awt` child.
+- C40 *Moved node.* A node moved or broken while the daemon runs is found again.
 
 ## Migration (`test_migrate_paseo.py`)
 
@@ -139,21 +145,23 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 
 Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by the installed `@getpaseo/plugin` SDK (so `tsc` catches drift, P11; recordings from a real daemon come with tier 2), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
 
-- P1 `workspace.create.after`: workspace node exists with key, repository ref, `awt.node` metadata set.
+- P1 `workspace.create.after`: workspace node exists with key and refs (working directory, project, workspace) and a `main` task; the project's display name labels the workspace (P13); replay adds nothing.
 - P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars; no brief text enters the prompt.
-- P3 `agent.create.before` for a workspace with no task: task `main` is created once, even for two simultaneous agents.
+- P3 `agent.open.before` for a workspace with no task: task `main` is created once, even for several simultaneous agents.
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
-- P6 `awt_resume` tool returns the brief for its node and rejects any other node.
-- P7 `agent.turn.after`: nudge only for completed, non-subagent, non-background turns with no newer state; not for failed or canceled turns.
+- P6 `awt_resume` takes no input and returns the brief of the node found for the calling agent's key; an agent id with no node errors. A key on two nodes resolves to nothing (C36).
+- P7 `agent.turn.after`: nudge only for completed turns of non-subagents that have an `AWT_DIR`, with no newer state, at most once per stretch (C34, C35); not for failed or canceled turns.
 - P8 `agent.permission.before` never returns an approval. `awt effect apply` requests are left to the person.
 - P9 Archive hooks: `done` when allowed, `paused` when refused.
-- P10 Background agents: no node, no prompt change, no env.
-- P11 `tsc --noEmit` over the plugin and its tests passes against the installed `@getpaseo/plugin` (a drift check). Run by `npm test`.
+- P10 Background agents: not in this version (Paseo 0.15.4 does not report them); only `purpose: interactive` opens get a node, env or tool.
+- P11 `tsc --noEmit` over the plugin and its tests passes against the installed `@getpaseo/plugin` (a drift check). The harness mocks of `paseo` are typed against `PaseoApi`. Run by `npm test`.
+- P12 Every `resolved` URL in `package-lock.json` is on `registry.npmjs.org`.
+- P13 The workspace label uses `projectDisplayName` from `projects.list`.
 
 Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: a small script in `paseo-plugin/test/fake-agent` that answers fixed prompts, runs `awt` through its shell tool as an agent would, and can spawn a subagent. If a scripted ACP provider turns out not to be possible in the installed version, the first implementation task is to record that and replace the agent with the closest real provider using a cheap model; this is the one place the plan depends on a thing not yet checked.
 
-- E1 Create workspace and agent with the CLI: nodes appear, metadata set, agent's environment contains `AWT_DIR`.
+- E1 Create workspace and agent with the CLI: nodes appear with their keys, agent's environment contains `AWT_DIR`.
 - E2 The scripted agent runs `awt note`; the row is in its node, not the task's.
 - E3 The scripted agent spawns a subagent: the child node sits under the parent's node and gets the subagent block.
 - E4 Restart the daemon, resume the agent: same node, no duplicate.

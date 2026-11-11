@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { awt, parseJson } from "./awt";
-import type { AwtConfig } from "./config";
+import { awt, parseJson, type AwtResult } from "./awt.js";
+import type { AwtConfig } from "./config.js";
 
 export type Kind = "root" | "workspace" | "task" | "agent";
 
@@ -20,16 +21,18 @@ const cut = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n - 1).tri
 
 export class Tree {
   private readonly keys = new Map<string, string>();
+  /** Keys that more than one node carries. They resolve to nothing, so no agent is steered to a node it may not own. */
+  private duplicated = new Set<string>();
   private rootReady?: Promise<string>;
 
-  constructor(readonly cfg: AwtConfig) {}
+  constructor(readonly cfg: AwtConfig, private readonly log: (message: string) => void = () => {}) {}
 
   /** Creates the root once per process. Idempotent on disk. */
   root(): Promise<string> {
     this.rootReady ??= (async () => {
       await mkdir(this.cfg.root, { recursive: true });
       const r = await awt(this.cfg, this.cfg.root, ["init", "--kind", "root"]);
-      if (r.code !== 0) {
+      if (r.code !== 0 || r.stdout.trim().split(/\s+/)[0] !== "init") {
         this.rootReady = undefined;
         throw new Error(`awt init --kind root failed: ${r.stderr.trim().slice(0, 160)}`);
       }
@@ -40,8 +43,9 @@ export class Tree {
 
   /** Finds or creates a child by key. A refused name (for example one that matches the secret scan) falls back to `fallback`. */
   async ensure(parent: string, kind: Exclude<Kind, "root">, name: string, key: string, opts: { goal?: string; done?: string; fallback?: string } = {}): Promise<string> {
-    const cached = this.keys.get(key);
+    const cached = this.cached(key);
     if (cached) return cached;
+    if (this.duplicated.has(key)) throw new Error(`key ${key} is carried by more than one node`);
     const attempt = async (label: string, goal: string | undefined) => {
       const args = ["init", "--kind", kind, "--name", cut(clean(label) || key, 60), "--key", key];
       const g = goal ?? (kind === "task" ? label : undefined);
@@ -57,16 +61,50 @@ export class Tree {
     return path;
   }
 
-  /** Finds a node by key anywhere in the tree. */
+  /** A cached path, dropped when the node is gone from disk. */
+  private cached(key: string): string | undefined {
+    const path = this.keys.get(key);
+    if (path && !existsSync(join(path, ".awt"))) {
+      this.keys.delete(key);
+      return undefined;
+    }
+    return path;
+  }
+
+  /** Finds a node by key anywhere in the tree. A key carried by more than one node is an error: logged, and null. */
   async find(key: string): Promise<string | null> {
-    const cached = this.keys.get(key);
+    const cached = this.cached(key);
     if (cached) return cached;
     const root = await this.root();
     const r = await awt(this.cfg, root, ["list", "nodes", "--all", "--json"]);
+    const seen = new Map<string, string>();
+    const dups = new Set<string>();
     for (const row of parseJson<NodeRow[]>(r.stdout, [])) {
-      if (row.key) this.keys.set(row.key, join(root, row.path));
+      if (!row.key) continue;
+      if (seen.has(row.key)) dups.add(row.key);
+      else seen.set(row.key, join(root, row.path));
     }
+    for (const k of dups) if (!this.duplicated.has(k)) this.log(`awt plugin: key ${k} is carried by more than one node; ignoring it`);
+    this.duplicated = dups;
+    for (const [k, path] of seen) if (!dups.has(k)) this.keys.set(k, path);
+    for (const k of dups) this.keys.delete(k);
     return this.keys.get(key) ?? null;
+  }
+
+  /** True when the last lookup found `key` on more than one node. */
+  isDuplicate(key: string): boolean {
+    return this.duplicated.has(key);
+  }
+
+  /** Runs `fn` on the node for `key`. A nonzero exit drops the cached path and retries once on a fresh lookup. */
+  async onNode(key: string, fn: (node: string) => Promise<AwtResult>): Promise<AwtResult | null> {
+    const node = await this.find(key);
+    if (!node) return null;
+    const r = await fn(node);
+    if (r.code === 0) return r;
+    this.keys.delete(key);
+    const again = await this.find(key);
+    return again && again !== node ? fn(again) : r;
   }
 
   async ensureRefs(node: string, refs: { target: string; title: string; why?: string; noAccess?: boolean }[]): Promise<void> {
@@ -80,15 +118,10 @@ export class Tree {
     }
   }
 
-  async status(node: string): Promise<string> {
-    return parseJson<{ status?: string }>((await awt(this.cfg, node, ["resume", "--json"])).stdout, {}).status ?? "active";
-  }
-
-  async setStatusDoneOrPaused(node: string): Promise<"done" | "paused" | "unchanged"> {
-    if ((await this.status(node)) === "done") return "unchanged";
+  async setStatusDoneOrPaused(node: string): Promise<AwtResult> {
+    const current = parseJson<{ status?: string }>((await awt(this.cfg, node, ["resume", "--json"])).stdout, {}).status;
+    if (current === "done") return { code: 0, stdout: "", stderr: "" };
     const done = await awt(this.cfg, node, ["status", "done"]);
-    if (done.code === 0) return "done";
-    const paused = await awt(this.cfg, node, ["status", "paused"]);
-    return paused.code === 0 ? "paused" : "unchanged";
+    return done.code === 0 ? done : awt(this.cfg, node, ["status", "paused"]);
   }
 }

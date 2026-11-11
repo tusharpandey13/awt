@@ -3,21 +3,17 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "files": [
-    "paseo-plugin.json",
-    "OVERVIEW.md",
-    "index.server.ts",
-    "server/"
-  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsc --noEmit && node --import tsx --test test/*.test.ts"
   },
-  "devDependencies": {
+  "dependencies": {
     "@getpaseo/plugin": "0.15.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.9.3",
-    "zod": "^4.4.3"
+    "typescript": "^5.9.3"
   }
 }

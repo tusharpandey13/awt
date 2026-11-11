@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test, afterEach } from "node:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentPayload, exists, openReq, rig, type Rig } from "./harness";
-import { AWT_BLOCK } from "../server/prompt";
+import { agentPayload, exists, openReq, rig, type Rig } from "./harness.js";
+import { AWT_BLOCK } from "../server/prompt.js";
 
 const rigs: Rig[] = [];
 const mk = (...a: Parameters<typeof rig>) => {
@@ -169,4 +170,19 @@ test("current-task pointer set with the CLI redirects new agents", async () => {
   r.awt(ws, "state", "--scope", "current-task", "--now", "paseo:task/wks_1/retry", "--next", "-");
   const out = await r.call("agent.open.before", openReq("agt_9"));
   assert.match(out.env.AWT_DIR, /tasks\/retry-bug\/agents\//);
+});
+
+test("P12 the lockfile resolves every package from registry.npmjs.org", () => {
+  const lock = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package-lock.json"), "utf8"));
+  const urls = Object.values<{ resolved?: string }>(lock.packages).map((p) => p.resolved).filter((u): u is string => !!u);
+  assert.ok(urls.length > 0);
+  const bad = urls.filter((u) => new URL(u).host !== "registry.npmjs.org");
+  assert.deepEqual(bad, []);
+});
+
+test("P13 the project display name labels the workspace", async () => {
+  const r = mk({}, WS);
+  await r.call("workspace.create.after", { workspace: { id: "wks_1", projectId: "prj_1", cwd: "/tmp/other", name: "main", archivedAt: null } });
+  const ws = r.nodes().find((x) => x.key === "paseo:workspace/wks_1")!;
+  assert.equal(ws.path, "workspaces/parsekit-main");
 });

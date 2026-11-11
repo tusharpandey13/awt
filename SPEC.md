@@ -329,13 +329,13 @@ Ancestors are found by walking up from the node's real path, at most 8 levels. D
 
 ### Paseo plugin
 
-`paseo-plugin/` is a second target in this repository: a trusted local Paseo plugin (`paseo-plugin.json`, `index.server.ts`, `server/`). It contains no awt logic of its own. It runs `awt` as a subprocess with `--json`, so the CLI and Paseo see the same tree. Core `awt` stays one stdlib Python file; the plugin is TypeScript.
+`paseo-plugin/` is a second target in this repository: a trusted local Paseo plugin (`paseo-plugin.json`, `index.server.ts`, `server/`). It keeps no tree of its own: every read and write goes through `awt` as a subprocess (with `--json` for reads), so the CLI and Paseo see the same tree. It does own the glue: key-to-path lookup, the current-task pointer, hashing for unassigned workspaces, parent note/ref repair, and the done-then-paused status rule. Core `awt` stays one stdlib Python file; the plugin is TypeScript.
 
 Configuration comes from the daemon's environment: `AWT_BIN` (default `awt`), `AWT_ROOT` (default `${XDG_DATA_HOME:-~/.local/share}/awt`), `AWT_TIMEOUT_MS` (default 5000).
 
-The plugin never fails an agent. Every hook runs `awt` with a timeout and catches every error; on failure the agent starts without awt. It registers no `agent.permission.*` hook, so it never answers a permission request.
+The plugin never fails an agent. Every hook catches every error, and the two hooks the daemon waits for (`agent.create.before`, `agent.open.before`) run under one deadline of `AWT_TIMEOUT_MS` for the whole hook, not per `awt` call. At the deadline, or when the daemon cancels the hook, running `awt` children are killed and the request goes through unchanged: the agent starts without awt. Every `awt` call runs in the daemon's environment. It registers no `agent.permission.*` hook, so it never answers a permission request.
 
-Paseo 0.15.4's hook payloads carry no plugin metadata, no `background` flag, and the session-open request carries no `parentAgentId`. The plugin therefore keeps all identity in awt: a node's `key` is the Paseo id, and nodes are found by key.
+Paseo 0.15.4's hook payloads carry no plugin metadata, no `background` flag, and the session-open request carries no `parentAgentId`. The plugin therefore keeps all identity in awt: a node's `key` is the Paseo id, and nodes are found by key. A key carried by more than one node is an error: the plugin logs it, resolves it to nothing and leaves that agent untouched (no `AWT_DIR`, no tool, no nudge). Cached paths are dropped when the node is gone from disk or `awt` exits nonzero there, and looked up again once.
 
 | Paseo | awt | Key |
 |---|---|---|
@@ -353,13 +353,13 @@ Hooks:
 | Hook | Action |
 |---|---|
 | `workspace.create.after` | Ensure the workspace node (refs: working directory, project, workspace) and its `main` task |
-| `agent.create.before` | Append the static awt block (one paragraph, at most 700 chars) to `systemPrompt`, once. Nothing else changes |
+| `agent.create.before` | Append the static awt block (one paragraph, at most 700 chars) to `systemPrompt`, once, and only when `awt` is working (the root node could be ensured). Otherwise the request is unchanged. Nothing else changes |
 | `agent.open.before` | Only for `purpose: interactive`. Ensure the agent's node. Add `AWT_DIR` (the node) and `AWT_BY` (the agent id) to `env`, and the `awt_resume` tool. Runs on every open, so resumed agents get the same node |
 | `agent.create.after` | Ensure the node (covers an order where it runs before open). When `parentAgentId` is set and the node is not under the parent's, record the parent as above |
-| `agent.turn.before` / `agent.turn.after` | After a completed turn of a non-subagent with no `state` row newer than the turn's start, send one follow-up asking for `awt state`. The turn that answers a follow-up never triggers another |
+| `agent.turn.before` / `agent.turn.after` | Nudge rule: at most one follow-up asking for `awt state` per agent per stretch, where a stretch ends when the agent records a `state` row. After a completed turn of a non-subagent that got an `AWT_DIR` from `agent.open.before` in this process, with no `state` row newer than the turn's start, send the follow-up unless one was sent since the agent last recorded state. Agents without `AWT_DIR` are never nudged |
 | `agent.archive.after`, `workspace.archive.after` | `awt status done`; if refused, `paused` |
 
-`awt_resume` takes no input and prints the brief of the calling agent's own node; it cannot read another node.
+`awt_resume` takes no input and prints the brief of the node found for the calling agent's key. It cannot name another node; which node it reads is decided by the key lookup, which is only as safe as key uniqueness (see above).
 
 Prompt cost: only the static block enters the system prompt, so it caches. The brief arrives by tool, fresh on every call.
 

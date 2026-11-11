@@ -1,5 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { registerHooks } from "./server/hooks";
+import { registerHooks } from "./server/hooks.js";
 
 export default function contribute(server: PluginServerContext) {
   return registerHooks(server);

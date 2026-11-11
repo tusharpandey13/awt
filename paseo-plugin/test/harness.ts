@@ -2,7 +2,8 @@ import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
-import { registerHooks } from "../server/hooks";
+import type { PaseoApi } from "@getpaseo/client";
+import { registerHooks } from "../server/hooks.js";
 
 export const AWT = resolve(import.meta.dirname, "..", "..", "awt");
 
@@ -15,6 +16,8 @@ export interface Rig {
   sent: { id: string; text: string }[];
   call(name: string, payload: unknown): Promise<any>;
   hooks: Map<string, Handler>;
+  /** A new plugin process on the same tree: empty caches. */
+  restart(): void;
   awt(dir: string, ...args: string[]): string;
   nodes(): { path: string; kind: string; name: string; key: string | null; status: string }[];
   rows(node: string, type?: string): any[];
@@ -28,16 +31,31 @@ export function rig(extraEnv: Record<string, string> = {}, workspaces: Record<st
   const hooks = new Map<string, Handler>();
   const logs: string[] = [];
   const sent: { id: string; text: string }[] = [];
-  registerHooks({ addHook: (name: string, fn: Handler) => (hooks.set(name, fn), () => hooks.delete(name)) } as any, env, (m) => logs.push(m));
+  const start = () => registerHooks({ addHook: (name: string, fn: Handler) => (hooks.set(name, fn), () => hooks.delete(name)) } as any, env, (m) => logs.push(m));
+  start();
+  // Typed against the SDK, so a mock cannot drift from the real shapes.
+  const project: Awaited<ReturnType<PaseoApi["projects"]["list"]>>["projects"][number] = { projectId: "prj_1", projectDisplayName: "parsekit", projectRootPath: "/tmp/parsekit", projectKind: "git" };
   const paseo = {
-    workspaces: { ref: (id: string) => ({ ...(workspaces[id] ?? { name: null, directory: null, projectId: null }), refresh: async () => {} }) },
-    projects: { list: async () => ({ projects: [{ id: "prj_1", name: "parsekit" }] }) },
-    agents: { ref: (id: string) => ({ send: async (text: string) => void sent.push({ id, text }) }) },
-  };
+    workspaces: {
+      // Only the members the plugin reads; the cast is confined to the handle's extra members.
+      ref: (id: string) => {
+        const h: Pick<ReturnType<PaseoApi["workspaces"]["ref"]>, "name" | "directory" | "projectId" | "refresh"> = {
+          name: workspaces[id]?.name ?? null,
+          directory: workspaces[id]?.directory ?? null,
+          projectId: workspaces[id]?.projectId ?? null,
+          refresh: async () => null,
+        };
+        return h as ReturnType<PaseoApi["workspaces"]["ref"]>;
+      },
+    },
+    projects: { list: async () => ({ requestId: "r1", projects: [project] }) },
+    agents: { ref: (id: string) => ({ send: async (text: string) => void sent.push({ id, text }) }) as unknown as ReturnType<PaseoApi["agents"]["ref"]> },
+  } satisfies Partial<{ [K in keyof PaseoApi]: Partial<PaseoApi[K]> }>;
   const ctx = { paseo, signal: new AbortController().signal };
   const run = (dir: string, args: string[]) => execFileSync(AWT, ["--dir", dir, ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
     tmp, root, logs, sent, hooks,
+    restart: () => (hooks.clear(), void start()),
     call: async (name, payload) => {
       const h = hooks.get(name);
       if (!h) throw new Error("no hook " + name);

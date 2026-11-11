@@ -3,10 +3,11 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import type { PluginHookAgent, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { awt, parseJson } from "./awt";
-import { readConfig } from "./config";
-import { NUDGE, withBlock } from "./prompt";
-import { Tree } from "./tree";
+import { awt, parseJson, withSignal } from "./awt.js";
+import type { AwtConfig } from "./config.js";
+import { readConfig } from "./config.js";
+import { NUDGE, withBlock } from "./prompt.js";
+import { Tree } from "./tree.js";
 
 type Log = (message: string) => void;
 
@@ -23,11 +24,39 @@ async function safe<T>(log: Log, what: string, fallback: T, fn: () => Promise<T>
   }
 }
 
+/**
+ * One deadline for a whole waiting hook (`cfg.timeoutMs`, not per awt call). On expiry, or when the daemon cancels the hook,
+ * the running awt children are killed and the request goes through unchanged.
+ */
+async function within<T>(cfg: AwtConfig, signal: AbortSignal | undefined, log: Log, what: string, fallback: T, fn: () => Promise<T>): Promise<T> {
+  const ac = new AbortController();
+  const cancel = () => ac.abort();
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) cancel();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<T>((resolve) => {
+    timer = setTimeout(() => {
+      log(`awt plugin: ${what} exceeded ${cfg.timeoutMs} ms; continuing without awt`);
+      cancel();
+      resolve(fallback);
+    }, cfg.timeoutMs);
+  });
+  try {
+    return await Promise.race([safe(log, what, fallback, () => withSignal(ac.signal, fn)), late]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+
 export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): () => void {
   const cfg = readConfig(env);
-  const tree = new Tree(cfg);
+  const tree = new Tree(cfg, log);
   const turnStart = new Map<string, number>();
-  const nudged = new Set<string>();
+  /** Agents whose last open.before gave them an AWT_DIR. Only these are nudged. */
+  const withDir = new Set<string>();
+  /** When each agent was last nudged. It is nudged again only after it has recorded state since. */
+  const nudgedAt = new Map<string, number>();
 
   const taskFor = async (workspaceNode: string, workspaceKeyPart: string): Promise<string> => {
     const pointer = parseJson<{ scope?: string; now?: string }[]>((await awt(cfg, workspaceNode, ["list", "state", "--json"])).stdout, []).find((s) => s.scope === "current-task");
@@ -78,6 +107,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     const key = `paseo:agent/${agent.id}`;
     const existing = await tree.find(key);
     if (existing) return existing;
+    if (tree.isDuplicate(key)) throw new Error(`key ${key} is carried by more than one node`);
     const ws = await workspaceNode(agent.workspaceId, agent.cwd, ctx);
     let parent: string | null = agent.parentAgentId ? await tree.find(`paseo:agent/${agent.parentAgentId}`) : null;
     parent ??= await taskFor(ws.node, ws.part);
@@ -93,9 +123,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     description: "Print the awt brief for this agent's node: goal, lineage, rules, state, open questions. Call it first.",
     input: z.object({}),
     async execute(_input, context) {
-      const node = await tree.find(`paseo:agent/${context.agent.id}`);
-      if (!node) return { text: "No awt node for this agent yet.", isError: true };
-      const r = await awt(cfg, node, ["resume"], context.agent.id);
+      const r = await tree.onNode(`paseo:agent/${context.agent.id}`, (node) => awt(cfg, node, ["resume"], context.agent.id));
+      if (!r) return { text: "No awt node for this agent yet.", isError: true };
       return r.code === 0 ? { text: r.stdout } : { text: r.stderr || "awt resume failed", isError: true };
     },
   });
@@ -107,8 +136,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     await safe(log, "workspace.create.after", undefined, async () => {
       let projectName: string | null = null;
       try {
-        const projects = await ctx.paseo.projects.list();
-        projectName = (projects as unknown as { projects?: { id?: string; projectId?: string; name?: string }[] }).projects?.find((p) => (p.id ?? p.projectId) === workspace.projectId)?.name ?? null;
+        const res = await ctx.paseo.projects.list();
+        projectName = res.projects.find((p) => p.projectId === workspace.projectId)?.projectDisplayName ?? null;
       } catch {
         /* best effort */
       }
@@ -117,17 +146,20 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     });
   }));
 
-  add(server.addHook("agent.create.before", async ({ request }) => {
-    return safe(log, "agent.create.before", request, async () => ({
-      ...request,
-      config: { ...request.config, systemPrompt: withBlock(request.config.systemPrompt) },
-    }));
+  add(server.addHook("agent.create.before", async ({ request }, ctx) => {
+    // The block tells the agent to use awt, so it goes in only when awt works.
+    return within(cfg, ctx.signal, log, "agent.create.before", request, async () => {
+      await tree.root();
+      return { ...request, config: { ...request.config, systemPrompt: withBlock(request.config.systemPrompt) } };
+    });
   }));
 
   add(server.addHook("agent.open.before", async ({ request }, ctx) => {
     if (request.purpose !== "interactive") return request;
-    return safe(log, "agent.open.before", request, async () => {
+    withDir.delete(request.agentId);
+    return within(cfg, ctx.signal, log, "agent.open.before", request, async () => {
       const node = await agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider }, ctx);
+      withDir.add(request.agentId);
       return { ...request, env: { ...request.env, AWT_DIR: node, AWT_BY: request.agentId }, tools: [...request.tools.filter((t) => t.name !== "awt_resume"), awtResume] };
     });
   }));
@@ -153,18 +185,19 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     await safe(log, "agent.turn.after", undefined, async () => {
       const started = turnStart.get(agent.id);
       turnStart.delete(agent.id);
-      if (nudged.delete(agent.id)) return; // the turn that answered our nudge never triggers another
-      if (outcome.kind !== "completed" || agent.parentAgentId || started === undefined) return;
-      const node = await tree.find(`paseo:agent/${agent.id}`);
-      if (!node) return;
-      const states = parseJson<{ ts?: string }[]>((await awt(cfg, node, ["list", "state", "--all", "--json"], agent.id)).stdout, []);
-      const last = states.map((s) => Date.parse(s.ts ?? "")).filter(Number.isFinite).sort((a, b) => b - a)[0] ?? 0;
+      if (outcome.kind !== "completed" || agent.parentAgentId || started === undefined || !withDir.has(agent.id)) return;
+      const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
+      if (!r) return;
+      const last = parseJson<{ ts?: string }[]>(r.stdout, []).map((s) => Date.parse(s.ts ?? "")).filter(Number.isFinite).sort((a, b) => b - a)[0] ?? 0;
       if (last >= started) return;
-      nudged.add(agent.id);
+      const before = nudgedAt.get(agent.id);
+      if (before !== undefined && last < before) return; // nudged already, and nothing recorded since
+      nudgedAt.set(agent.id, Date.now());
       try {
         await ctx.paseo.agents.ref(agent.id).send(NUDGE);
       } catch (error) {
-        nudged.delete(agent.id);
+        if (before === undefined) nudgedAt.delete(agent.id);
+        else nudgedAt.set(agent.id, before);
         throw error;
       }
     });
@@ -172,15 +205,13 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
 
   add(server.addHook("agent.archive.after", async ({ agent }) => {
     await safe(log, "agent.archive.after", undefined, async () => {
-      const node = await tree.find(`paseo:agent/${agent.id}`);
-      if (node) await tree.setStatusDoneOrPaused(node);
+      await tree.onNode(`paseo:agent/${agent.id}`, (node) => tree.setStatusDoneOrPaused(node));
     });
   }));
 
   add(server.addHook("workspace.archive.after", async ({ workspace }) => {
     await safe(log, "workspace.archive.after", undefined, async () => {
-      const node = await tree.find(`paseo:workspace/${workspace.id}`);
-      if (node) await tree.setStatusDoneOrPaused(node);
+      await tree.onNode(`paseo:workspace/${workspace.id}`, (node) => tree.setStatusDoneOrPaused(node));
     });
   }));
 

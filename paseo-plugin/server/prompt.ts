@@ -1,12 +1,10 @@
-export const MARK = "[awt]";
-
 /** Added once to every new agent's system prompt. Static, so it caches. */
-export const AWT_BLOCK = `${MARK} Your work record is the awt node at $AWT_DIR. First call the awt_resume tool (or run \`awt resume\`). Record as you go with \`awt note|decide|ask|ref\`, and before you stop run \`awt state --now "..." --next "..."\`. Anything that leaves this machine goes through \`awt effect plan\` and outbox/; a person approves it. Never run \`awt effect apply\` yourself and never edit .awt/. If another agent started you, skip the resume and write your result to $AWT_DIR/out.md.`;
+export const AWT_BLOCK = `[awt] Your work record is the awt node at $AWT_DIR. First call the awt_resume tool (or run \`awt resume\`). Record as you go with \`awt note|decide|ask|ref\`, and before you stop run \`awt state --now "..." --next "..."\`. Anything that leaves this machine goes through \`awt effect plan\` and outbox/; a person approves it. Never run \`awt effect apply\` yourself and never edit .awt/. If another agent started you, skip the resume and write your result to $AWT_DIR/out.md.`;
 
 export const NUDGE =
   'Before you stop, record where things stand: awt state --now "where things stand" --next "the next concrete step". Then finish.';
 
 export function withBlock(existing: string | undefined): string {
-  if (existing?.includes(MARK)) return existing;
+  if (existing?.includes(AWT_BLOCK)) return existing;
   return existing ? `${existing}\n\n${AWT_BLOCK}` : AWT_BLOCK;
 }

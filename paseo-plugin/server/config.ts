@@ -5,6 +5,8 @@ export interface AwtConfig {
   bin: string;
   root: string;
   timeoutMs: number;
+  /** The environment every awt child runs in. */
+  env: NodeJS.ProcessEnv;
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): AwtConfig {
@@ -14,5 +16,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): AwtConfig {
     bin: env.AWT_BIN || "awt",
     root: env.AWT_ROOT || join(data, "awt"),
     timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 5000,
+    env,
   };
 }
