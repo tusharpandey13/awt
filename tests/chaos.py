@@ -1516,6 +1516,142 @@ def a_par(c):
         c.fail("parallel writers produced quarantined rows")
 
 
+# ---------------------------------------------------------------- node tree
+def tw(c, node, *args, env=None, cwd=None, allow=(0, 1, 2, 3, 4)):
+    return c.raw([sys.executable, "-I", AWT, "--dir", node] + list(args), cwd=cwd or c.base, env=env, args=list(args), allow=allow)
+
+
+def tree_root(c):
+    top = c.path("tree")
+    os.makedirs(top)
+    r = tw(c, top, "init", "--kind", "root")
+    if r.rc != 0:
+        c.fail("cannot make a root: " + r.err[:120])
+    return top
+
+
+def tree_nodes(base):
+    """Walk only the reserved child directories, the way awt defines a tree. Returns (nodes, leftovers)."""
+    nodes, left = [], []
+    for plural in ("workspaces", "tasks", "agents"):
+        d = os.path.join(base, plural)
+        if not os.path.isdir(d):
+            continue
+        for n in sorted(os.listdir(d)):
+            p = os.path.join(d, n)
+            (left if n.startswith(".new-") else nodes).append(p)
+    return nodes, left
+
+
+def first_row(node):
+    try:
+        with open(os.path.join(node, ".awt", "events.jsonl"), "rb") as g:
+            ln = g.readline()
+        return json.loads(ln.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def tree_audit(c, base):
+    """I2 and I4 below base: every visible node is complete, keys are unique among siblings."""
+    nodes, _ = tree_nodes(base)
+    keys = {}
+    for n in nodes:
+        r = first_row(n)
+        if not r or r.get("type") != "node":
+            c.fail("visible node without a complete node row: " + n)
+            continue
+        k = r.get("key")
+        if k:
+            if (os.path.dirname(n), k) in keys:
+                c.fail("duplicate key %r under %s" % (k, os.path.dirname(n)))
+            keys[(os.path.dirname(n), k)] = n
+        tree_audit(c, n)
+
+
+@attack("tree-race-key")
+def a_tree_race_key(c):
+    top = tree_root(c)
+    ws = tw(c, top, "init", "--kind", "workspace", "--name", "w").out.split()[1]
+    w = os.path.join(top, ws)
+    n = 12 if c.quick else 32
+    with cf.ThreadPoolExecutor(n) as ex:
+        rs = list(ex.map(lambda i: tw(c, w, "init", "--kind", "task", "--name", "t%d" % (i % 3), "--key", "K", "--goal", "g", "--done", "d"), range(n)))
+    if any(r.rc != 0 for r in rs):
+        c.fail("a keyed creator failed: " + next(r.err for r in rs if r.rc != 0)[:120])
+    if len({r.out.strip() for r in rs}) != 1:
+        c.fail("creators disagree on the path: %s" % sorted({r.out.strip() for r in rs})[:3])
+    nodes, _ = tree_nodes(w)
+    if len(nodes) != 1:
+        c.fail("expected one node for one key, found %d" % len(nodes))
+    tree_audit(c, top)
+
+
+@attack("tree-race-names")
+def a_tree_race_names(c):
+    top = tree_root(c)
+    w = os.path.join(top, tw(c, top, "init", "--kind", "workspace", "--name", "w").out.split()[1])
+    n = 12 if c.quick else 32
+    with cf.ThreadPoolExecutor(n) as ex:
+        rs = list(ex.map(lambda i: tw(c, w, "init", "--kind", "task", "--name", "same", "--key", "k%d" % i, "--goal", "g", "--done", "d"), range(n)))
+    if any(r.rc != 0 for r in rs):
+        c.fail("a creator failed: " + next(r.err for r in rs if r.rc != 0)[:120])
+    nodes, _ = tree_nodes(w)
+    if len(nodes) != n or len({r.out.strip() for r in rs}) != n:
+        c.fail("expected %d distinct nodes, found %d dirs and %d distinct paths" % (n, len(nodes), len({r.out.strip() for r in rs})))
+    tree_audit(c, top)
+
+
+@attack("tree-kill-init")
+def a_tree_kill_init(c):
+    top = tree_root(c)
+    w = os.path.join(top, tw(c, top, "init", "--kind", "workspace", "--name", "w").out.split()[1])
+    t = os.path.join(w, tw(c, w, "init", "--kind", "task", "--name", "t", "--goal", "g", "--done", "d").out.split()[1])
+    rounds = 40 if c.quick else 200
+    for i in range(rounds):
+        cmd = [sys.executable, "-I", AWT, "--dir", t, "init", "--kind", "agent", "--name", "a", "--key", "k%d" % (i % 10)]
+        c.log(" ".join(cmd))
+        p = subprocess.Popen(cmd, env=c.env(), cwd=c.base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(c.rng.random() * 0.04)
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.wait()
+    tree_audit(c, top)
+    for i in range(10):
+        r = tw(c, t, "init", "--kind", "agent", "--name", "a", "--key", "k%d" % i)
+        if r.rc != 0:
+            c.fail("retry after kill failed: " + r.err[:120])
+    agents = [n for n in tree_nodes(t)[0]]
+    ks = sorted(first_row(n)["key"] for n in agents)
+    if ks != sorted("k%d" % i for i in range(10)):
+        c.fail("after retries expected exactly keys k0..k9, found %s" % ks)
+    d = tw(c, t, "doctor")
+    if d.rc not in (0, 1):
+        c.fail("doctor crashed")
+
+
+@attack("tree-hostile-names")
+def a_tree_hostile_names(c):
+    top = tree_root(c)
+    w = os.path.join(top, tw(c, top, "init", "--kind", "workspace", "--name", "w").out.split()[1])
+    alphabet = ["a", "Z", "9", " ", "-", "_", ".", "/", "\\", "..", "é", "😀", "\n", "\t", "\x1b", "\u202e", "$", "`", "'", '"', "*", "~", ":"]
+    for i in range(60 if c.quick else 400):
+        name = "".join(c.rng.choice(alphabet) for _ in range(c.rng.randrange(1, 70)))
+        tw(c, w, "init", "--kind", "task", "--name", name, "--goal", "g", "--done", "d")
+    nodes, left = tree_nodes(w)
+    for n in nodes:
+        if not re.fullmatch(r"[a-z0-9-]{1,50}", os.path.basename(n)):
+            c.fail("bad directory name %r" % os.path.basename(n))
+    if left:
+        c.fail("leftover .new dirs after clean runs: %d" % len(left))
+    extra = set(os.listdir(w)) - {"tasks", "context", "docs", "misc", ".awt", ".gitignore"}
+    if extra:
+        c.fail("something escaped into the workspace dir: %s" % sorted(extra)[:5])
+    tree_audit(c, top)
+
+
 # ---------------------------------------------------------------- driver
 def main():
     ap = argparse.ArgumentParser()

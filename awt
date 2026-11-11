@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, fcntl, hashlib, json, os, re, shlex, signal, socket, subprocess, time
+import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, subprocess, time
 
 VERSION = "0.1.0"
 HOST = socket.gethostname()
@@ -18,19 +18,23 @@ CAPS = {
     "answer.text": 400, "ref.target": 1000, "ref.title": 120, "ref.why": 200, "ref.kind": 40, "ref.branch": 200,
     "capture.from": 40, "capture.title": 120, "capture.ref": 1000, "doc.why": 200, "effect.target": 200,
     "effect.why": 200, "effect.reason": 200, "effect.ref": 1000, "effect.run": 1000, "effect.snapshot": 1000,
-    "effect.verify": 1000,
+    "effect.verify": 1000, "node.name": 60, "node.key": 200,
 }
 REQ = {
     "task": ["goal", "done_means"], "status": ["status"], "state": ["now", "next"], "note": ["id", "text"],
     "decision": ["id", "choice", "why"], "question": ["id", "text"], "answer": ["ref", "text"],
     "ref": ["target", "title", "kind", "access"], "capture": ["path", "from", "title", "sha"],
-    "doc": ["path", "action", "by_doc"], "effect": ["id", "step"],
+    "doc": ["path", "action", "by_doc"], "effect": ["id", "step"], "node": ["kind", "name"],
 }
-ENUM = {"status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
+KINDS = ("root", "workspace", "task", "agent")
+LEGAL = {"root": ("workspace",), "workspace": ("task",), "task": ("task", "agent"), "agent": ("agent",)}
+PLURAL = {"workspace": "workspaces", "task": "tasks", "agent": "agents"}
+NODE_DIRS = {"root": (), "workspace": ("context", "docs", "misc"), "task": ("context", "docs", "outbox", "misc", "scratch"), "agent": ("scratch",)}
+ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
         "effect.step": ("planned", "claimed", "sent", "unknown", "dropped")}
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
 SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
-           "legacy", "context", "docs", "outbox", "misc"}
+           "legacy", "context", "docs", "outbox", "misc", "workspaces", "tasks", "agents"}
 IGNORE = ["scratch/", ".awt/claims/", ".awt/blobs/", ".awt/runs/"]
 SECRETS = [(n, re.compile(p)) for n, p in [
     ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
@@ -78,6 +82,17 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 - `./awt list`, `./awt find <term>`: everything known about this task
 - `context/` inbound material, `docs/` working docs, `outbox/` drafts going out, `misc/` the rest, `scratch/` throwaway
 - `./awt effect mark <id> sent` after you send something from `outbox/`
+'''
+TREE_BLOCK = (AGENTS_BLOCK.replace("./awt", "awt")
+              .replace("Everything about this task lives here. Keep records with `awt`.", "Your node is `$AWT_DIR`; everything about this work lives there. Keep records with `awt`, from any directory.")
+              .replace("write output to `docs/<brief>.out.md`", "write the result to `$AWT_DIR/out.md`"))
+TREE_README = '''# {goal}
+
+Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `workspaces/<name>/tasks/<name>/agents/<name>/`.
+
+- `awt list tree`: everything below here
+- `awt init --kind workspace --name NAME`: add a workspace; from inside it, `--kind task --name NAME --goal T --done T`
+- Agents run with `AWT_DIR` set to their own node
 '''
 SETTINGS = '''{
   "hooks": {
@@ -217,6 +232,7 @@ If `./relay` exists and the work splits into parts, do not run them all in one s
 
 USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
+  init --kind root|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
   state --now T --next T      note T                   decide C --why T         ask T
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
   supersede OLD NEW           status active|paused|done
@@ -309,6 +325,30 @@ def find_root(explicit=None):
         if os.path.dirname(d) == d:
             return None
         d = os.path.dirname(d)
+
+
+def is_node_dir(path):
+    return os.path.isdir(os.path.join(path, ".awt"))
+
+
+def node_info(path):
+    """kind, name and key of the node at path, from its first row. No node row reads as a legacy task."""
+    info = dict(kind="task", name=os.path.basename(path), key=None, legacy=True)
+    try:
+        with open(os.path.join(path, ".awt", "events.jsonl"), "rb") as g:
+            for ln in g:
+                if not ln.strip():
+                    continue
+                try:
+                    r = json.loads(ln.decode("utf-8"))
+                except (ValueError, RecursionError):
+                    return info
+                if isinstance(r, dict) and r.get("type") == "node" and valid(r):
+                    info.update(kind=r["kind"], name=r["name"], key=r.get("key"), legacy=False)
+                return info
+    except OSError:
+        pass
+    return info
 
 
 # ---------- the one writer ----------
@@ -567,7 +607,7 @@ def file_title(path, caps):
 def newer_files(since):
     found, seen = [], 0
     for dp, dns, fns in os.walk(ROOT):
-        dns[:] = [d for d in dns if d != ".git" and not (dp == ROOT and d in (".awt", "scratch"))]
+        dns[:] = [d for d in dns if d != ".git" and not (dp == ROOT and d in (".awt", "scratch")) and not is_node_dir(os.path.join(dp, d))]
         for n in fns:
             seen += 1
             try:
@@ -704,47 +744,138 @@ def find_claude_md(d):
         d = os.path.dirname(d)
 
 
-def cmd_init(a):
-    global ROOT
-    ROOT = a.dir or os.environ.get("AWT_DIR") or cwd()
-    if not ROOT:
-        die("the current directory no longer exists", "cd to a real directory or pass --dir PATH")
-    ROOT = os.path.realpath(os.path.expanduser(ROOT))
-    if bool(a.goal) != bool(a.done):
-        die("--goal and --done go together", "give both", 2)
-    for d in ("context", "docs", "outbox", "misc", "scratch", ".awt/claims", ".awt/blobs", ".awt/runs"):
-        os.makedirs(P(d), exist_ok=True)
-    os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
-    made = []
-    ag = P("AGENTS.md")
-    if not os.path.exists(ag):
-        create(ag, AGENTS_BLOCK)
-        made.append("AGENTS.md")
-    else:
-        with open(ag, encoding="utf-8", errors="replace") as g:
-            txt = g.read()
-        if BLOCK_BEGIN not in txt:
-            with open(ag, "a", encoding="utf-8") as g:
-                g.write(("" if not txt or txt.endswith("\n") else "\n") + "\n" + AGENTS_BLOCK)
-            made.append("AGENTS.md(block)")
-    t = load()["task"]
-    if create(P("README.md"), README.format(goal=(a.goal or (t or {}).get("goal") or "Task workspace").splitlines()[0])):
-        made.append("README.md")
+def slugify(name):
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50].strip("-") or "node"
+
+
+def ensure_gitignore():
     gi = P(".gitignore")
     have = open(gi, encoding="utf-8", errors="replace").read() if os.path.exists(gi) else ""
     miss = [x for x in IGNORE if x not in have.splitlines()]
     if miss:
         with open(gi, "a", encoding="utf-8") as g:
             g.write(("" if not have or have.endswith("\n") else "\n") + "\n".join(miss) + "\n")
-        made.append(".gitignore")
-    os.makedirs(P(".claude"), exist_ok=True)
-    if create(P(".claude", "settings.json"), SETTINGS):
-        made.append(".claude/settings.json")
+    return bool(miss)
+
+
+def build_node(path, kind, name, key, goal, done):
+    """Write a complete node at path. Rows go through emit(), so the secret scan and caps apply."""
+    global ROOT
+    old, ROOT = ROOT, path
+    try:
+        for d in NODE_DIRS[kind] + (".awt/claims", ".awt/blobs", ".awt/runs"):
+            os.makedirs(P(d), exist_ok=True)
+        os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
+        emit("node", kind=kind, name=name, key=key)
+        if goal:
+            emit("task", goal=goal, done_means=done)
+        ensure_gitignore()
+    finally:
+        ROOT = old
+
+
+def init_child(a):
+    global ROOT
+    kind = a.kind
+    ROOT = find_root(a.dir)
+    if not ROOT:
+        die("no parent node", "cd into a node, set AWT_DIR or pass --dir; make a root with: awt init --kind root", 4)
+    if not a.name:
+        die("--kind %s needs --name" % kind, "give --name NAME", 2)
+    if bool(a.goal) != bool(a.done):
+        die("--goal and --done go together", "give both", 2)
+    pk = node_info(ROOT)["kind"]
+    if kind not in LEGAL[pk]:
+        die("a %s cannot contain a %s" % (pk, kind), "a %s may contain: %s" % (pk, ", ".join(LEGAL[pk])))
+    if kind == "task" and not a.goal:
+        die("a task needs --goal and --done", "give both")
+    goal = a.goal or a.name
+    done = a.done or ("ongoing" if kind == "workspace" else "agent work recorded")
+    check("node", dict(kind=kind, name=a.name, key=a.key, by=BY))
+    check("task", dict(goal=goal, done_means=done, by=BY))
+    base = P(PLURAL[kind])
+    if os.path.islink(base):
+        die("%s/ is a symlink" % PLURAL[kind], "replace it with a real directory inside " + ROOT)
+    os.makedirs(base, exist_ok=True)
+    lockfd = None
+    if a.key:
+        lockfd = os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        fcntl.flock(lockfd, fcntl.LOCK_EX)
+    try:
+        if a.key:
+            for n in sorted(os.listdir(base)):
+                p = os.path.join(base, n)
+                if not n.startswith(".new-") and not os.path.islink(p) and is_node_dir(p) and node_info(p)["key"] == a.key:
+                    return out("init %s %s" % (rel(p), kind))
+        tmp = os.path.join(base, ".new-" + os.urandom(4).hex())
+        os.mkdir(tmp)
+        try:
+            build_node(tmp, kind, a.name, a.key, goal, done)
+            slug, n = slugify(a.name), 1
+            while True:
+                final = os.path.join(base, slug if n == 1 else "%s-%d" % (slug, n))
+                try:
+                    os.rename(tmp, final)
+                    break
+                except OSError as x:
+                    if x.errno in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR) or os.path.lexists(final):
+                        n += 1
+                        continue
+                    raise
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        out("init %s %s" % (rel(final), kind))
+    finally:
+        if lockfd is not None:
+            os.close(lockfd)
+
+
+def cmd_init(a):
+    global ROOT
+    if a.kind and a.kind != "root":
+        return init_child(a)
+    ROOT = a.dir or os.environ.get("AWT_DIR") or cwd()
+    if not ROOT:
+        die("the current directory no longer exists", "cd to a real directory or pass --dir PATH")
+    ROOT = os.path.realpath(os.path.expanduser(ROOT))
+    if bool(a.goal) != bool(a.done):
+        die("--goal and --done go together", "give both", 2)
+    tree = a.kind == "root"
+    for d in (("workspaces",) if tree else ("context", "docs", "outbox", "misc", "scratch")) + (".awt/claims", ".awt/blobs", ".awt/runs"):
+        os.makedirs(P(d), exist_ok=True)
+    os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
+    made = []
+    ag = P("AGENTS.md")
+    block = TREE_BLOCK if tree else AGENTS_BLOCK
+    if not os.path.exists(ag):
+        create(ag, block)
+        made.append("AGENTS.md")
     else:
-        print("note: .claude/settings.json exists; merge this snippet yourself:\n" + SETTINGS)
+        with open(ag, encoding="utf-8", errors="replace") as g:
+            txt = g.read()
+        if BLOCK_BEGIN not in txt:
+            with open(ag, "a", encoding="utf-8") as g:
+                g.write(("" if not txt or txt.endswith("\n") else "\n") + "\n" + block)
+            made.append("AGENTS.md(block)")
+    D0 = load()
+    t = D0["task"]
+    if create(P("README.md"), (TREE_README if tree else README).format(goal=(a.goal or (t or {}).get("goal") or ("Node tree" if tree else "Task workspace")).splitlines()[0])):
+        made.append("README.md")
+    if ensure_gitignore():
+        made.append(".gitignore")
+    if not tree:
+        os.makedirs(P(".claude"), exist_ok=True)
+        if create(P(".claude", "settings.json"), SETTINGS):
+            made.append(".claude/settings.json")
+        else:
+            print("note: .claude/settings.json exists; merge this snippet yourself:\n" + SETTINGS)
     cm = find_claude_md(ROOT)
     if cm:
         print("warning: %s exists; Claude Code may then skip AGENTS.md. Add the line @AGENTS.md to it." % cm, file=sys.stderr)
+    if tree and not any(r["type"] == "node" for r in D0["rows"]):
+        emit("node", kind="root", name=a.name or os.path.basename(ROOT) or "root", key=a.key)
+        made.append("node")
     if a.goal and (not t or (t["goal"], t["done_means"]) != (a.goal, a.done)):
         emit("task", goal=a.goal, done_means=a.done)
         made.append("task")
@@ -787,7 +918,8 @@ def cmd_find(a):
             hits.append("event:%s: %s" % (r.get("id") or r["type"], snip(text, i)))
     me = os.path.realpath(__file__)
     for dp, dns, fns in os.walk(ROOT):
-        dns[:] = sorted(d for d in dns if d not in (".git", "scratch") and not (dp == ROOT and d == ".awt") and not os.path.islink(os.path.join(dp, d)))
+        dns[:] = sorted(d for d in dns if d not in (".git", "scratch") and not (dp == ROOT and d == ".awt") and not os.path.islink(os.path.join(dp, d))
+                        and not is_node_dir(os.path.join(dp, d)))
         for n in sorted(fns):
             p = os.path.join(dp, n)
             if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n == "awt"):
@@ -1235,7 +1367,7 @@ def build():
             q.add_argument(*fl, **kw)
         return q
     T, F = {}, dict(action="store_true")
-    V(sp, "init", opt=[(("--goal",), T), (("--done",), T)])
+    V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
     V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {})])
     V(sp, "list", [("section", dict(nargs="?", choices=SECTIONS))], [(("--all",), F)])
     V(sp, "find", [("term", T)])

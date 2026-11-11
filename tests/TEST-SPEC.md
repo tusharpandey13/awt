@@ -59,14 +59,14 @@ Names are scenario ids.
 - T4 `--name` missing for a non-root kind: exit 2. `--goal` missing for a task: exit 1.
 - T5 Name collision with a different key: second node gets a numeric suffix. Same key: same path printed, exit 0, no new rows (I7).
 - T6 Same key with a different name returns the existing node; the name is not changed.
-- T7 Slug rules: names with spaces, unicode, `..`, `/`, a leading dot, 500 chars, only punctuation. The directory is always `[a-z0-9-]`, at most 50, never escapes the parent.
+- T7 Slug rules: names with spaces, unicode, `..`, `/`, a leading dot, only punctuation. The directory is always `[a-z0-9-]`, at most 50, never escapes the parent. A name over the 60-char cap is refused with a `fix:`.
 - T8 A secret-shaped `--name` or `--key` is refused and nothing is created.
 - T9 Standalone `init` without `--kind` is unchanged (I8), including inside a tree: it initialises the target directory as a legacy task node.
 
 **Resolution**
 - T10 `cd` into any node resolves to it. `AWT_DIR` beats `cwd`. `--dir` beats `AWT_DIR`.
 - T11 `AWT_DIR` pointing at a non-node: exit 4 with a fix.
-- T12 Ancestor walk stops at 8 levels and says so. A symlink loop (child dir linking to an ancestor) terminates and is reported by `doctor`.
+- T12 Ancestor walk stops at 8 levels and says so. A symlinked child dir is not followed, so a loop (child linking to an ancestor) terminates; `doctor` reports it.
 - T13 `mv` of a subtree to another place in the tree: all `ref kind=node` links still resolve, parents change as expected.
 
 **Reading**

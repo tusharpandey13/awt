@@ -25,6 +25,15 @@ def docs():
             yield "AGENTS.md block", f.read()
     finally:
         shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp()
+    try:
+        subprocess.run([sys.executable, AWT, "--dir", d, "init", "--kind", "root"], capture_output=True)
+        with open(os.path.join(d, "AGENTS.md"), encoding="utf-8") as f:
+            yield "tree AGENTS.md block", f.read()
+        with open(os.path.join(d, "README.md"), encoding="utf-8") as f:
+            yield "tree README.md", f.read()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def flags_for(words):

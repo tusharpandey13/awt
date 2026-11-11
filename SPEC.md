@@ -299,7 +299,7 @@ Layout by kind:
 
 Unchanged: `--dir` > `AWT_DIR` > script directory > walk up from `cwd`. In the tree, agents run in a repository, not in a node, so the harness sets `AWT_DIR` to the agent's node and `AWT_BY` to its id. A shared `awt` on `PATH` replaces the per-directory copy; `./awt` remains valid for a standalone node.
 
-Ancestors are found by walking up from the node, at most 8 levels, resolving symlinks and stopping at a directory already visited. Descendants are found by walking the reserved child directories only, at most 8 levels deep, at most 2,000 nodes, with the same symlink rule. Hitting a limit is reported, never silent.
+Ancestors are found by walking up from the node's real path, at most 8 levels. Descendants are found by walking the reserved child directories only, at most 8 levels deep and 2,000 nodes. Symlinked directories are never followed, so a loop cannot occur; `doctor` reports them. Hitting a limit is reported, never silent.
 
 ### Reading across nodes
 
