@@ -56,7 +56,7 @@ Names are scenario ids.
 - T1 `init --kind root` in an empty dir: `AGENTS.md` is the tree form (`awt`, not `./awt`), 2 KB at most, `workspaces/` exists, exit 0.
 - T2 Create workspace, task, agent, subagent by walking down with `AWT_DIR`. Each lands in the reserved directory with the layout for its kind. Only the task gets `AGENTS.md` (tree form) and `.claude/settings.json` (hook `awt resume --hook`); none gets `README.md`. Workspace and agent without `--goal` get the placeholder `task` row.
 - T3 Illegal pairs are refused with a `fix:` naming legal kinds: task under root, workspace under task, agent under workspace, agent under root.
-- T4 `--name` missing for a non-root kind, or `--goal`/`--done` missing for a task: exit 2. `--kind root` on an existing node: exit 1 with a fix.
+- T4 `--name` missing for a non-root kind, or only one of `--goal`/`--done`: exit 2. A task with neither: exit 1 with a fix. `--kind root` on an existing node: exit 1 with a fix.
 - T5 Name collision with a different key: second node gets a numeric suffix. Same key: same path printed, exit 0, no new rows (I7).
 - T6 Same key with a different name, or under a different parent anywhere in the tree, returns the existing node; nothing is renamed or moved.
 - T7 Slug rules: names with spaces, unicode, `..`, `/`, a leading dot, only punctuation. The directory is always `[a-z0-9-]`, at most 50, never escapes the parent. A name over the 60-char cap is refused with a `fix:`.
