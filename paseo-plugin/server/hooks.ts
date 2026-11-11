@@ -1,4 +1,5 @@
-import { basename } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { defineAgentTool } from "@getpaseo/plugin/server";
@@ -10,6 +11,52 @@ import { NUDGE, withBlock } from "./prompt.js";
 import { Tree } from "./tree.js";
 
 type Log = (message: string) => void;
+
+/** Paseo records a subagent's parent only as this label in 0.15.4; `parentAgentId` is absent there. */
+const PARENT_LABEL = "paseo.parent-agent-id";
+const parentFromLabels = (labels?: Readonly<Record<string, string>> | null): string | null => labels?.[PARENT_LABEL] || null;
+
+/** Resolve a path through symlinks even when its tail does not exist yet (a file about to be written). */
+function realish(p: string): string {
+  let head = resolve(p);
+  const tail: string[] = [];
+  while (!existsSync(head) && dirname(head) !== head) {
+    tail.unshift(basename(head));
+    head = dirname(head);
+  }
+  return join(realpathSync(head), ...tail);
+}
+
+/** The paths a permission request wants, or null when it is not a kind we understand (then it is left alone). */
+export function permissionTargets(req: { name: string; input?: Record<string, unknown>; detail?: { type?: string; filePath?: string } }): string[] | null {
+  const detail = req.detail;
+  if (detail && (detail.type === "write" || detail.type === "edit" || detail.type === "read") && typeof detail.filePath === "string") return [detail.filePath];
+  if (req.name !== "external_directory") return null;
+  const patterns = req.input?.patterns;
+  if (!Array.isArray(patterns) || patterns.length === 0 || !patterns.every((x) => typeof x === "string")) return null;
+  // opencode asks for a directory glob such as `<dir>/*`; only that trailing glob is understood.
+  const dirs = (patterns as string[]).map((x) => x.replace(/\/\*{1,2}$/, ""));
+  return dirs.every((d) => isAbsolute(d) && !/[*?[\]{}]/.test(d)) ? dirs : null;
+}
+
+/** True only when every target resolves, symlinks included, to the node dir itself or something inside it. */
+export function insideNode(node: string, targets: string[]): boolean {
+  let base: string;
+  try {
+    base = realpathSync(node);
+  } catch {
+    return false;
+  }
+  return targets.every((t) => {
+    if (!isAbsolute(t)) return false;
+    try {
+      const r = realish(t);
+      return r === base || r.startsWith(base + sep);
+    } catch {
+      return false;
+    }
+  });
+}
 
 const short = (id: string) => id.replace(/[^A-Za-z0-9]/g, "").slice(0, 8) || "agent";
 const sha = (s: string) => createHash("sha1").update(s).digest("hex").slice(0, 16);
@@ -57,6 +104,10 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   const withDir = new Set<string>();
   /** When each agent was last nudged. It is nudged again only after it has recorded state since. */
   const nudgedAt = new Map<string, number>();
+  /** Parent of each agent seen in open.before, whose request carries labels (the later hooks' agent payload may not). */
+  const parents = new Map<string, string>();
+  const parentOf = (a: { id: string; parentAgentId?: string | null; labels?: Readonly<Record<string, string>> | null }): string | null =>
+    a.parentAgentId ?? parentFromLabels(a.labels) ?? parents.get(a.id) ?? null;
 
   const taskFor = async (workspaceNode: string, workspaceKeyPart: string): Promise<string> => {
     const pointer = parseJson<{ scope?: string; now?: string }[]>((await awt(cfg, workspaceNode, ["list", "state", "--json"])).stdout, []).find((s) => s.scope === "current-task");
@@ -103,13 +154,14 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     return node;
   };
 
-  const agentNode = async (agent: { id: string; workspaceId: string | null; cwd: string; title: string | null; provider?: string; parentAgentId?: string | null }, ctx?: PluginHookContext): Promise<string> => {
+  const agentNode = async (agent: { id: string; workspaceId: string | null; cwd: string; title: string | null; provider?: string; parentAgentId?: string | null; labels?: Readonly<Record<string, string>> | null }, ctx?: PluginHookContext): Promise<string> => {
     const key = `paseo:agent/${agent.id}`;
     const existing = await tree.find(key);
     if (existing) return existing;
     if (tree.isDuplicate(key)) throw new Error(`key ${key} is carried by more than one node`);
     const ws = await workspaceNode(agent.workspaceId, agent.cwd, ctx);
-    let parent: string | null = agent.parentAgentId ? await tree.find(`paseo:agent/${agent.parentAgentId}`) : null;
+    const parentId = parentOf(agent);
+    let parent: string | null = parentId ? await tree.find(`paseo:agent/${parentId}`) : null;
     parent ??= await taskFor(ws.node, ws.part);
     const title = (agent.title ?? "").trim() || `agent-${short(agent.id)}`;
     const node = await tree.ensure(parent, "agent", title, key, { goal: title, done: "agent work recorded", fallback: `agent-${short(agent.id)}` });
@@ -157,8 +209,10 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   add(server.addHook("agent.open.before", async ({ request }, ctx) => {
     if (request.purpose !== "interactive") return request;
     withDir.delete(request.agentId);
+    const labelled = parentFromLabels(request.labels);
+    if (labelled) parents.set(request.agentId, labelled);
     return within(cfg, ctx.signal, log, "agent.open.before", request, async () => {
-      const node = await agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider }, ctx);
+      const node = await agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider, labels: request.labels }, ctx);
       withDir.add(request.agentId);
       return { ...request, env: { ...request.env, AWT_DIR: node, AWT_BY: request.agentId }, tools: [...request.tools.filter((t) => t.name !== "awt_resume"), awtResume] };
     });
@@ -167,10 +221,11 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   add(server.addHook("agent.create.after", async ({ agent }, ctx) => {
     await safe(log, "agent.create.after", undefined, async () => {
       const node = await agentNode(agent, ctx);
-      if (agent.parentAgentId) {
-        const parent = await tree.find(`paseo:agent/${agent.parentAgentId}`);
+      const parentId = parentOf(agent);
+      if (parentId) {
+        const parent = await tree.find(`paseo:agent/${parentId}`);
         if (parent && !node.startsWith(parent + "/")) {
-          await awt(cfg, node, ["note", `started by agent ${agent.parentAgentId}; its node is ${parent}`], agent.id);
+          await awt(cfg, node, ["note", `started by agent ${parentId}; its node is ${parent}`], agent.id);
           await awt(cfg, node, ["ref", parent, "--title", "parent agent", "--kind", "node"], agent.id);
         }
       }
@@ -185,7 +240,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     await safe(log, "agent.turn.after", undefined, async () => {
       const started = turnStart.get(agent.id);
       turnStart.delete(agent.id);
-      if (outcome.kind !== "completed" || agent.parentAgentId || started === undefined || !withDir.has(agent.id)) return;
+      if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !withDir.has(agent.id)) return;
       const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
       if (!r) return;
       const last = parseJson<{ ts?: string }[]>(r.stdout, []).map((s) => Date.parse(s.ts ?? "")).filter(Number.isFinite).sort((a, b) => b - a)[0] ?? 0;
@@ -215,7 +270,17 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     });
   }));
 
-  // No agent.permission.* hook on purpose: the plugin never answers a permission request.
+  // The one permission the plugin answers: an agent touching its own node dir, which is always outside its cwd. Anything else
+  // (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
+  add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
+    await safe(log, "agent.permission.before", undefined, async () => {
+      const targets = permissionTargets(request as Parameters<typeof permissionTargets>[0]);
+      if (!targets) return;
+      const node = await tree.find(`paseo:agent/${agent.id}`);
+      if (!node || !insideNode(node, targets)) return;
+      await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+    });
+  }));
   return () => removers.forEach((r) => r());
 }
 

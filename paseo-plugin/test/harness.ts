@@ -14,6 +14,7 @@ export interface Rig {
   root: string;
   logs: string[];
   sent: { id: string; text: string }[];
+  answered: { id: string; requestId: string; behavior: string }[];
   call(name: string, payload: unknown): Promise<any>;
   hooks: Map<string, Handler>;
   /** A new plugin process on the same tree: empty caches. */
@@ -31,6 +32,7 @@ export function rig(extraEnv: Record<string, string> = {}, workspaces: Record<st
   const hooks = new Map<string, Handler>();
   const logs: string[] = [];
   const sent: { id: string; text: string }[] = [];
+  const answered: { id: string; requestId: string; behavior: string }[] = [];
   const start = () => registerHooks({ addHook: (name: string, fn: Handler) => (hooks.set(name, fn), () => hooks.delete(name)) } as any, env, (m) => logs.push(m));
   start();
   // Typed against the SDK, so a mock cannot drift from the real shapes.
@@ -49,12 +51,12 @@ export function rig(extraEnv: Record<string, string> = {}, workspaces: Record<st
       },
     },
     projects: { list: async () => ({ requestId: "r1", projects: [project] }) },
-    agents: { ref: (id: string) => ({ send: async (text: string) => void sent.push({ id, text }) }) as unknown as ReturnType<PaseoApi["agents"]["ref"]> },
+    agents: { ref: (id: string) => ({ send: async (text: string) => void sent.push({ id, text }), respondToPermission: async (o: { requestId: string; response: { behavior: string } }) => void answered.push({ id, requestId: o.requestId, behavior: o.response.behavior }) }) as unknown as ReturnType<PaseoApi["agents"]["ref"]> },
   } satisfies Partial<{ [K in keyof PaseoApi]: Partial<PaseoApi[K]> }>;
   const ctx = { paseo, signal: new AbortController().signal };
   const run = (dir: string, args: string[]) => execFileSync(AWT, ["--dir", dir, ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
-    tmp, root, logs, sent, hooks,
+    tmp, root, logs, sent, answered, hooks,
     restart: () => (hooks.clear(), void start()),
     call: async (name, payload) => {
       const h = hooks.get(name);
