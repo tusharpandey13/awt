@@ -71,6 +71,11 @@ class Docs(unittest.TestCase):
         for fresh in ("$AWT_DIR/out.md", "from any directory"):
             self.assertIn(fresh, tree)
 
+    def test_tree_block_opens_with_the_node_rule_and_fits_2kb(self):
+        tree = dict(docs())["tree AGENTS.md block"]
+        self.assertIn("\nYour node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`", tree)
+        self.assertLessEqual(len(tree.encode()), 2048)
+
     def test_no_real_paths_or_hosts_in_docs(self):
         for src, text in docs():
             self.assertNotRegex(text, r"/Users/[a-z]+/")

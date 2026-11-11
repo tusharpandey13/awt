@@ -89,7 +89,7 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 - `./awt effect mark <id> sent` after you send something from `outbox/`
 '''
 TREE_BLOCK = (AGENTS_BLOCK.replace("./awt", "awt")
-              .replace("Everything about this task lives here. Keep records with `awt`.", "Your node is `$AWT_DIR`; everything about this work lives there. Keep records with `awt`, from any directory.")
+              .replace("Everything about this task lives here. Keep records with `awt`. Never hand-edit `.awt/`.", "Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Keep records with `awt`, from any directory.")
               .replace("write output to `docs/<brief>.out.md`", "write the result to `$AWT_DIR/out.md`"))
 TREE_README = '''# {goal}
 
