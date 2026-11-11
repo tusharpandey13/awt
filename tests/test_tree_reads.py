@@ -1,5 +1,5 @@
 """Node tree, reading across nodes (SPEC.md, "Reading across nodes"). End to end, real awt."""
-import json, os, re, shutil, socket, subprocess, unittest
+import concurrent.futures as cf, json, os, re, shutil, socket, subprocess, unittest
 
 import test_awt
 import test_tree
@@ -47,12 +47,13 @@ class Reads(test_tree.TreeBase):
             self.decide(ws, ("rule-%02d " % i) + "r" * 280, "--tag", "rule")
         parent = task
         for i in range(5):
-            parent = self.mk("task", "t%d" % i, parent, "--goal", "g" * 240, "--done", "d")
-        for i in range(40):
-            a = self.mk("agent", "m%02d" % i, parent)
-            self.ok("state", "--now", "n" * 690, "--next", "x" * 290, root=a)
-        for i in range(25):
-            self.mk("agent", "c%02d" % i, parent)
+            parent = self.mk("task", "t%d" % i, parent, "--goal", "g" * 250, "--done", "d" * 250)
+
+        def child(i):
+            a = self.mk("agent", "m%03d" % i, parent)
+            self.ok("state", "--now", "n" * 700, "--next", "x" * 300, root=a)
+        with cf.ThreadPoolExecutor(8) as ex:
+            list(ex.map(child, range(200)))
         leaf = parent
         out = self.ok("resume", root=leaf).stdout
         self.assertLessEqual(len(out), 5200, len(out))
@@ -244,6 +245,11 @@ class Doctor(test_tree.TreeBase):
         out = r.stdout
         for needle in (".new-abc123", "duplicate key", "symlink", "misplaced", "tasks_wrong"):
             self.assertIn(needle, out, out)
+        level = {n: [l.split(" ", 1)[0] for l in out.splitlines() if n in l] for n in (".new-abc123", "duplicate key", "symlink", "misplaced", "tasks_wrong")}
+        self.assertIn("fail", level["duplicate key"])  # defects that make the tree ambiguous fail doctor
+        self.assertEqual(r.returncode, 1)
+        for n in (".new-abc123", "symlink", "tasks_wrong"):  # leftovers and strays only warn
+            self.assertEqual(set(level[n]), {"warn"}, (n, out))
         self.assertNotIn("Traceback", r.stderr)
 
     def test_awt_dir_without_awt_on_path(self):
