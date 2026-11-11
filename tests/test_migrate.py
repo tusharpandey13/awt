@@ -223,6 +223,9 @@ class T(unittest.TestCase):
 
     def test_real_tree_copy(self):
         src = os.path.join(REPO, "..")
+        roots = {os.path.realpath(r) for r in ("/", "/tmp", tempfile.gettempdir(), os.path.expanduser("~"))}
+        if os.path.realpath(src) in roots:
+            self.skipTest("checkout's parent is a temp/system/home root, not a workspace; copying it is unbounded")
         cp = os.path.join(self.tmp, "wtcopy")
         shutil.copytree(src, cp, symlinks=True, ignore=shutil.ignore_patterns("__pycache__"))
         h = tree_hash(cp)
