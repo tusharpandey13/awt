@@ -105,6 +105,7 @@ SETTINGS = '''{
   }
 }
 '''
+SETTINGS_TREE = SETTINGS.replace('\\"$CLAUDE_PROJECT_DIR\\"/awt', 'awt')
 AGENT_REF = r'''# awt agent reference
 
 Lookup only. Search for the refusal text or the verb. Commands run from the task root as `./awt`.
@@ -564,7 +565,7 @@ def entries(tops):
             res.append(top)
             continue
         for dp, dns, fns in os.walk(p):
-            dns[:] = sorted(d for d in dns if d != ".git")
+            dns[:] = sorted(d for d in dns if d != ".git" and not is_node_dir(os.path.join(dp, d)))
             for n in list(dns):
                 if os.path.islink(os.path.join(dp, n)):
                     dns.remove(n)
@@ -771,13 +772,19 @@ def build_node(path, kind, name, key, goal, done):
         if goal:
             emit("task", goal=goal, done_means=done)
         ensure_gitignore()
+        if kind == "task":
+            create(P("AGENTS.md"), TREE_BLOCK)
+            os.makedirs(P(".claude"), exist_ok=True)
+            create(P(".claude", "settings.json"), SETTINGS_TREE)
     finally:
         ROOT = old
 
 
 def tree_top(node):
-    """The topmost node above node, walking up through reserved child directories (at most 8 levels)."""
+    """The tree root: the nearest ancestor of kind root, else the outermost ancestor, else node (at most 8 levels up)."""
     for _ in range(8):
+        if node_info(node)["kind"] == "root":
+            break
         d = os.path.dirname(node)
         up = os.path.dirname(d)
         if os.path.basename(d) in PLURAL.values() and not os.path.islink(d) and is_node_dir(up):
@@ -1375,7 +1382,7 @@ def cmd_save(a):
     nested = []
     for dp, dns, fns in os.walk(ROOT):
         dns[:] = [d for d in dns if d != ".git"]
-        if dp != ROOT and (".git" in os.listdir(dp)):
+        if dp != ROOT and (".git" in os.listdir(dp) or is_node_dir(dp)):
             nested.append(rel(dp))
             dns[:] = []
     if g("add", "-A", "--", ".", *[":(exclude)" + n for n in nested]).returncode:
@@ -1394,7 +1401,7 @@ def cmd_save(a):
             g("reset", "-q", "--", f)
             held.append("%s (%s)" % (f, n))
     for n in nested:
-        print("note: nested git repo not saved: " + n, file=sys.stderr)
+        print("note: nested %s not saved: %s" % ("git repo" if os.path.exists(P(n, ".git")) else "node", n), file=sys.stderr)
     for h in held:
         print("note: unstaged, looks like a secret: " + h, file=sys.stderr)
     if g("diff", "--cached", "--quiet").returncode == 0:

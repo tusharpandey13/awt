@@ -69,7 +69,8 @@ class Create(TreeBase):
             have = set(os.listdir(node))
             self.assertTrue(dirs <= have, (node, have))
             for banned in ("AGENTS.md", "README.md", ".claude"):
-                self.assertNotIn(banned, have, node)
+                if node != task or banned == "README.md":
+                    self.assertNotIn(banned, have, node)
             self.assertIn("scratch/", test_awt.slurp(os.path.join(node, ".gitignore")))
         for node, kind, name in ((ws, "workspace", "Alpha"), (task, "task", "Fix login"), (agent, "agent", "chat-1"), (sub, "agent", "sub-1")):
             first = self.rows_of(node)[0]
@@ -305,6 +306,46 @@ class Isolation(TreeBase):
         self.ok("state", "--now", "n", "--next", "x", root=task)
         self.write_in(sub, "docs/late.md", "late\n")
         self.assertNotIn("late.md", self.ok("resume", root=task).stdout)
+
+    def test_task_node_has_tree_contract_and_hook(self):  # T2
+        root, ws, task, agent, sub = self.chain()
+        block = test_awt.slurp(os.path.join(task, "AGENTS.md"))
+        self.assertIn("awt resume", block)
+        self.assertNotIn("./awt", block)
+        st = test_awt.slurp(os.path.join(task, ".claude", "settings.json"))
+        self.assertIn("awt resume --hook", st)
+        self.assertNotIn("/awt resume", st)
+        self.assertFalse(os.path.exists(os.path.join(task, "README.md")))
+        for node in (root, ws, agent):
+            self.assertFalse(os.path.exists(os.path.join(node, ".claude")), node)
+        self.ok("doctor", root=task)
+
+    def test_key_search_stops_at_first_root(self):
+        root, ws, task, agent, sub = self.chain()
+        t2 = self.mk("task", "Other", ws, "--goal", "g", "--done", "d", "--key", "k:outer")
+        inner = os.path.join(task, "agents", "inner-tree")
+        os.makedirs(inner)
+        self.ok("init", "--kind", "root", "--dir", inner)
+        iw = self.mk("workspace", "Beta", inner)
+        r = self.ok("init", "--kind", "task", "--name", "Dup", "--goal", "g", "--done", "d", "--key", "k:outer", root=iw)
+        self.assertNotIn(os.path.basename(t2), r.stdout)
+        self.assertEqual(len(self.rows_of(os.path.join(iw, r.stdout.split()[1]), "node")), 1)
+
+    def test_misc_listing_and_save_skip_nested_nodes(self):
+        root, ws, task, agent, sub = self.chain()
+        inner = os.path.join(task, "misc", "side")
+        os.makedirs(inner)
+        self.ok("init", root=inner)
+        self.write_in(inner, "docs/theirs.md", "# theirs\n")
+        self.write_in(task, "misc/mine.md", "# mine\n")
+        out = self.ok("list", "misc", root=task).stdout
+        self.assertIn("mine.md", out)
+        self.assertNotIn("theirs.md", out)
+        subprocess.run(["git", "init", "-q", task], check=True, env=self.env)
+        self.ok("save", "m", root=task)
+        files = subprocess.run(["git", "-C", task, "ls-files"], capture_output=True, text=True, env=self.env).stdout
+        self.assertIn("misc/mine.md", files)
+        self.assertNotIn("theirs.md", files)
 
     def test_parallel_agents_keep_their_own_logs(self):  # T50
         root, ws, task, agent, sub = self.chain()
