@@ -1588,6 +1588,37 @@ def a_tree_race_key(c):
     tree_audit(c, top)
 
 
+@attack("tree-race-key-depths")
+def a_tree_race_key_depths(c):
+    """One key requested from different parents at different depths: one node in the whole tree."""
+    top = tree_root(c)
+    wss = [os.path.join(top, tw(c, top, "init", "--kind", "workspace", "--name", "w%d" % i).out.split()[1]) for i in range(3)]
+    n = 12 if c.quick else 30
+
+    def go(i):
+        w = wss[i % 3]
+        if i % 2:
+            return tw(c, w, "init", "--kind", "task", "--name", "t%d" % i, "--key", "DK", "--goal", "g", "--done", "d")
+        return tw(c, top, "init", "--kind", "workspace", "--name", "x%d" % i, "--key", "DK")
+    with cf.ThreadPoolExecutor(n) as ex:
+        rs = list(ex.map(go, range(n)))
+    if any(r.rc != 0 for r in rs):
+        c.fail("a keyed creator failed: " + next(r.err for r in rs if r.rc != 0)[:120])
+    found = []
+
+    def walk(base):
+        nodes, _ = tree_nodes(base)
+        for p in nodes:
+            r = first_row(p)
+            if r and r.get("key") == "DK":
+                found.append(p)
+            walk(p)
+    walk(top)
+    if len(found) != 1:
+        c.fail("expected one node for key DK in the whole tree, found %d" % len(found))
+    tree_audit(c, top)
+
+
 @attack("tree-race-names")
 def a_tree_race_names(c):
     top = tree_root(c)
@@ -1908,6 +1939,8 @@ def mig_hash(root):
         dns[:] = sorted(d for d in dns if not d.startswith(".new-"))
         for n in sorted(fns):
             p = os.path.join(dp, n)
+            if os.path.relpath(p, root) == os.path.join("legacy", "paseo-migration.md"):
+                continue  # created vs already-present counts differ between a clean run and a resumed one
             data = open(p, "rb").read()
             if n == "events.jsonl":
                 data = re.sub(rb'"ts":"[^"]*"', b'"ts":""', data)
@@ -1935,7 +1968,11 @@ def a_mig_fuzz(c):
                 seen.add(a["id"])
                 if not a.get("background"):
                     want.add("paseo:agent/" + a["id"])
-        miss = want - set(keys)
+        blob = ""  # `list nodes` stops at depth 8 and a subagent chain can be deeper: look for the keys on disk
+        for dp, dns, fns in os.walk(root):
+            if "events.jsonl" in fns:
+                blob += open(os.path.join(dp, "events.jsonl"), encoding="utf-8", errors="replace").read()
+        miss = {k for k in want if json.dumps(k) not in blob and json.dumps(k, ensure_ascii=False) not in blob}
         if miss and r.rc == 0:
             c.fail("%d usable agents neither imported nor reported (exit 0)" % len(miss))
         rep = open(os.path.join(root, "legacy", "paseo-migration.md"), encoding="utf-8").read()

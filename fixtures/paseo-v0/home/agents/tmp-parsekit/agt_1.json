@@ -1,0 +1,24 @@
+{
+  "id": "agt_1",
+  "provider": "claude",
+  "cwd": "/tmp/parsekit",
+  "workspaceId": "wks_1",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-01T00:00:00.000Z",
+  "title": "Plan the parser rewrite",
+  "labels": {},
+  "lastStatus": "idle",
+  "config": {
+    "modeId": "default",
+    "model": "sonnet"
+  },
+  "persistence": {
+    "provider": "claude",
+    "metadata": {
+      "provider": "claude",
+      "cwd": "/tmp/parsekit"
+    }
+  },
+  "internal": false,
+  "archivedAt": null
+}

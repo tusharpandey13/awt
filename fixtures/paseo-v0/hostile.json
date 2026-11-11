@@ -27,7 +27,7 @@
   "agents": [
     {
       "id": "agt_1",
-      "name": "Token AKIAABCDEFGHIJKLMNOP leaked",
+      "name": "Token SECRET-GOES-HERE leaked",
       "provider": "claude",
       "model": "sonnet",
       "cwd": "/tmp/parsekit",

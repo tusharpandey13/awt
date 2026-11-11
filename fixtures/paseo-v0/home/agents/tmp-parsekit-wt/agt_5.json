@@ -1,0 +1,26 @@
+{
+  "id": "agt_5",
+  "provider": "claude",
+  "cwd": "/tmp/parsekit-wt",
+  "workspaceId": "wks_2",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-01T00:00:00.000Z",
+  "title": "Read the RFC",
+  "labels": {
+    "paseo.parent-agent-id": "agt_4"
+  },
+  "lastStatus": "idle",
+  "config": {
+    "modeId": "default",
+    "model": "sonnet"
+  },
+  "persistence": {
+    "provider": "claude",
+    "metadata": {
+      "provider": "claude",
+      "cwd": "/tmp/parsekit-wt"
+    }
+  },
+  "internal": false,
+  "archivedAt": null
+}

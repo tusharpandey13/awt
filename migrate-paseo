@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-import sys
+import os, sys
 sys.dont_write_bytecode = True
-sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
+if sys.path and sys.path[0] == os.path.dirname(os.path.abspath(__file__)):
+    del sys.path[0]
 import argparse, fcntl, hashlib, json, os, re, runpy, subprocess
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 AWT = os.path.join(HERE, "awt")
+_PATH = list(sys.path)
 LIB = runpy.run_path(AWT, run_name="awt_lib")
+sys.path[:] = _PATH  # awt strips sys.path[0] on load; under `python3 -I` that entry is the stdlib
 SECRETS = LIB["SECRETS"]
 CTRL = re.compile(r"[\x00-\x1f\x7f]")
 NAMECAP, GOALCAP, TITLECAP, WHYCAP, IDCAP = 60, 250, 120, 200, 150
+FIELDCAP, CWDCAP, OUTCAP, FILEMAX = 200, 500, 200, 4 << 20
 
 
 class Fail(Exception):
@@ -36,36 +40,83 @@ def cut(v, n):
     return v if len(v) <= n else v[:n - 1].rstrip() + "~"
 
 
+def S(v):
+    """Every string that reaches the report or the terminal: one line, secret-scanned, capped."""
+    return cut(redact(clean(v if isinstance(v, str) else str(v)), set()), OUTCAP)
+
+
+def field(report, what, name, v, cap):
+    """A Paseo text field: single line, secrets redacted (and named in the report), capped."""
+    v = clean(v)
+    s = redact(v, report["redacted_kinds"])
+    if s != v:
+        e = "%s: %s" % (what, name)
+        if e not in report["redacted"]:
+            report["redacted"].append(e)
+    return cut(s, cap)
+
+
 def awt(node, *args, check=True):
     r = subprocess.run([sys.executable, "-I", AWT, "--dir", node, "--by", "migrate-paseo"] + list(args), capture_output=True, text=True)
     if check and r.returncode:
-        raise Fail("awt %s: %s" % (" ".join(args[:4]), (r.stderr.strip() or r.stdout.strip())[:200]))
+        raise Fail("awt %s: %s" % (args[0], (r.stderr.strip() or r.stdout.strip())[:200]))  # never echo argv: it carries titles and targets
     return r
 
 
 # ---------- sources ----------
-def from_cli(home, host):
-    base = ["paseo"] + (["--home", home] if home else []) + (["--host", host] if host else [])
+def from_home(home, report):
+    """Paseo's on-disk JSON under HOME, read-only, mapped to the snapshot shape.
+    agents/*/*.json (one file per agent, with workspaceId), projects/projects.json, projects/workspaces.json."""
+    home = os.path.expanduser(home or "~/.paseo")
+    if not os.path.isdir(home):
+        raise Fail("no Paseo data directory at %s" % home)
 
-    def js(*a):
-        r = subprocess.run(base + list(a) + ["--json"], capture_output=True, text=True)
-        if r.returncode:
-            raise Fail("paseo %s failed: %s" % (" ".join(a), r.stderr.strip()[:200]))
-        return json.loads(r.stdout or "[]")
-    projects = [dict(id=p.get("projectId"), name=p.get("name"), path=p.get("path")) for p in js("project", "ls")]
-    byname = {}
-    for p in projects:
-        byname.setdefault(p["name"], []).append(p["id"])
-    workspaces = []
-    for w in js("workspace", "ls"):
-        ids = byname.get(w.get("project"), [])
-        workspaces.append(dict(id=w.get("workspaceId"), projectId=ids[0] if len(ids) == 1 else None, project=w.get("project"),
-                               name=w.get("name"), cwd=w.get("cwd"), archived=False, background=bool(w.get("background"))))
+    def load(p):
+        if os.path.islink(p) or not os.path.isfile(p) or os.path.getsize(p) > FILEMAX:
+            raise Fail("%s is not a regular file under %d bytes" % (os.path.basename(p), FILEMAX))
+        with open(p, encoding="utf-8") as g:
+            return json.load(g)
+
+    def listing(name, required):
+        p = os.path.join(home, "projects", name)
+        if not os.path.exists(p) and not required:
+            return []
+        d = load(p)
+        if not isinstance(d, list):
+            raise Fail("projects/%s is not a list" % name)
+        return d
+
+    def sub(d, k):
+        v = d.get(k) if isinstance(d, dict) else None
+        return v if isinstance(v, dict) else {}
+
+    def txt(v):
+        return v if isinstance(v, str) else None
+    projects = [dict(id=r.get("projectId"), name=txt(r.get("customName")) or txt(r.get("displayName")), path=r.get("rootPath")) if isinstance(r, dict) else r
+                for r in listing("projects.json", False)]
+    workspaces = [dict(id=r.get("workspaceId"), projectId=txt(r.get("projectId")), name=txt(r.get("displayName")) or txt(r.get("title")) or txt(r.get("branch")),
+                       cwd=r.get("cwd"), archived=bool(r.get("archivedAt")), background=bool(r.get("background"))) if isinstance(r, dict) else r
+                  for r in listing("workspaces.json", True)]
     agents = []
-    for a in js("ls", "-a", "-g"):
-        d = js("inspect", a["id"])
-        agents.append(dict(id=a["id"], name=a.get("name"), provider=d.get("Provider"), model=d.get("Model"), cwd=d.get("Cwd") or a.get("cwd"),
-                           archived=bool(d.get("Archived")), background=False, workspaceId=None, parentAgentId=d.get("ParentAgentId")))
+    adir = os.path.join(home, "agents")
+    for d in sorted(os.listdir(adir)) if os.path.isdir(adir) else []:
+        dp = os.path.join(adir, d)
+        if os.path.islink(dp) or not os.path.isdir(dp):
+            continue
+        for f in sorted(os.listdir(dp)):
+            if not f.endswith(".json"):
+                continue
+            try:
+                r = load(os.path.join(dp, f))
+            except (OSError, ValueError, Fail, RecursionError) as x:
+                report["skipped"].append(("agent file", f, "unreadable: %s" % x))
+                continue
+            if not isinstance(r, dict):
+                report["skipped"].append(("agent file", f, "not an object"))
+                continue
+            model = txt(sub(r, "config").get("model")) or txt(sub(sub(r, "persistence"), "metadata").get("model"))
+            agents.append(dict(id=r.get("id"), name=r.get("title"), provider=r.get("provider"), model=model, cwd=r.get("cwd"), workspaceId=txt(r.get("workspaceId")),
+                               parentAgentId=txt(sub(r, "labels").get("paseo.parent-agent-id")), archived=bool(r.get("archivedAt")), background=bool(r.get("internal"))))
     return dict(projects=projects, workspaces=workspaces, agents=agents)
 
 
@@ -82,6 +133,9 @@ def normalize(snap, report):
             if not isinstance(i, str) or not i.strip() or CTRL.search(i) or len(i) > IDCAP:
                 report["skipped"].append((key, clean(str(i))[:40] or "?", "missing or unusable id"))
                 continue
+            if redact(i, set()) != i:
+                report["skipped"].append((key, i, "id matches the secret scan"))
+                continue
             if i in seen:
                 report["skipped"].append((key, i, "duplicate id"))
                 continue
@@ -93,13 +147,16 @@ def normalize(snap, report):
 
 # ---------- planning ----------
 def plan(snap, report):
-    S = normalize(snap, report)
-    pname = {p["id"]: clean(p.get("name")) or p["id"] for p in S["projects"]}
+    S_ = normalize(snap, report)
+    pname = {p["id"]: field(report, "project " + p["id"], "name", p.get("name"), FIELDCAP) or p["id"] for p in S_["projects"]}
     wss = {}
-    for w in sorted(S["workspaces"], key=lambda w: w["id"]):
-        proj = clean(w.get("project")) or pname.get(w.get("projectId")) or "unknown"
-        wss[w["id"]] = dict(id=w["id"], projectId=w.get("projectId"), project=proj, name=clean(w.get("name")) or w["id"],
-                            cwd=clean(w.get("cwd")), archived=bool(w.get("archived")), background=bool(w.get("background")))
+    for w in sorted(S_["workspaces"], key=lambda w: w["id"]):
+        what = "workspace " + w["id"]
+        proj = field(report, what, "project", w.get("project"), FIELDCAP) or pname.get(w.get("projectId")) or "unknown"
+        raw = clean(w.get("cwd"))
+        cwd = field(report, what, "cwd", os.path.normpath(raw) if raw else "", CWDCAP)
+        wss[w["id"]] = dict(id=w["id"], projectId=w.get("projectId"), project=proj, name=field(report, what, "name", w.get("name"), FIELDCAP) or w["id"],
+                            cwd=cwd, archived=bool(w.get("archived")), background=bool(w.get("background")))
     for i, w in list(wss.items()):
         if w["background"]:
             report["skipped"].append(("workspace", i, "background workspace"))
@@ -108,16 +165,36 @@ def plan(snap, report):
     for w in wss.values():
         by_cwd.setdefault(w["cwd"], []).append(w["id"])
     ags = {}
-    for a in sorted(S["agents"], key=lambda a: a["id"]):
+    for a in sorted(S_["agents"], key=lambda a: a["id"]):
         if a.get("background"):
             report["skipped"].append(("agent", a["id"], "background agent"))
             continue
-        ags[a["id"]] = dict(id=a["id"], title=clean(a.get("name")), provider=clean(a.get("provider")), model=clean(a.get("model")), cwd=clean(a.get("cwd")),
-                            archived=bool(a.get("archived")), wid=a.get("workspaceId") if isinstance(a.get("workspaceId"), str) else None,
+        what = "agent " + a["id"]
+        raw = clean(a.get("cwd"))
+        ags[a["id"]] = dict(id=a["id"], title=field(report, what, "title", a.get("name"), FIELDCAP), provider=field(report, what, "provider", a.get("provider"), FIELDCAP),
+                            model=field(report, what, "model", a.get("model"), FIELDCAP), cwd=field(report, what, "cwd", os.path.normpath(raw) if raw else "", CWDCAP),
+                            archived=bool(a.get("archived")), wid=a.get("workspaceId") if isinstance(a.get("workspaceId"), str) else None, ws=None,
                             parent=a.get("parentAgentId") if isinstance(a.get("parentAgentId"), str) and a.get("parentAgentId") else None)
-    # workspace for each agent
+    # parents: cycles and missing parents become orphans
+    for a in ags.values():
+        chain, cur, bad = {a["id"]}, a["parent"], None
+        while cur:
+            if cur not in ags:
+                bad = "parent %s is not in the snapshot" % cur
+                break
+            if cur in chain:
+                bad = "parent cycle through %s" % cur
+                break
+            chain.add(cur)
+            cur = ags[cur]["parent"]
+        if bad:
+            report["orphans"].append((a["id"], bad))
+            a["parent"] = None
+    # a workspace is resolved only for agents without a parent: the others sit under their parent agent
     unassigned = {}
     for a in ags.values():
+        if a["parent"]:
+            continue
         why = None
         if a["wid"] in wss:
             a["ws"] = a["wid"]
@@ -137,21 +214,6 @@ def plan(snap, report):
             report["ambiguous"].append((a["id"], why))
     for k, w in unassigned.items():
         wss[k] = w
-    # parents: topological, cycles and missing parents become orphans
-    for a in ags.values():
-        chain, cur, bad = {a["id"]}, a["parent"], None
-        while cur:
-            if cur not in ags:
-                bad = "parent %s is not in the snapshot" % cur
-                break
-            if cur in chain:
-                bad = "parent cycle through %s" % cur
-                break
-            chain.add(cur)
-            cur = ags[cur]["parent"]
-        if bad:
-            report["orphans"].append((a["id"], bad))
-            a["parent"] = None
     order, seen = [], set()
 
     def visit(i):
@@ -188,8 +250,10 @@ def scan(root):
             stack.append(c)
 
 
-def make(parent, kind, name, key, goal=None, done=None):
+def make(parent, kind, name, key, report, goal=None, done=None):
+    """Find the node by key anywhere in the tree, or create it. Counts created and found nodes."""
     if key in INDEX:
+        report["found"][kind] += 1
         return INDEX[key]
     a = ["init", "--kind", kind, "--name", name, "--key", key]
     if goal:
@@ -199,6 +263,7 @@ def make(parent, kind, name, key, goal=None, done=None):
     if len(parts) < 3 or parts[0] != "init":
         raise Fail("unexpected init output: " + r.stdout[:80])
     INDEX[key] = os.path.join(parent, parts[1])
+    report["created"][kind] += 1
     return INDEX[key]
 
 
@@ -225,14 +290,13 @@ def node_status(node):
     return LIB["load_at"](node)["status"]
 
 
-def set_status(node, want, report, label):
-    if node_status(node) == want:
+def archive(node, report, label):
+    """Paseo archived it: move an active node to done. awt owns the status after import, so nothing else is ever set."""
+    if node_status(node) != "active":
         return
-    r = awt(node, "status", want, check=False)
-    if r.returncode and want == "done":
+    r = awt(node, "status", "done", check=False)
+    if r.returncode:
         report["notes"].append("%s could not be marked done: %s" % (label, r.stderr.strip().splitlines()[0][:120] if r.stderr.strip() else "refused"))
-    elif r.returncode:
-        raise Fail("status %s failed: %s" % (want, r.stderr.strip()[:120]))
 
 
 def apply(root, wss, ags, order, report, dry):
@@ -242,69 +306,66 @@ def apply(root, wss, ags, order, report, dry):
     for wid in sorted(wss):
         w = wss[wid]
         key = wid if w.get("unassigned") else "paseo:workspace/" + wid
-        label = "%s--%s" % (w["project"], w["name"])
+        label = "unassigned--%s" % w["project"] if w.get("unassigned") else "%s--%s" % (w["project"], w["name"])
         if dry:
-            print("workspace %s key=%s" % (cut(label, NAMECAP), key))
+            print("workspace %s key=%s" % (S(cut(label, NAMECAP)), S(key)))
             wnode[wid] = tnode[wid] = None
             continue
         try:
-            p = make(root, "workspace", node_name(label, "workspace", hits), key, goal=cut(redact(label, hits), GOALCAP), done="ongoing")
+            p = make(root, "workspace", node_name(label, "workspace", hits), key, report, goal=cut(redact(label, hits), GOALCAP), done="ongoing")
             have = have_refs(p)
-            if w["cwd"]:
+            if w["cwd"] and "[REDACTED:" not in w["cwd"]:
                 ensure_ref(p, w["cwd"], "working directory", no_access=not os.path.exists(w["cwd"]), have=have)
             if w.get("projectId"):
                 ensure_ref(p, "paseo:project/" + w["projectId"], w["project"], have=have)
             if not w.get("unassigned"):
                 ensure_ref(p, "paseo:workspace/" + wid, w["name"], have=have)
-            t = make(p, "task", "imported", "paseo:task/%s/imported" % wid.replace("paseo:unassigned/", "unassigned-"), goal="Imported from Paseo", done="reference only")
+            t = make(p, "task", "imported", "paseo:task/%s/imported" % wid.replace("paseo:unassigned/", "unassigned-"), report, goal="Imported from Paseo", done="reference only")
             wnode[wid], tnode[wid] = p, t
-            report["imported"]["workspace"] += 1
         except Fail as x:
             report["failed"].append(("workspace", wid, str(x)))
-    done_later = []
+    archived = []
     for aid in order:
         a = ags[aid]
-        t = tnode.get(a["ws"])
-        parent = paths.get(a["parent"]) if a["parent"] else t
+        parent = paths.get(a["parent"]) if a["parent"] else tnode.get(a["ws"])
         title = a["title"] or "agent-" + aid[:8]
         if dry:
-            print("agent %s key=paseo:agent/%s under %s" % (cut(title, NAMECAP), aid, a["parent"] or a["ws"]))
+            print("agent %s key=%s under %s" % (S(cut(title, NAMECAP)), S("paseo:agent/" + aid), S(a["parent"] or a["ws"])))
             paths[aid] = None
             continue
         if parent is None:
             report["failed"].append(("agent", aid, "its parent node or workspace could not be created"))
             continue
         try:
-            if redact(title, set()) != title:
-                report["redacted"].append(aid)
-            p = make(parent, "agent", node_name(title, "agent-" + aid[:8], hits), "paseo:agent/" + aid, goal=cut(redact(title, hits), GOALCAP), done="agent work recorded")
-            ensure_ref(p, "paseo:agent/" + aid, redact(title, set()) or aid, why="/".join(x for x in (a["provider"], a["model"]) if x))
+            p = make(parent, "agent", node_name(title, "agent-" + aid[:8], hits), "paseo:agent/" + aid, report, goal=cut(title, GOALCAP), done="agent work recorded")
+            ensure_ref(p, "paseo:agent/" + aid, title if a["title"] else aid, why="/".join(x for x in (a["provider"], a["model"]) if x))
             paths[aid] = p
-            report["imported"]["agent"] += 1
-            done_later.append((p, "done" if a["archived"] else "active", "agent " + aid))
+            if a["archived"]:
+                archived.append((p, "agent " + aid))
         except Fail as x:
             report["failed"].append(("agent", aid, str(x)))
     if not dry:
-        for p, want, label in reversed(done_later):
-            try:
-                set_status(p, want, report, label)
-            except Fail as x:
-                report["failed"].append(("status", label, str(x)))
+        for p, label in reversed(archived):
+            archive(p, report, label)
         for wid, w in wss.items():
             if w.get("archived") and wnode.get(wid):
-                set_status(wnode[wid], "done", report, "workspace " + wid)
+                archive(tnode[wid], report, "task of workspace " + wid)  # awt refuses done on a node with an active child
+                archive(wnode[wid], report, "workspace " + wid)
 
 
 def write_report(root, report, src):
-    lines = ["# Paseo migration", "", "Source: %s" % src, "",
-             "Imported: %d workspaces, %d agents" % (report["imported"]["workspace"], report["imported"]["agent"]), ""]
+    c, f = report["created"], report["found"]
+    lines = ["# Paseo migration", "", "Source: %s" % S(src), "",
+             "Created: %d workspaces, %d tasks, %d agents" % (c["workspace"], c["task"], c["agent"]),
+             "Already present: %d workspaces, %d tasks, %d agents" % (f["workspace"], f["task"], f["agent"]), ""]
     for title, key, fmt in (("Skipped", "skipped", lambda x: "- `%s %s`: %s" % x),
                             ("Ambiguous or unmatched workspace (placed under an unassigned workspace)", "ambiguous", lambda x: "- `%s`: %s" % x),
                             ("Orphans (attached to the task)", "orphans", lambda x: "- `%s`: %s" % x),
-                            ("Titles with a redacted secret", "redacted", lambda x: "- `%s`" % x),
+                            ("Fields with a redacted secret", "redacted", lambda x: "- `%s`" % x),
                             ("Notes", "notes", lambda x: "- " + x),
                             ("Failed", "failed", lambda x: "- `%s %s`: %s" % x)):
-        lines += ["## " + title] + ([fmt(x) for x in report[key]] or ["(none)"]) + [""]
+        rows = [x if isinstance(x, str) else tuple(S(y) for y in x) for x in report[key]]
+        lines += ["## " + title] + ([fmt(S(x) if isinstance(x, str) else x) for x in rows] or ["(none)"]) + [""]
     os.makedirs(os.path.join(root, "legacy"), exist_ok=True)
     with open(os.path.join(root, "legacy", "paseo-migration.md"), "w", encoding="utf-8") as g:
         g.write("\n".join(lines))
@@ -316,28 +377,29 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--from", dest="src")
     ap.add_argument("--home")
-    ap.add_argument("--host")
     a = ap.parse_args()
-    report = dict(skipped=[], ambiguous=[], orphans=[], redacted=[], notes=[], failed=[], redacted_kinds=set(), imported=dict(workspace=0, agent=0))
+    kinds = ("workspace", "task", "agent")
+    report = dict(skipped=[], ambiguous=[], orphans=[], redacted=[], notes=[], failed=[], redacted_kinds=set(),
+                  created=dict.fromkeys(kinds, 0), found=dict.fromkeys(kinds, 0))
     try:
         if a.src:
             with open(a.src, encoding="utf-8") as g:
                 snap = json.load(g)
         else:
-            snap = from_cli(a.home, a.host)
-    except (OSError, ValueError, Fail) as x:
-        print("error: cannot read the Paseo data: %s" % x, file=sys.stderr)
-        print("fix: pass --from SNAPSHOT.json, or make sure `paseo` works and its daemon is running", file=sys.stderr)
+            snap = from_home(a.home, report)
+        wss, ags, order = plan(snap, report)
+    except (OSError, ValueError, Fail, RecursionError) as x:
+        print("error: cannot read the Paseo data: %s" % S(x), file=sys.stderr)
+        print("fix: pass --from SNAPSHOT.json, or --home with a Paseo data directory (default ~/.paseo)", file=sys.stderr)
         return 1
-    wss, ags, order = plan(snap, report)
     root = os.path.realpath(os.path.expanduser(a.root))
     if a.dry_run:
         apply(root, wss, ags, order, report, True)
         for s in report["skipped"] + report["ambiguous"] + report["orphans"]:
-            print("note:", *s)
+            print("note:", *(S(x) for x in s))
         return 0
     if os.path.isdir(root) and not os.path.isdir(os.path.join(root, ".awt")) and os.listdir(root):
-        print("error: %s is not empty and is not an awt root" % root, file=sys.stderr)
+        print("error: %s is not empty and is not an awt root" % S(root), file=sys.stderr)
         print("fix: pass an empty directory or an existing root", file=sys.stderr)
         return 1
     os.makedirs(root, exist_ok=True)
@@ -348,21 +410,24 @@ def main():
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("error: another migrate-paseo is running on %s" % root, file=sys.stderr)
+        print("error: another migrate-paseo is running on %s" % S(root), file=sys.stderr)
         print("fix: wait for it, then run again", file=sys.stderr)
         return 1
+    os.ftruncate(lock, 0)  # a killed run must not leave the previous report looking current
+    os.write(lock, b"# Paseo migration\n\nRun in progress, or it was interrupted. Run migrate-paseo again.\n")
     try:
         LIB["ROOT"] = root
         scan(root)
         apply(root, wss, ags, order, report, False)
     finally:
-        write_report(root, report, a.src or "paseo CLI")
+        write_report(root, report, a.src or a.home or "~/.paseo")
         os.close(lock)
-    print("imported %d workspaces, %d agents; %d skipped, %d ambiguous, %d orphans, %d failed" % (
-        report["imported"]["workspace"], report["imported"]["agent"], len(report["skipped"]), len(report["ambiguous"]), len(report["orphans"]), len(report["failed"])))
+    c, f = report["created"], report["found"]
+    print("created %d workspaces, %d agents (already present: %d, %d); %d skipped, %d ambiguous, %d orphans, %d failed" % (
+        c["workspace"], c["agent"], f["workspace"], f["agent"], len(report["skipped"]), len(report["ambiguous"]), len(report["orphans"]), len(report["failed"])))
     if report["failed"]:
-        for f in report["failed"][:10]:
-            print("failed: %s %s: %s" % f, file=sys.stderr)
+        for x in report["failed"][:10]:
+            print("failed: %s %s: %s" % tuple(S(y) for y in x), file=sys.stderr)
         return 1
     return 0
 

@@ -1,0 +1,24 @@
+[
+  {
+    "projectId": "prj_1",
+    "projectKey": "/tmp/parsekit",
+    "rootPath": "/tmp/parsekit",
+    "kind": "git",
+    "displayName": "parsekit",
+    "customName": null,
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:00:00.000Z",
+    "archivedAt": null
+  },
+  {
+    "projectId": "prj_2",
+    "projectKey": "/tmp/docs-site",
+    "rootPath": "/tmp/docs-site",
+    "kind": "git",
+    "displayName": "docs-site",
+    "customName": null,
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:00:00.000Z",
+    "archivedAt": null
+  }
+]

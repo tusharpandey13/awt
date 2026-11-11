@@ -1,5 +1,5 @@
 """migrate-paseo (SPEC.md, "migrate-paseo"). End to end: the real script and the real awt in a temp HOME."""
-import hashlib, json, os, re, shutil, subprocess, sys, tempfile, unittest
+import hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.realpath(os.path.join(HERE, ".."))
@@ -7,6 +7,8 @@ MIG = os.path.join(REPO, "migrate-paseo")
 AWT = os.path.join(REPO, "awt")
 FIX = os.path.join(REPO, "fixtures", "paseo-v0")
 AKIA = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
+TOKEN = "gh" + "p_" + "a1B2" * 9
+HOME = os.path.join(FIX, "home")
 
 
 def write_json(p, d):
@@ -17,6 +19,11 @@ def write_json(p, d):
 def write_text(p, t):
     with open(p, "w") as g:
         g.write(t)
+
+
+def read_text(p):
+    with open(p, encoding="utf-8") as g:
+        return g.read()
 
 
 def read_json(p):
@@ -51,8 +58,10 @@ class Base(unittest.TestCase):
         self.env = dict(os.environ, HOME=self.tmp, GIT_CONFIG_GLOBAL="/dev/null")
         self.env.pop("AWT_DIR", None)
 
-    def mig(self, *args, env=None, snap=None):
+    def mig(self, *args, env=None, snap=None, home=None):
         cmd = [sys.executable, MIG, self.root] + list(args)
+        if home:
+            cmd += ["--home", home]
         if snap:
             cmd += ["--from", os.path.join(FIX, snap + ".json") if not os.path.isabs(snap) else snap]
         return subprocess.run(cmd, capture_output=True, text=True, env=env or self.env, cwd=self.tmp)
@@ -125,9 +134,10 @@ class Basic(Base):
 
     def test_m6_second_run_changes_nothing(self):
         self.ok(snap="basic")
-        first = tree_hash(self.root)
+        skip = (os.path.join("legacy", "paseo-migration.md"),)  # the report differs: created vs already present
+        first = tree_hash(self.root, skip)
         self.ok(snap="basic")
-        self.assertEqual(tree_hash(self.root), first)
+        self.assertEqual(tree_hash(self.root, skip), first)
 
     def test_m6_moving_snapshot(self):
         self.ok(snap="basic")
@@ -146,7 +156,7 @@ class Basic(Base):
         snap["agents"][0]["archived"] = False
         write_json(p, snap)
         self.ok(snap=p)
-        self.assertEqual(self.nodes()["workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "active")
+        self.assertEqual(self.nodes()["workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")  # awt owns the status after import
 
     def test_m8_no_timeline_text(self):
         snap = read_json(os.path.join(FIX, "basic.json"))
@@ -185,6 +195,7 @@ class Shapes(Base):
         n = self.nodes()
         un = [p for p in n if p.count("/") == 1 and n[p][1].startswith("paseo:unassigned/")]
         self.assertEqual(len(un), 2)  # shared cwd, and /tmp/elsewhere
+        self.assertEqual(sorted(un), ["workspaces/unassigned-elsewhere", "workspaces/unassigned-parsekit"])
         rep = self.report()
         self.assertIn("agt_1", rep)
         self.assertIn("agt_3", rep)
@@ -208,7 +219,11 @@ class Shapes(Base):
             self.assertIn(needle, rep)
 
     def test_m9_hostile_snapshot(self):
-        r = self.ok(snap="hostile")
+        snap = read_json(os.path.join(FIX, "hostile.json"))
+        snap["agents"][0]["name"] = snap["agents"][0]["name"].replace("SECRET-GOES-HERE", AKIA)
+        p = os.path.join(self.tmp, "hostile.json")
+        write_json(p, snap)
+        r = self.ok(snap=p)
         n = self.nodes()
         keys = [v[1] for v in n.values()]
         self.assertIn("paseo:agent/../evil", keys)  # only a key, never a path
@@ -223,7 +238,7 @@ class Shapes(Base):
                 with open(os.path.join(dp, f), "rb") as g:
                     self.assertNotIn(AKIA.encode(), g.read(), os.path.join(dp, f))
         rep = self.report()
-        self.assertIn("agt_1", rep.split("## Titles with a redacted secret")[1].split("##")[0])
+        self.assertIn("agt_1", rep.split("## Fields with a redacted secret")[1].split("##")[0])
         self.assertIn("duplicate id", rep)
         self.assertIn("missing or unusable id", rep)
         self.assertNotIn("\x1b", rep)
@@ -231,7 +246,7 @@ class Shapes(Base):
     def test_m7_report_and_exit_invariant(self):
         self.ok(snap="ambiguous")
         rep = self.report()
-        self.assertIn("Imported: ", rep)
+        self.assertIn("Created: ", rep)
         for head in ("## Skipped", "## Ambiguous", "## Orphans", "## Failed"):
             self.assertIn(head, rep)
         # a source the script cannot place at all must not exit 0
@@ -241,20 +256,182 @@ class Shapes(Base):
         self.assertEqual(self.mig(snap=p).returncode, 0)  # lands under an unassigned workspace, which is an import
 
 
-class CliSource(Base):
-    def test_m10_cli_route_equals_snapshot_route(self):
-        stub = os.path.join(FIX, "cli")
-        env = dict(self.env, PATH=stub + os.pathsep + self.env["PATH"])
-        r = self.mig(env=env)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+class HomeSource(Base):
+    def copy_home(self):
+        h = tempfile.mkdtemp(dir=self.tmp) + "/h"
+        shutil.copytree(HOME, h)
+        return h
+
+    def test_m10_home_route_equals_snapshot_route(self):
+        self.ok(home=HOME)
+        self.assertEqual(self.nodes(), BASIC)
+        self.assertIn("(none)", self.report().split("## Ambiguous")[1].split("##")[0])  # exact workspace ids: nothing to guess
+
+    def test_default_home_is_dot_paseo(self):
+        shutil.copytree(HOME, os.path.join(self.tmp, ".paseo"))
+        self.ok()
         self.assertEqual(self.nodes(), BASIC)
 
-    def test_cli_failure_is_a_clean_refusal(self):
-        env = dict(self.env, PATH="/usr/bin:/bin")
-        r = self.mig(env=env)
+    def test_workspaces_sharing_a_cwd_are_exact(self):
+        h = self.copy_home()
+        p = os.path.join(h, "projects", "workspaces.json")
+        ws = read_json(p)
+        ws[1]["cwd"] = ws[0]["cwd"]  # several local workspaces on one checkout
+        write_json(p, ws)
+        self.ok(home=h)
+        n = self.nodes()
+        self.assertEqual({k: v for k, v in n.items() if v[0] == "agent"}, {k: v for k, v in BASIC.items() if v[0] == "agent"})
+        self.assertFalse([p for p in n if "unassigned" in p])
+
+    def test_background_and_archived(self):
+        h = self.copy_home()
+        p = os.path.join(h, "projects", "workspaces.json")
+        ws = read_json(p)
+        ws[2]["archivedAt"] = "2026-01-03T00:00:00.000Z"
+        ws[1]["background"] = True
+        write_json(p, ws)
+        f = os.path.join(h, "agents", "tmp-parsekit", "agt_2.json")
+        a = read_json(f)
+        a["internal"] = True
+        write_json(f, a)
+        self.ok(home=h)
+        n = self.nodes()
+        self.assertEqual(n["workspaces/docs-site-main"][2], "done")
+        self.assertNotIn("paseo:workspace/wks_2", [v[1] for v in n.values()])
+        self.assertNotIn("paseo:agent/agt_2", [v[1] for v in n.values()])
+        rep = self.report()
+        self.assertRegex(rep, r"workspace wks_2.*background")
+        self.assertRegex(rep, r"agent agt_2.*background")
+
+    def test_hostile_home_is_a_clean_refusal_or_skip(self):
+        h = self.copy_home()
+        write_text(os.path.join(h, "agents", "tmp-parsekit", "agt_1.json"), "{nope")
+        write_text(os.path.join(h, "agents", "tmp-parsekit", "agt_2.json"), "[" * 100000)
+        write_json(os.path.join(h, "agents", "tmp-parsekit", "agt_x.json"), ["not", "an", "object"])
+        self.ok(home=h)
+        self.assertIn("unreadable", self.report())
+        for bad in ({}, "x", [1, None, "s", {"workspaceId": 5, "cwd": ["a"]}]):
+            h2 = self.copy_home()
+            write_json(os.path.join(h2, "projects", "workspaces.json"), bad)
+            self.root = os.path.join(self.tmp, "root-%d" % len(json.dumps(bad)))
+            r = self.mig(home=h2)
+            self.assertNotIn("Traceback", r.stderr)
+            if r.returncode:
+                self.assertIn("fix:", r.stderr)
+
+    def test_missing_home_is_a_clean_refusal(self):
+        r = self.mig(home=os.path.join(self.tmp, "nope"))
         self.assertEqual(r.returncode, 1)
         self.assertIn("fix:", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
+        self.assertFalse(os.path.exists(self.root))
+
+
+class Secrets(Base):
+    def snapshot(self):
+        return {"projects": [dict(id="prj_1", name="proj " + TOKEN, path="/tmp/parsekit")],
+                "workspaces": [dict(id="wks_1", projectId="prj_1", project="proj " + TOKEN, name="ws " + TOKEN, cwd="/tmp/" + TOKEN, archived=False),
+                               dict(id="wks_2", projectId="prj_1", project="parsekit", name="plain", cwd="/tmp/parsekit", archived=False)],
+                "agents": [dict(id="agt_1", name="title " + TOKEN, provider="p" + TOKEN, model="m" + TOKEN, cwd="/tmp/" + TOKEN, workspaceId="wks_1", parentAgentId=None, archived=False, background=False),
+                           dict(id="agt_2", name="child", provider="claude", model="m", cwd="/tmp/x", workspaceId="wks_missing" + TOKEN, parentAgentId="agt_1", archived=False, background=False),
+                           dict(id="agt_3", name="lost\n## injected", provider="claude", model="m", cwd="/tmp/y", workspaceId="wks_gone" + TOKEN + "\n## injected heading", parentAgentId=None, archived=False, background=False),
+                           dict(id="agt_" + TOKEN, name="secret id", provider="claude", model="m", cwd="/tmp/y", workspaceId="wks_2", parentAgentId=None, archived=False, background=False),
+                           dict(id="agt_4", name="in plain", provider="claude", model="m", cwd="/tmp/parsekit", workspaceId="wks_2", parentAgentId=None, archived=False, background=False)]}
+
+    def assert_clean(self, *outs):
+        for o in outs:
+            self.assertNotIn(TOKEN, o)
+        for dp, dns, fns in os.walk(self.root):
+            for f in fns:
+                with open(os.path.join(dp, f), "rb") as g:
+                    self.assertNotIn(TOKEN.encode(), g.read(), os.path.join(dp, f))
+
+    def test_no_secret_reaches_files_or_output(self):
+        p = os.path.join(self.tmp, "s.json")
+        write_json(p, self.snapshot())
+        d = self.mig("--dry-run", snap=p)
+        self.assertEqual(d.returncode, 0, d.stderr)
+        self.assertNotIn(TOKEN, d.stdout + d.stderr)
+        r = self.ok(snap=p)
+        self.assert_clean(r.stdout, r.stderr)
+        n = self.nodes()
+        keys = [v[1] for v in n.values()]
+        for k in ("paseo:workspace/wks_1", "paseo:agent/agt_1", "paseo:agent/agt_2", "paseo:agent/agt_3", "paseo:agent/agt_4"):
+            self.assertIn(k, keys)  # one secret never drops a workspace or an agent
+        rep = self.report()
+        self.assertEqual(rep.count("\n## "), 6)  # no heading injected through a newline
+        red = rep.split("## Fields with a redacted secret")[1].split("\n## ")[0]
+        for f in ("workspace wks_1: name", "workspace wks_1: cwd", "agent agt_1: title", "agent agt_1: provider", "agent agt_1: model"):
+            self.assertIn(f, red)
+        self.assertIn("id matches the secret scan", rep)
+        r = self.ok(snap=p)  # rerun: same
+        self.assert_clean(r.stdout, r.stderr)
+
+    def test_failed_awt_call_does_not_echo_argv(self):
+        # a title only awt refuses (a secret shape the migrator does not know) must not be echoed back
+        snap = self.snapshot()
+        snap["workspaces"][0]["name"] = "ok"
+        write_json(os.path.join(self.tmp, "t.json"), snap)
+        r = self.ok(snap=os.path.join(self.tmp, "t.json"))
+        self.assertNotIn(TOKEN, r.stdout + r.stderr + self.report())
+
+
+class Reruns(Base):
+    def test_user_status_survives_a_rerun(self):
+        self.ok(snap="basic")
+        node = os.path.join(self.root, "workspaces", "parsekit-main", "tasks", "imported", "agents", "plan-the-parser-rewrite")
+        self.awt("status", "done", node=node)
+        self.ok(snap="basic")
+        self.assertEqual(self.nodes()["workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")
+
+    def test_counts_created_and_present(self):
+        r = self.ok(snap="basic")
+        self.assertIn("created 3 workspaces, 6 agents", r.stdout)
+        r = self.ok(snap="basic")
+        self.assertIn("created 0 workspaces, 0 agents (already present: 3, 6)", r.stdout)
+        self.assertIn("Created: 0 workspaces, 0 tasks, 0 agents", self.report())
+
+    def test_subagents_are_not_resolved_to_a_workspace(self):
+        snap = read_json(os.path.join(FIX, "basic.json"))
+        snap["agents"][3]["workspaceId"] = "wks_gone"  # agt_4 has a parent
+        snap["agents"][3]["cwd"] = "/tmp/nowhere"
+        p = os.path.join(self.tmp, "s.json")
+        write_json(p, snap)
+        self.ok(snap=p)
+        self.assertEqual(self.nodes(), BASIC)
+        self.assertIn("(none)", self.report().split("## Ambiguous")[1].split("##")[0])
+
+    def test_cwd_is_normalised(self):
+        snap = read_json(os.path.join(FIX, "basic.json"))
+        snap["agents"][0].update(workspaceId=None, cwd="/tmp/parsekit/")
+        p = os.path.join(self.tmp, "s.json")
+        write_json(p, snap)
+        self.ok(snap=p)
+        self.assertEqual(self.nodes(), BASIC)
+
+    def test_dash_i_works(self):
+        r = subprocess.run([sys.executable, "-I", MIG, self.root, "--dry-run", "--from", os.path.join(FIX, "basic.json")], capture_output=True, text=True, env=self.env, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_killed_run_does_not_leave_a_current_looking_report(self):
+        snap = {"projects": [], "workspaces": [dict(id="wks_1", name="main", project="parsekit", cwd="/tmp/parsekit")],
+                "agents": [dict(id="agt_%d" % i, name="agent %d" % i, cwd="/tmp/parsekit", workspaceId="wks_1") for i in range(400)]}
+        p = os.path.join(self.tmp, "big.json")
+        write_json(p, snap)
+        self.ok(snap="basic")  # leaves a finished report behind
+        rep = os.path.join(self.root, "legacy", "paseo-migration.md")
+        pr = subprocess.Popen([sys.executable, MIG, self.root, "--from", p], env=self.env, cwd=self.tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(200):
+                time.sleep(0.1)
+                if pr.poll() is not None:
+                    self.skipTest("finished before it could be killed")
+                if "Run in progress" in read_text(rep):
+                    break
+            pr.kill()
+        finally:
+            pr.wait()
+        self.assertIn("interrupted", read_text(rep))
 
 
 if __name__ == "__main__":
