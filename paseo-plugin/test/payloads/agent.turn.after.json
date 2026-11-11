@@ -1,0 +1,1 @@
+{"agent":{"id":"b7e2d4c0-5a91-4f3e-8d62-1a9c0e7f2b11","workspaceId":"3f9c1a52-7b1e-4d0a-9a55-0c2d5e8a1b01","parentAgentId":null,"provider":"claude","cwd":"/tmp/parsekit","title":"Fix parsekit tokenizer"},"turnId":"turn-0001","outcome":{"kind":"completed"},"timeline":[]}

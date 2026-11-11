@@ -117,6 +117,23 @@ test("E4 restarting the daemon and resuming an agent keeps the same node", { ski
   assert.equal(nodes().filter((x) => x.kind === "agent").length, before);
 });
 
+test("E3 an agent started with the parent label gets its node under the parent's node", { skip: !ON }, () => {
+  const parent = agents().find((a) => a.name === "first").id;
+  paseo("run", "--provider", "fake", "--workspace", wsId, "--title", "kid", "--label", `paseo.parent-agent-id=${parent}`, 'RUN: env | grep ^AWT_ ; awt resume | head -3');
+  const kid = agents().find((a) => a.name === "kid").id;
+  settle();
+    const parentDir = join(root, nodes().find((x) => x.key === `paseo:agent/${parent}`).path); // the parent's log is gone after the daemon restart in E4
+  const out = logs(kid);
+  const kidDir = /AWT_DIR=(\S+)/.exec(out)![1];
+  assert.match(out, new RegExp(`AWT_BY=${kid}`));
+  assert.equal(dirname(dirname(kidDir)), parentDir, "child node sits in the parent agent's agents/ dir");
+  const n = nodes();
+  assert.equal(n.filter((x) => x.key === `paseo:agent/${kid}`).length, 1);
+  assert.match(awt(root, "doctor"), /0 quarantined/);
+  // The first row of the child's log is its node row, under the parent; no "missing parent" note was needed.
+  assert.doesNotMatch(readFileSync(join(kidDir, ".awt", "events.jsonl"), "utf8"), /started by agent/);
+});
+
 test("M11 migrate-paseo reads the on-disk store written by a real daemon, idempotently", { skip: !ON }, () => {
   const mroot = join(tmp, "mroot");
   const mig = () => execFileSync(join(REPO, "migrate-paseo"), ["--home", home, mroot], { env: { ...env, AWT_ROOT: mroot }, encoding: "utf8" });

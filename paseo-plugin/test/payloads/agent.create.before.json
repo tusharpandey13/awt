@@ -1,0 +1,1 @@
+{"request":{"config":{"provider":"claude","cwd":"/tmp/parsekit","systemPrompt":"You work on parsekit.","modeId":"default","model":"claude-sonnet-4","title":"Fix parsekit tokenizer"},"env":{"PARSEKIT_ENV":"dev"}}}

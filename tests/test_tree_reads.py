@@ -460,6 +460,34 @@ class ReadLayer(test_tree.TreeBase):
         chg = self.ok("resume", root=agent).stdout.split("## Changes since newest state")[1].split("\n## ")[0]
         self.assertRegex(chg, r"repo parsekit: \d new commits \(after state")
 
+    def test_brief_commands_and_repo_section_per_node_kind(self):  # T28
+        root, ws, task, agent, sub = self.chain()
+        repo = os.path.join(self.tmp, "parsekit")
+        os.makedirs(repo)
+        tgit(repo, "init", "-q")
+        tgit(repo, "commit", "-q", "--allow-empty", "-m", "base")
+        self.ok("ref", repo, "--title", "repo", root=ws)  # the repo is the workspace's, not the task's
+        self.ok("state", "--now", "a", "--next", "b", root=task)
+        tgit(repo, "commit", "-q", "--allow-empty", "-m", "after task state")
+        env = dict(self.env, PATH=os.path.dirname(test_awt.AWT) + os.pathsep + self.env["PATH"])
+        for n in (root, ws, task, agent, sub):
+            out = self.ok("resume", root=n, env=env).stdout
+            self.assertNotIn("./awt", out, n)
+            self.assertRegex(out, r"(?<![./\w])awt (list|state|find)", n)
+        chg = self.ok("resume", root=task).stdout.split("## Changes since newest state")[1].split("\n## ")[0]
+        self.assertRegex(chg, r"repo parsekit: \d new commits? \(after task state")
+        # A standalone task: ./awt everywhere, and its own repo ref feeds the same section.
+        d = os.path.join(self.tmp, "solo")
+        os.mkdir(d)
+        self.ok("init", "--goal", "g", "--done", "d", root=d)
+        self.ok("ref", repo, "--title", "repo", root=d)
+        self.ok("state", "--now", "a", "--next", "b", root=d)
+        tgit(repo, "commit", "-q", "--allow-empty", "-m", "after solo state")
+        out = self.ok("resume", root=d, env=env).stdout
+        self.assertRegex(out, r"\./awt (list|state|find)")
+        self.assertNotRegex(out, r"(?<![./\w])awt (list|state|find)")
+        self.assertRegex(out.split("## Changes since newest state")[1].split("\n## ")[0], r"repo parsekit: \d new commits? \(after solo state")
+
     def test_printed_commands_use_awt_in_tree_nodes(self):
         root, ws, task, agent, sub = self.chain()
         for n in (root, ws, task, agent):

@@ -1,5 +1,5 @@
 """Node tree (SPEC.md, "Node tree"). End to end: every check runs the real awt in a temp HOME."""
-import concurrent.futures as cf, json, os, re, subprocess, sys, unittest
+import concurrent.futures as cf, hashlib, json, os, re, shutil, subprocess, sys, unittest
 
 import test_awt
 
@@ -154,7 +154,44 @@ class Create(TreeBase):
         self.assertEqual([r["type"] for r in self.rows_of(plain)], ["task"])
 
 
+class Converting(TreeBase):
+    def test_standalone_task_moved_into_workspace_becomes_child(self):  # T14
+        root = self.make_root()
+        ws = self.mk("workspace", "Alpha", root)
+        solo = os.path.join(self.tmp, "solo")
+        os.mkdir(solo)
+        self.ok("init", "--goal", "port parser", "--done", "merged", root=solo)
+        self.ok("note", "tokenizer is slow", root=solo)
+        before = hashlib.sha256(self.events_of(solo)).hexdigest()
+        dest = os.path.join(ws, "tasks", "solo")
+        shutil.move(solo, dest)
+        self.assertEqual(hashlib.sha256(self.events_of(dest)).hexdigest(), before)
+        rows = json.loads(self.ok("list", "nodes", "--all", "--json", root=root).stdout)
+        self.assertIn(os.path.join("workspaces", "alpha", "tasks", "solo"), [r["path"] for r in rows])
+        out = self.ok("resume", root=dest).stdout
+        self.assertRegex(out.split("## Lineage")[1].split("\n## ")[0], r"workspace Alpha")
+        self.assertIn("workspace Alpha", out)
+        self.assertIn("tokenizer is slow", self.ok("list", "notes", root=dest).stdout)
+        self.assertIn("solo", self.ok("resume", root=ws).stdout.split("## Children")[1])
+        self.assertEqual(hashlib.sha256(self.events_of(dest)).hexdigest(), before)  # reading changed nothing
+
+
 class Edges(TreeBase):
+    def test_later_node_row_is_quarantined_first_stands(self):  # T15
+        root, ws, task, agent, sub = self.chain()
+        before = self.rows_of(task, "node")
+        self.assertEqual(len(before), 1)
+        with open(os.path.join(task, ".awt", "events.jsonl"), "ab") as g:
+            g.write((json.dumps(dict(v=1, ts=test_awt.ts(), host="h", by="t", type="node", kind="agent", name="Impostor", key="paseo:agent/impostor", parent=None)) + "\n").encode())
+        rows = json.loads(self.ok("list", "nodes", "--all", "--json", root=root).stdout)
+        t = [r for r in rows if r["path"].endswith("tasks/fix-login")]
+        self.assertEqual([(r["kind"], r["name"]) for r in t], [("task", "Fix login")])
+        self.assertNotIn("Impostor", self.ok("resume", root=task).stdout)
+        self.assertEqual(json.loads(self.ok("list", "nodes", "--all", "--json", root=root).stdout), rows)
+        self.assertRegex(self.ok("doctor", root=task).stdout, r"quarantined")
+        self.assertNotRegex(self.ok("doctor", root=task).stdout, r"\b0 quarantined")
+
+
     """Where init meets a directory that already has records or a node."""
     def test_root_refused_on_dir_with_rows(self):
         d = os.path.join(self.tmp, "s")

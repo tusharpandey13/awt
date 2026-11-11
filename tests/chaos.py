@@ -1664,6 +1664,60 @@ def a_tree_kill_init(c):
         c.fail("doctor crashed")
 
 
+@attack("tree-kill-writers-child")
+def a_tree_kill_writers_child(c):
+    """C4: SIGKILL concurrent writers on a child node. A torn tail heals on the next write; the parent and ancestors are untouched."""
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    t = tnode(c, w, "task", "t")
+    par = tnode(c, t, "agent", "parent")
+    kid = tnode(c, par, "agent", "kid")
+    if not (w and t and par and kid):
+        return
+    tw(c, par, "note", "parent note")
+    tw(c, par, "state", "--now", "parent now", "--next", "parent next")
+    logs = lambda: {n: open(os.path.join(n, ".awt", "events.jsonl"), "rb").read() for n in (top, w, t, par)}
+    ancestors = logs()
+    rounds = 4 if c.quick else 12
+    for i in range(rounds):
+        ps = []
+        for j in range(6):
+            verb = (["note", "x%d-%d %s" % (i, j, "y" * c.rng.randrange(1, 2000))], ["state", "--now", "n%d-%d" % (i, j), "--next", "z" * c.rng.randrange(1, 300)])[j % 2]
+            cmd = [sys.executable, "-I", AWT, "--dir", kid] + verb
+            c.log(" ".join(q(a) for a in cmd[:7]))
+            ps.append(subprocess.Popen(cmd, env=c.env(), cwd=c.base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True))
+        time.sleep(c.rng.random() * 0.05)
+        for p in ps:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for p in ps:
+            p.wait()
+    # A killed single write rarely tears a line, so tear one on purpose: a partial row with no newline.
+    with open(os.path.join(kid, ".awt", "events.jsonl"), "ab") as g:
+        g.write(b'{"v":1,"type":"note","text":"torn by kill')
+    for args in (["resume"], ["list", "notes"], ["find", "x"], ["doctor"]):
+        r = tw(c, kid, *args, allow=(0, 1))
+        if r.rc != 0 and args[0] != "doctor":
+            c.fail("read after kill failed: awt %s -> %s" % (" ".join(args), r.err.strip()[:100]))
+    r = tw(c, kid, "note", "after the kill")
+    if r.rc != 0 or "after the kill" not in tw(c, kid, "list", "notes").out:
+        c.fail("write after kill not visible: rc=%d %s" % (r.rc, r.err.strip()[:100]))
+    raw = open(os.path.join(kid, ".awt", "events.jsonl"), "rb").read()
+    if raw.count(b"torn by kill") and b"torn by kill" in raw.split(b"\n")[-2]:
+        c.fail("the torn row is still glued to the last row")
+    if not raw.endswith(b"\n"):
+        c.fail("child log does not end in a newline after a write")
+    if logs() != ancestors:
+        c.fail("a write to the child changed an ancestor's log")
+    if "parent now" not in tw(c, par, "resume").out:
+        c.fail("parent state lost")
+    if [x for x in tree_nodes(par)[0]] != [kid]:
+        c.fail("parent's children changed")
+    tree_audit(c, top)
+
+
 @attack("tree-hostile-names")
 def a_tree_hostile_names(c):
     top = tree_root(c)

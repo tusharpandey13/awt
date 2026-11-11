@@ -161,7 +161,7 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P8 `agent.permission.before` allows only requests whose every target resolves (realpath) inside the calling agent's own node dir; sibling or parent node, `../`, a symlink out, `AWT_ROOT`, globs, shell and unknown shapes are untouched. It never denies. `awt effect apply` requests are left to the person.
 - P9 Archive hooks: `done` when allowed, `paused` when refused.
 - P10 Background agents: not in this version (Paseo 0.15.4 does not report them); only `purpose: interactive` opens get a node, env or tool.
-- P11 `tsc --noEmit` over the plugin and its tests passes against the installed `@getpaseo/plugin` (a drift check). The harness mocks of `paseo` are typed against `PaseoApi`. Run by `npm test`.
+- P11 `tsc --noEmit` over the plugin and its tests passes against the installed `@getpaseo/plugin` (a drift check). The harness mocks of `paseo` are typed against `PaseoApi`. Recorded hook payloads (fictional `parsekit` data) live in `paseo-plugin/test/payloads/`, one per registered hook; `payloads.test.ts` type-checks each against `PluginHookPayload` and feeds them through the hooks. Run by `npm test`.
 - P12 Every `resolved` URL in `package-lock.json` is on `registry.npmjs.org`.
 - P13 The workspace label uses `projectDisplayName` from `projects.list`.
 
@@ -170,7 +170,7 @@ Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scrip
 - E0 The plugin shows as running in the daemon.
 - E1 Create workspace and agent with the CLI: nodes appear with their keys, agent's environment contains `AWT_DIR`.
 - E2 The scripted agent runs `awt note`; the row is in its node, not the task's.
-- E3 The scripted agent spawns a subagent: the child node sits under the parent's node and gets the subagent block.
+- E3 The scripted agent spawns a subagent (`paseo run --label paseo.parent-agent-id=<parent>`; the daemon test, gated by `AWT_E2E_PASEO=1`): the child node sits under the parent's node and gets the subagent block.
 - E4 Restart the daemon, resume the agent: same node, no duplicate.
 - E5 Archive the workspace: node `done` or `paused`; nothing deleted.
 - E6 Disable the plugin: agents still start and run; nothing is written.
