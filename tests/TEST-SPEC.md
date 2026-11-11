@@ -132,7 +132,8 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 - M7 `legacy/paseo-migration.md` lists counts, ambiguities and skips; the exit code is 1 when an item is neither imported nor listed.
 - M8 No agent timeline text is copied anywhere. A grep of the tree for a marker string placed in the snapshot's message fields finds nothing.
 - M9 Secret-shaped titles are redacted in the node, named in the report, and never written raw.
-- M10 CLI source: with a stub `paseo` on `PATH` that serves the real CLI's JSON shapes (captured once from the installed version and committed), the result equals the snapshot route for non-ambiguous agents.
+- M10 On-disk source: `fixtures/paseo-v0/home/` (fictional `parsekit` data in Paseo's file layout) read with `--home` gives the same tree as `basic.json`, with no ambiguity even when workspaces share a cwd. Background workspaces and agents are skipped; archived workspaces are `done`. Unreadable or malformed files are skipped or refused cleanly.
+- M12 A secret-shaped string (built at runtime) in a workspace name, cwd, provider, model, title, workspace id or agent id appears in no file under ROOT and in no output, including `--dry-run`, and drops no workspace. A user's `status` survives a rerun. Created and already-present counts are separate. A killed run leaves a "run in progress" report.
 - M11 `RealDaemon` (gated): start a daemon with a temp `--home`, create 2 workspaces and 3 agents with the scripted agent, run `migrate-paseo` with no `--from`, compare with expected. Skipped with a visible reason if `paseo` is absent.
 
 ## Plugin (`paseo-plugin/test`)

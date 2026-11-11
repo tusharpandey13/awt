@@ -365,11 +365,11 @@ Compatibility: the plugin is optional. Without Paseo, `awt init --kind` and `lis
 
 ### migrate-paseo
 
-`migrate-paseo ROOT [--dry-run] [--from SNAPSHOT] [--home PATH] [--host H]`: a separate one-off script like `migrate-wt`, not counted against the verb limit. It is read-only on Paseo and writes only through the `awt` next to it.
+`migrate-paseo ROOT [--dry-run] [--from SNAPSHOT] [--home PATH]`: a separate one-off script like `migrate-wt`, not counted against the verb limit. It is read-only on Paseo and writes only through the `awt` next to it.
 
 Sources, in order of preference:
 1. `--from SNAPSHOT`, a JSON file with `projects`, `workspaces` and `agents`. The plugin writes one from the SDK with exact `workspaceId` and `parentAgentId` for every agent. Tests use the same format.
-2. The `paseo` CLI: `project ls`, `workspace ls`, `ls -a -g` and `inspect <id>` for `ParentAgentId`, all with `--json`. The CLI does not give an agent's workspace id, so agents are matched to workspaces by `cwd`.
+2. Paseo's on-disk JSON under `--home` (default `~/.paseo`), read-only: `agents/*/*.json` (one file per agent, with `workspaceId`, `archivedAt`, `internal`, label `paseo.parent-agent-id`, which is where Paseo records the parent of a subagent; on a real install it agreed with `paseo inspect` `ParentAgentId` for every agent checked), `projects/projects.json` and `projects/workspaces.json` (`archivedAt`, `background`). It is mapped to the snapshot shape, so every agent has an exact workspace. A `background` workspace and an `internal` agent are skipped. A file that cannot be read is skipped and listed; a missing or malformed `workspaces.json` is a refusal with a fix line.
 
 Mapping:
 
@@ -377,19 +377,20 @@ Mapping:
 |---|---|
 | Workspace | `workspace` node, name `<project>--<name>`, `ref` repository path, `ref paseo:project/<id>` |
 | Agent, exact workspace id | `agent` node under task `imported` of that workspace |
-| Agent, `cwd` matches exactly one workspace | The same |
-| Agent, `cwd` matches several workspaces, or none | Under workspace `unassigned--<project or cwd basename>`, task `imported`. Listed in the report |
-| Subagent whose parent was imported | Under the parent agent's node |
+| Agent without a workspace id, `cwd` (normalised with `normpath`) matches exactly one workspace | The same |
+| Agent without a workspace id whose `cwd` matches several workspaces or none, or whose workspace id is not listed | Under workspace `unassigned--<cwd basename>`, task `imported`. Listed in the report |
+| Subagent whose parent was imported | Under the parent agent's node. Its workspace is not resolved |
 | Subagent whose parent is missing, or a parent cycle | Under the task; reported |
-| Archived agent | Imported with `status done`. Archived workspaces appear only through their agents and use the `unassigned` rule |
+| Archived agent | Imported, then moved from `active` to `done` |
+| Archived workspace | Imported like any workspace (its agents have an exact workspace id), then its `imported` task and the workspace are moved from `active` to `done` when awt allows it (awt refuses `done` over an active child; the report notes it) |
 | Background agent | Skipped; listed in the report |
 
-Each agent node gets `goal` from its Paseo title (cut to the cap), a `ref kind=paseo` with provider and model in `why`, and nothing else. The timeline is not copied: Paseo keeps it, and rule 3 applies. An agent title that matches the secret scan is imported with the match redacted, and the report names the agent.
+Each agent node gets `goal` from its Paseo title (cut to the cap), a `ref kind=paseo` with provider and model in `why`, and nothing else. The timeline is not copied: Paseo keeps it, and rule 3 applies. Every text field (titles, workspace and project names, `cwd`, provider, model) that matches the secret scan is imported with the match redacted, and the report names the item and the field. A `cwd` with a match gets no `ref`. An id that matches the scan cannot be a key: it is skipped and listed. Nothing the script writes or prints contains a match, and failed `awt` calls report awt's message, never its arguments. Report fields are single-line and capped.
 
 Properties:
-- Idempotent: a second run, or a run after a crash, imports only what is missing and appends a `status` row only when it differs. Names are never changed after creation.
+- Idempotent: a second run, or a run after a crash, creates only what is missing; names are never changed after creation. After import awt owns the status: the script never sets `active`, and moves a node only from `active` to `done` when Paseo has it archived, so a status the user set survives reruns. Output and report give created and already-present counts separately.
 - Existing nodes are found by key across the whole tree before anything is created, so a node is never duplicated or moved when its parent changes in Paseo. Refs and statuses are read in process and written through `awt`.
-- A lock: a second concurrent run exits 1 with a fix. The report file doubles as the lock (`flock`), because `awt` itself takes `flock` on `events.jsonl`.
+- A lock: a second concurrent run exits 1 with a fix. The report file doubles as the lock (`flock`), because `awt` itself takes `flock` on `events.jsonl`. Taking the lock truncates the report to a "run in progress" header, so a killed run never leaves the previous report looking current.
 - `legacy/paseo-migration.md` in the root: counts, every ambiguity, every skipped item with its reason.
 - Exit 1 if any Paseo item is neither imported nor listed as skipped, as in `migrate-wt`.
 - `migrate-wt` is unchanged. A tracker output already has the `tasks/<id>/` shape and can be moved under a workspace's `tasks/` directory.

@@ -1908,6 +1908,8 @@ def mig_hash(root):
         dns[:] = sorted(d for d in dns if not d.startswith(".new-"))
         for n in sorted(fns):
             p = os.path.join(dp, n)
+            if os.path.relpath(p, root) == os.path.join("legacy", "paseo-migration.md"):
+                continue  # created vs already-present counts differ between a clean run and a resumed one
             data = open(p, "rb").read()
             if n == "events.jsonl":
                 data = re.sub(rb'"ts":"[^"]*"', b'"ts":""', data)
@@ -1935,7 +1937,11 @@ def a_mig_fuzz(c):
                 seen.add(a["id"])
                 if not a.get("background"):
                     want.add("paseo:agent/" + a["id"])
-        miss = want - set(keys)
+        blob = ""  # `list nodes` stops at depth 8 and a subagent chain can be deeper: look for the keys on disk
+        for dp, dns, fns in os.walk(root):
+            if "events.jsonl" in fns:
+                blob += open(os.path.join(dp, "events.jsonl"), encoding="utf-8", errors="replace").read()
+        miss = {k for k in want if json.dumps(k) not in blob and json.dumps(k, ensure_ascii=False) not in blob}
         if miss and r.rc == 0:
             c.fail("%d usable agents neither imported nor reported (exit 0)" % len(miss))
         rep = open(os.path.join(root, "legacy", "paseo-migration.md"), encoding="utf-8").read()
