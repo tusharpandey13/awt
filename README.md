@@ -48,9 +48,23 @@ You mostly talk to your agent. These are the commands you'll use yourself:
 
 - **One record file.** Decisions, questions, links and handoffs go through `./awt` into an append-only `.awt/events.jsonl`. The tool refuses malformed input on the way in, and a corrupt line is skipped and counted rather than breaking anything.
 - **Skipped handoffs are visible.** The resume brief shows the files and commits changed since the last handoff, so the next session sees what happened even if the last one recorded nothing.
-- **The brief has a fixed size.** It stays under 4,400 characters however large the task grows. Everything else is one `./awt find` away.
+- **The brief has a fixed size.** It stays under 4,400 characters however large the task grows (5,200 for a node in a tree, see below). Everything else is one `./awt find` away.
 - **Outbound work is recorded before it runs.** Each effect can only be claimed once. A send that times out becomes `unknown`, and is never retried automatically, because it may have gone through.
 - **Parallel agents are safe.** Writes are single atomic appends, with no locks to go stale.
+
+## Tasks with parts: the node tree
+
+When a task has parts, give them a place instead of one huge directory or a pile of unconnected ones. A node is a directory with `.awt/`; its parent is the nearest enclosing node.
+
+```sh
+awt init --kind root --dir ~/awt-root
+cd ~/awt-root && awt init --kind workspace --name parsekit
+cd workspaces/parsekit && awt init --kind task --name retry-bug --goal "Fix the retry storm" --done "Merged"
+cd tasks/retry-bug && awt init --kind agent --name chat-1
+awt list tree
+```
+
+`resume` in a node shows its ancestors' goals and `rule` decisions and a one-line rollup of its children. `awt find --tree TERM` searches up and down. Agents run anywhere with `AWT_DIR` set to their node. The full contract is in [SPEC.md](SPEC.md#node-tree).
 
 ## Big tasks and cost
 

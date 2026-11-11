@@ -10,8 +10,8 @@ ROOT = None
 BY = "agent"
 ROWMAX = 4096
 TOTAL = 4400
-BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200)
-K = dict(hits=40, big=2000000, head=4096, title=60, line=160, timeout=300, margin=30, newer=8, walk=20000)
+BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200, lineage=300, children=500)
+K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, timeout=300, margin=30, newer=8, walk=20000)
 CAPS = {
     "task.goal": 250, "task.done_means": 250, "state.scope": 40, "state.now": 700, "state.next": 300,
     "note.text": 280, "decision.choice": 300, "decision.why": 300, "decision.tags": 40, "question.text": 400,
@@ -33,6 +33,7 @@ NODE_DIRS = {"root": (), "workspace": ("context", "docs", "misc"), "task": ("con
 ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
         "effect.step": ("planned", "claimed", "sent", "unknown", "dropped")}
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
+LISTS = SECTIONS + ["nodes", "tree"]
 SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
            "legacy", "context", "docs", "outbox", "misc", "workspaces", "tasks", "agents"}
 IGNORE = ["scratch/", ".awt/claims/", ".awt/blobs/", ".awt/runs/"]
@@ -351,6 +352,74 @@ def node_info(path):
     return info
 
 
+def children(path):
+    """Direct child nodes: only the reserved directories, symlinks never followed, .new-* ignored."""
+    res = []
+    for plural in PLURAL.values():
+        d = os.path.join(path, plural)
+        if os.path.islink(d) or not os.path.isdir(d):
+            continue
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in names:
+            p = os.path.join(d, n)
+            if not n.startswith(".new-") and not os.path.islink(p) and is_node_dir(p):
+                res.append(p)
+    return res
+
+
+def descendants(path):
+    """[(path, depth)] in tree order, and whether a limit cut the walk short."""
+    res, cut_ = [], [False]
+
+    def walk(p, depth):
+        for c in children(p):
+            if len(res) >= K["nodes"]:
+                cut_[0] = True
+                return
+            res.append((c, depth))
+            if depth < K["depth"]:
+                walk(c, depth + 1)
+            else:
+                cut_[0] = cut_[0] or bool(children(c))
+    walk(path, 1)
+    return res, cut_[0]
+
+
+def ancestors(path):
+    """Enclosing nodes, nearest first, at most K['depth']."""
+    res, d = [], os.path.dirname(os.path.realpath(path))
+    while len(res) < K["depth"] and os.path.dirname(d) != d:
+        if is_node_dir(d):
+            res.append(d)
+        d = os.path.dirname(d)
+    return res
+
+
+def load_at(path):
+    global ROOT
+    old, ROOT = ROOT, path
+    try:
+        return load()
+    finally:
+        ROOT = old
+
+
+def attention(D):
+    return [e for e in D["eff"].values() if e["state"] in ("planned", "claimed", "unknown", "conflict")]
+
+
+def summarize(path, base):
+    D = load_at(path)
+    info = node_info(path)
+    st = D["hist"][-1] if D["hist"] else None
+    return dict(path=os.path.relpath(path, base), kind=info["kind"], name=info["name"], key=info["key"], status=D["status"],
+                goal=(D["task"] or {}).get("goal", ""), now=st["now"] if st else None, state_ts=st["ts"] if st else None,
+                open_questions=len(D["open_q"]), attention_effects=len(attention(D)))
+
+
 # ---------- the one writer ----------
 def check(typ, f):
     for k in REQ[typ]:
@@ -651,16 +720,58 @@ def eff_next(e):
     return "ask a person, then ./awt effect mark %s sent|not-sent  (see ./awt effect show %s)" % (e["id"], e["id"])
 
 
+def lineage_section(anc):
+    """anc is nearest first. Printed outermost first; when over budget the outer levels are dropped, never the nearest."""
+    lines = []
+    for p in anc:
+        i, D = node_info(p), load_at(p)
+        lines.append(cut("%s %s [%s]: %s" % (i["kind"], i["name"], D["status"], (D["task"] or {}).get("goal", "")), 110))
+    budget, kept, n = BUDGET["lineage"], [], len("## Lineage") + 1
+    reserve = len("+9 outer levels") + 1
+    for i, ln in enumerate(lines):
+        if n + len(ln) + 1 + (reserve if i < len(lines) - 1 else 0) > budget:
+            break
+        kept.append(ln)
+        n += len(ln) + 1
+    head = ["+%d outer levels" % (len(lines) - len(kept))] if len(kept) < len(lines) else []
+    return "## Lineage\n" + "\n".join(head + kept[::-1]) + "\n"
+
+
+def children_section(kids):
+    rows = []
+    for p in kids:
+        D, i = load_at(p), node_info(p)
+        st = D["hist"][-1] if D["hist"] else None
+        flag = " (%d open)" % (len(D["open_q"]) + len(attention(D))) if D["open_q"] or attention(D) else ""
+        rows.append((D["status"] == "done", -epoch(st["ts"]) if st else 0, "%s %s [%s]%s %s" % (
+            i["kind"], i["name"], D["status"], flag, ("%s: %s" % (ago(st["ts"]), cut(st["now"], 100))) if st else "no state yet")))
+    rows.sort(key=lambda r: r[:2])
+    budget, o, n = BUDGET["children"], ["## Children"], len("## Children") + 1
+    reserve = len("+999 more: awt list nodes") + 1
+    for i, r in enumerate(rows):
+        if n + len(r[2]) + 1 + (reserve if i < len(rows) - 1 else 0) > budget:
+            o.append("+%d more: awt list nodes" % (len(rows) - i))
+            break
+        o.append(r[2])
+        n += len(r[2]) + 1
+    return "\n".join(o) + "\n"
+
+
 def brief(scope=None):
     D, o = load(), []
+    anc, kids = ancestors(ROOT), children(ROOT)
     t = D["task"]
     o.append(fit("# awt task", ["Goal: " + cut(t["goal"], 250), "Done means: " + cut(t["done_means"], 250), "Status: " + D["status"]]
-                 if t else ["Goal: (none recorded) ./awt init --goal \"...\" --done \"...\"", "Status: " + D["status"]], "goal", "state"))
+                 if t else ["Goal: (none recorded)" + ("" if anc or kids or not node_info(ROOT)["legacy"] else " ./awt init --goal \"...\" --done \"...\""), "Status: " + D["status"]], "goal", "state"))
+    if anc:
+        o.append(lineage_section(anc))
     sts = sorted(reversed(list(D["states"].values())), key=lambda r: not scope or r.get("scope", "main") == scope, reverse=True)
     if sts:
         s = sts[0]
         o.append(fit("## State", ["[%s] %s\nnow: %s\nnext: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"])] +
                      ["[%s] %s: %s" % (x.get("scope", "main"), ago(x["ts"]), cut(x["now"], 100)) for x in sts[1:]], "state", "state"))
+    if kids:
+        o.append(children_section(kids))
     if D["open_q"]:
         o.append(fit("## Open questions", ["%s: %s" % (q["id"], cut(q["text"])) for q in D["open_q"]], "questions", "questions"))
     att = [e for e in D["eff"].values() if e["state"] in ("planned", "unknown", "conflict")]
@@ -686,10 +797,14 @@ def brief(scope=None):
     else:
         ch.append("No state yet; cannot tell what changed.")
     o.append(fit("## Changes since newest state", ch, "changes", "context"))
-    if D["cur_dec"]:
+    inherited = []
+    for p in anc[::-1]:
+        kind = node_info(p)["kind"]
+        inherited += ["%s [rule, %s] %s" % (d["id"], kind, cut(d["choice"], 120)) for d in load_at(p)["cur_dec"] if "rule" in (d.get("tags") or [])]
+    if D["cur_dec"] or inherited:
         ds = D["cur_dec"][::-1]
         ds.sort(key=lambda d: "rule" not in (d.get("tags") or []))
-        o.append(fit("## Decisions", ["%s %s%s" % (d["id"], "[rule] " if "rule" in (d.get("tags") or []) else "", cut(d["choice"], 120)) for d in ds], "decisions", "decisions"))
+        o.append(fit("## Decisions", inherited + ["%s %s%s" % (d["id"], "[rule] " if "rule" in (d.get("tags") or []) else "", cut(d["choice"], 120)) for d in ds], "decisions", "decisions"))
     refs = list(D["refs"].values())
     inv = "Inventory: %d refs (%d no-access), " % (len(refs), sum(r["access"] == "none" for r in refs)) + ", ".join(
         "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))
@@ -701,14 +816,55 @@ def brief(scope=None):
     return "".join(o)
 
 
+def node_rows(all_):
+    ds, limit = descendants(ROOT)
+    rows = [dict(summarize(p, ROOT), depth=d) for p, d in ds]
+    if not all_:
+        gone = set()
+        keep = []
+        for r in rows:
+            parent = os.path.dirname(os.path.dirname(r["path"]))
+            if r["status"] == "done" or parent in gone:
+                gone.add(r["path"])
+            else:
+                keep.append(r)
+        rows = keep
+    return rows, limit
+
+
+def listing_json(name, D, all_):
+    if name == "nodes":
+        return node_rows(all_)[0]
+    if name in ("context", "docs", "outbox", "misc"):
+        caps = {c["path"]: c["title"] for c in D["caps"]}
+        return [dict(path=f, title=file_title(f, caps)) for f in section_files(name, all_)]
+    if name == "refs":
+        return list(D["refs"].values())
+    if name == "decisions":
+        return [dict(d, superseded_by=current_superseder(D, d["id"])) if d["id"] in D["sup"] else d for d in D["dec"].values() if all_ or d["id"] not in D["sup"]]
+    if name == "questions":
+        return [dict(q, answer=D["ans"][i]["text"] if i in D["ans"] else None) for i, q in D["q"].items() if all_ or i not in D["ans"]]
+    if name == "effects":
+        return [e for e in D["eff"].values() if all_ or e["state"] not in ("sent", "dropped")]
+    if name == "notes":
+        return list(D["notes"])
+    return list(D["hist"] if all_ else D["states"].values())
+
+
 def listing(name, D, all_):
+    if name == "nodes":
+        rows, limit = node_rows(all_)
+        return ["%s %s %s [%s]%s" % (r["path"], r["kind"], r["name"], r["status"], " key=" + r["key"] if r["key"] else "") for r in rows] + (["+ more nodes not shown (limit)"] if limit else [])
+    if name == "tree":
+        rows, limit = node_rows(all_)
+        return ["%s%s %s [%s]%s %s" % ("  " * (r["depth"] - 1), r["kind"], r["name"], r["status"], " ?%d" % (r["open_questions"] + r["attention_effects"]) if r["open_questions"] or r["attention_effects"] else "", cut(r["goal"], 60)) for r in rows] + (["+ more nodes not shown (limit)"] if limit else [])
     if name in ("context", "docs", "outbox", "misc"):
         caps = {c["path"]: c["title"] for c in D["caps"]}
         est = {e["body"]: e["state"] for e in D["eff"].values() if e.get("body")}
         return [("%s  %s" % (f, file_title(f, caps))).rstrip() + ("  [%s]" % est[f] if f in est else "") if not os.path.islink(P(f))
                 else "%s %s" % (f, file_title(f, caps)) for f in section_files(name, all_)]
     if name == "refs":
-        return ["%s [%s%s] %s  %s" % (r["kind"], r["access"], ", " + r["path"] + "@" + r.get("branch", "") if r["kind"] == "repo" else "", r["title"], r["target"]) for r in D["refs"].values()]
+        return ["%s [%s%s] %s  %s" % (r["kind"], r["access"], ", " + r["path"] + "@" + r.get("branch", "") if r["kind"] == "repo" else ", " + r["path"] if r["kind"] == "node" and r.get("path") else "", r["title"], r["target"]) for r in D["refs"].values()]
     if name == "decisions":
         return ["%s%s %s -- %s" % (d["id"], " [%s]" % ",".join(d["tags"]) if d.get("tags") else "", d["choice"], d["why"]) + (" (superseded by %s)" % current_superseder(D, d["id"]) if d["id"] in D["sup"] else "")
                 for d in D["dec"].values() if all_ or d["id"] not in D["sup"]]
@@ -882,7 +1038,20 @@ def cmd_init(a):
     out("init %s: %s" % (ROOT, " ".join(made) or "nothing to change"))
 
 
+def resume_json(scope):
+    D = load()
+    info = node_info(ROOT)
+    t = D["task"] or {}
+    st = D["hist"][-1] if D["hist"] else None
+    return dict(node=dict(kind=info["kind"], name=info["name"], key=info["key"], legacy=info["legacy"]), status=D["status"], goal=t.get("goal"),
+                done_means=t.get("done_means"), state=st, open_questions=D["open_q"], attention_effects=attention(D), decisions=D["cur_dec"],
+                lineage=[summarize(p, ROOT) for p in ancestors(ROOT)[::-1]], children=[summarize(p, ROOT) for p in children(ROOT)], brief=brief(scope))
+
+
 def cmd_resume(a):
+    if getattr(a, "json", False):
+        print(json.dumps(resume_json(getattr(a, "scope", None)), ensure_ascii=False, default=str))
+        return
     if a.hook:
         try:
             r = find_root(a.dir)
@@ -898,6 +1067,11 @@ def cmd_resume(a):
 
 def cmd_list(a):
     D = load()
+    if a.json:
+        if not a.section:
+            die("--json needs a section", "awt list SECTION --json", 2)
+        print(json.dumps(listing_json(a.section, D, a.all), ensure_ascii=False, default=str))
+        return
     for s in ([a.section] if a.section else SECTIONS):
         ls = listing(s, D, a.all)
         out("## %s (%d)" % (s, len(ls)))
@@ -906,7 +1080,37 @@ def cmd_list(a):
 
 
 def cmd_find(a):
-    term, hits = a.term.lower(), []
+    global ROOT
+    term, hits = a.term.lower(), find_in(ROOT, a.term.lower(), "")
+    start = ROOT
+    targets = []
+    if a.up or a.tree:
+        targets += ancestors(start)
+    if a.down or a.tree:
+        targets += [p for p, _ in descendants(start)[0]]
+    for p in targets:
+        ROOT = p
+        try:
+            hits += find_in(p, term, os.path.relpath(p, start))
+        finally:
+            ROOT = start
+    for h in hits[:K["hits"]]:
+        out(h)
+    if len(hits) > K["hits"]:
+        out("+%d more" % (len(hits) - K["hits"]))
+
+
+def find_in(root, term, prefix):
+    global ROOT
+    old, ROOT = ROOT, root
+    try:
+        return _find_here(term, prefix)
+    finally:
+        ROOT = old
+
+
+def _find_here(term, prefix):
+    hits = []
 
     def snip(text, i):
         return text[max(0, i - 40):i + 80].replace("\n", " ")
@@ -915,7 +1119,7 @@ def cmd_find(a):
         text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by"))
         i = text.lower().find(term)
         if i >= 0:
-            hits.append("event:%s: %s" % (r.get("id") or r["type"], snip(text, i)))
+            hits.append("event:%s%s: %s" % (r.get("id") or r["type"], " @" + prefix if prefix else "", snip(text, i)))
     me = os.path.realpath(__file__)
     for dp, dns, fns in os.walk(ROOT):
         dns[:] = sorted(d for d in dns if d not in (".git", "scratch") and not (dp == ROOT and d == ".awt") and not os.path.islink(os.path.join(dp, d))
@@ -936,11 +1140,8 @@ def cmd_find(a):
             for ln, line in enumerate(b.decode("utf-8", "replace").splitlines(), 1):
                 i = line.lower().find(term)
                 if i >= 0:
-                    hits.append("%s:%d: %s" % (rel(p), ln, snip(line, i)))
-    for h in hits[:K["hits"]]:
-        out(h)
-    if len(hits) > K["hits"]:
-        out("+%d more" % (len(hits) - K["hits"]))
+                    hits.append("%s:%d: %s" % (os.path.join(prefix, rel(p)) if prefix else rel(p), ln, snip(line, i)))
+    return hits
 
 
 def cmd_state(a):
@@ -989,8 +1190,12 @@ def cmd_answer(a):
 def infer_kind(t):
     lt = t.lower()
     host = re.sub(r"^\w+://", "", lt).split("/")[0]
+    if lt.startswith("paseo:"):
+        return "paseo"
     if os.path.exists(os.path.join(os.path.expanduser(t), ".git")):
         return "repo"
+    if os.path.isdir(os.path.join(os.path.expanduser(t), ".awt")):
+        return "node"
     if "slack.com" in lt:
         return "slack"
     if "atlassian.net/wiki" in lt or "confluence" in lt:
@@ -1012,6 +1217,8 @@ def cmd_ref(a):
         except Exception:
             br = "unknown"
         extra = dict(path=p, branch=br)
+    if kind == "node":
+        extra = dict(path=os.path.relpath(os.path.realpath(os.path.expanduser(a.target)), ROOT))
     emit("ref", target=a.target, title=a.title, kind=kind, why=a.why, access="none" if a.no_access else "ok", **extra)
     out("ref %s %s" % (kind, a.target))
 
@@ -1080,6 +1287,13 @@ def cmd_status(a):
         D = load()
         bl = ["question %s open" % q["id"] for q in D["open_q"]] + [
             "effect %s is %s" % (e["id"], e["state"]) for e in D["eff"].values() if e["state"] in ("planned", "claimed", "unknown", "conflict")]
+        for p, _ in descendants(ROOT)[0]:
+            d, i = load_at(p), node_info(p)
+            where = rel(p)
+            if i["kind"] in ("workspace", "task") and d["status"] == "active":
+                bl.append("%s %s is active (%s)" % (i["kind"], i["name"], where))
+            bl += ["question %s open in %s" % (q["id"], where) for q in d["open_q"]]
+            bl += ["effect %s is %s in %s" % (e["id"], e["state"], where) for e in attention(d)]
         if bl:
             die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first")
     emit("status", status=a.value)
@@ -1244,6 +1458,46 @@ def netmount(path):
         return False
 
 
+def tree_problems(root):
+    """Defects in the tree below root, one string each."""
+    probs = []
+    for node in [root] + [p for p, _ in descendants(root)[0]]:
+        pk = node_info(node)["kind"]
+        keys = {}
+        for plural in PLURAL.values():
+            d = os.path.join(node, plural)
+            if os.path.islink(d):
+                probs.append("%s is a symlink; it is not followed" % os.path.relpath(d, root))
+                continue
+            if not os.path.isdir(d):
+                continue
+            for n in sorted(os.listdir(d)):
+                p = os.path.join(d, n)
+                where = os.path.relpath(p, root)
+                if n.startswith(".new-"):
+                    probs.append("leftover %s from an interrupted init; remove it" % where)
+                elif os.path.islink(p):
+                    probs.append("%s is a symlink; it is not followed" % where)
+                elif is_node_dir(p):
+                    i = node_info(p)
+                    kind = i["kind"]
+                    if i["legacy"]:
+                        probs.append("%s has no node row; it is read as a task" % where)
+                    if PLURAL.get(kind) != plural or kind not in LEGAL.get(pk, ()):
+                        probs.append("%s: a %s does not belong in %s/ of a %s" % (where, kind, plural, pk))
+                    if i["key"]:
+                        if i["key"] in keys:
+                            probs.append("duplicate key %s: %s and %s" % (i["key"], os.path.relpath(keys[i["key"]], root), where))
+                        keys.setdefault(i["key"], p)
+    for node in [root] + [p for p, _ in descendants(root)[0]]:
+        if load_at(node)["status"] != "done":
+            continue
+        for p, _ in descendants(node)[0]:
+            if node_info(p)["kind"] in ("workspace", "task") and load_at(p)["status"] == "active":
+                probs.append("%s is done but %s is still active" % (os.path.relpath(node, root) if node != root else ".", os.path.relpath(p, root)))
+    return probs
+
+
 def cmd_doctor(a):
     global ROOT
     res = []
@@ -1276,8 +1530,12 @@ def cmd_doctor(a):
         line("ok" if good else "fail", "O_APPEND and O_EXCL behave")
     except OSError as x:
         line("fail", "O_APPEND/O_EXCL probe failed: %s" % x)
-    ag = P("AGENTS.md")
-    has = os.path.exists(ag) and BLOCK_BEGIN in open(ag, encoding="utf-8", errors="replace").read()
+    intree = not node_info(ROOT)["legacy"]
+
+    def has_block(d):
+        ag = os.path.join(d, "AGENTS.md")
+        return os.path.exists(ag) and BLOCK_BEGIN in open(ag, encoding="utf-8", errors="replace").read()
+    has = has_block(ROOT) or (intree and any(has_block(p) for p in ancestors(ROOT)))
     line("ok" if has else "fail", "AGENTS.md has the awt block" if has else "AGENTS.md lacks the awt block (./awt init)")
     try:
         r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30)
@@ -1291,15 +1549,24 @@ def cmd_doctor(a):
     line("warn" if odd else "ok", "path is a sync folder or network mount" if odd else "path is local")
     cm = find_claude_md(ROOT)
     line("warn" if cm else "ok", "CLAUDE.md at %s may hide AGENTS.md (add @AGENTS.md)" % cm if cm else "no CLAUDE.md in the way")
-    try:
-        with open(P(".claude", "settings.json"), encoding="utf-8") as g:
-            st = g.read()
-        good = "awt resume --hook" in st and "awt effect apply" in st
-    except OSError:
-        good = False
-    line("ok" if good else "warn", "settings has the awt hook and ask rule" if good else ".claude/settings.json lacks the awt hook or ask rule")
-    x = os.access(P("awt"), os.X_OK)
-    line("ok" if x else "warn", "awt is executable" if x else "awt is not executable here (chmod +x awt)")
+    if not intree:
+        try:
+            with open(P(".claude", "settings.json"), encoding="utf-8") as g:
+                st = g.read()
+            good = "awt resume --hook" in st and "awt effect apply" in st
+        except OSError:
+            good = False
+        line("ok" if good else "warn", "settings has the awt hook and ask rule" if good else ".claude/settings.json lacks the awt hook or ask rule")
+        x = os.access(P("awt"), os.X_OK)
+        line("ok" if x else "warn", "awt is executable" if x else "awt is not executable here (chmod +x awt)")
+    if intree or children(ROOT):
+        probs = tree_problems(ROOT)
+        if os.environ.get("AWT_DIR") and not shutil.which("awt"):
+            probs.append("AWT_DIR is set but awt is not on PATH; agents calling awt will not find it")
+        for x in probs:
+            line("warn", x)
+        if not probs:
+            line("ok", "node tree is consistent")
     try:
         rem = git(ROOT, "remote").stdout.split() if git(ROOT, "rev-parse", "--show-toplevel").stdout.strip() == ROOT else []
     except Exception:
@@ -1368,9 +1635,9 @@ def build():
         return q
     T, F = {}, dict(action="store_true")
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
-    V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {})])
-    V(sp, "list", [("section", dict(nargs="?", choices=SECTIONS))], [(("--all",), F)])
-    V(sp, "find", [("term", T)])
+    V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {}), (("--json",), F)])
+    V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F)])
+    V(sp, "find", [("term", T)], [(("--up",), F), (("--down",), F), (("--tree",), F)])
     V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])
     V(sp, "note", [("text", T)])
     V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append"))])

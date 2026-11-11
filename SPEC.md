@@ -303,11 +303,11 @@ Ancestors are found by walking up from the node's real path, at most 8 levels. D
 
 ### Reading across nodes
 
-- `resume`: two sections are added. Sections 1 to 7 keep their budgets and order.
+- `resume`: two sections are added. Sections 1 to 7 keep their budgets and order. Lineage prints right after the goal, Children right after the state; the numbers name them, they do not order them.
 
   | # | Section | Budget |
   |---|---|---|
-  | 8 | Lineage: one line per ancestor, outermost first: kind, name, status, goal cut to 100 chars | 300 |
+  | 8 | Lineage: one line per ancestor, outermost first: kind, name, status, goal cut to 110 chars. Over budget, the outer levels are dropped (`+N outer levels`), never the nearest | 300 |
   | 9 | Children: one line per direct child with kind, name, status, age and the `now` of its newest state cut to 100 chars. Active first. Overflow: `+N more: awt list nodes` | 500 |
 
   A node with neither ancestors nor children prints the same brief as before, at most 4,400 chars. Otherwise the maximum is 5,200. Section 6 also lists the `rule`-tagged current decisions of every ancestor, outermost first, each marked with its origin kind. Ancestors' rules count against the section 6 budget.
@@ -315,7 +315,7 @@ Ancestors are found by walking up from the node's real path, at most 8 levels. D
 - `list tree [--all]`: the same, indented. Nodes with open questions or attention effects are marked.
 - `list <section> --json` and `resume --json`: machine-readable output for the same data, one JSON array or object, UTF-8, stable key names. This is the contract the Paseo plugin and `migrate-paseo` rely on.
 - `find --up|--down|--tree TERM`: searches ancestors, descendants, or both, with the same caps (40 hits in total). Hits are prefixed with the node path relative to the resolved node. Without a flag, only the resolved node is searched, as before.
-- `ref TARGET`: a target that is a directory containing `.awt/` infers `kind=node` and stores a path relative to the referencing node. A `paseo:` target infers `kind=paseo`. Refs to a node outside the tree are allowed and marked `--no-access` if the path is missing on this host.
+- `ref TARGET`: a target that is a directory containing `.awt/` and no `.git` infers `kind=node` (a node that is its own git repository still infers `repo`; pass `--kind node` to override) and stores a path relative to the referencing node. A `paseo:` target infers `kind=paseo`. Refs to a node outside the tree are allowed and marked `--no-access` if the path is missing on this host.
 - `status done`: refused while a descendant `workspace` or `task` is `active`, or any descendant has an unanswered question or an effect in `planned`, `claimed` or `unknown`. The refusal lists each with its path. A node archived by a harness without being finished is `paused`, not `done`.
 - Each node's event log is separate, so concurrent agents never contend on a log. `by` still names the writer.
 - `doctor` adds: illegal kind nesting, duplicate keys among siblings, a `node` row that disagrees with the directory's place, leftover `.new-*` directories, a `node` row naming a different kind than the reserved parent directory, and `awt` not on `PATH` when `AWT_DIR` is set.

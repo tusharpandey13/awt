@@ -116,9 +116,10 @@ class Ctx:
             s.fail("exit code %s not in spec (0-4): awt %s" % (r.rc, d))
         if args:
             verbs = [a for a in args if isinstance(a, str) and not a.startswith("-")]
-            if args[:1] == ["resume"] or (verbs and verbs[0] == "resume"):
-                if len(r.out) > 4400:
-                    s.fail("brief is %d chars (> 4400): awt %s" % (len(r.out), d))
+            if (args[:1] == ["resume"] or (verbs and verbs[0] == "resume")) and "--json" not in args:
+                lim = 5200 if s.name.startswith("tree-") else 4400
+                if len(r.out) > lim:
+                    s.fail("brief is %d chars (> %d): awt %s" % (len(r.out), lim, d))
                 if "--hook" in args and r.rc != 0:
                     s.fail("resume --hook exited %d" % r.rc)
             if r.rc in (1, 3, 4) and r.err and verbs[:1] != ["doctor"] and verbs[:1] != ["save"] and "error:" not in r.err:
@@ -1650,6 +1651,219 @@ def a_tree_hostile_names(c):
     if extra:
         c.fail("something escaped into the workspace dir: %s" % sorted(extra)[:5])
     tree_audit(c, top)
+
+
+def tnode(c, parent, kind, name, *extra, key=None):
+    a = ["init", "--kind", kind, "--name", name] + (["--key", key] if key else []) + list(extra)
+    if kind == "task":
+        a += ["--goal", "goal of " + name, "--done", "done"]
+    r = tw(c, parent, *a)
+    if r.rc != 0:
+        c.fail("could not make %s %s: %s" % (kind, name, r.err[:100]))
+        return None
+    return os.path.join(parent, r.out.split()[1])
+
+
+def readers(c, node):
+    """Every read verb on node must succeed and print valid JSON where promised."""
+    for args in (["resume"], ["list", "tree"], ["list", "nodes"], ["find", "--tree", "goal"], ["list", "refs"]):
+        r = tw(c, node, *args)
+        if r.rc != 0:
+            c.fail("read failed rc=%d: awt %s -> %s" % (r.rc, " ".join(args), r.err.strip()[:100]))
+    for args in (["list", "nodes", "--json"], ["resume", "--json"]):
+        r = tw(c, node, *args)
+        try:
+            json.loads(r.out)
+        except ValueError:
+            c.fail("invalid JSON from awt %s: %s" % (" ".join(args), r.err.strip()[:100] or r.out[:80]))
+    r = tw(c, node, "doctor")
+    if r.rc not in (0, 1):
+        c.fail("doctor rc=%d" % r.rc)
+
+
+@attack("tree-mutate-while-reading")
+def a_tree_mutate(c):
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    t = tnode(c, w, "task", "t")
+    stop, errs = threading.Event(), []
+
+    def mutator(k):
+        i = 0
+        while not stop.is_set():
+            i += 1
+            a = tnode(c, t, "agent", "m%d-%d" % (k, i), key="k%d-%d" % (k, i))
+            if a and i % 3 == 0:
+                shutil.rmtree(a, ignore_errors=True)
+            elif a and i % 5 == 0:
+                dest = c.path("moved-%d-%d" % (k, i))
+                try:
+                    shutil.move(a, dest)
+                except OSError:
+                    pass
+    th = [threading.Thread(target=mutator, args=(k,)) for k in range(4)]
+    [x.start() for x in th]
+    end = time.time() + (4 if c.quick else 15)
+    while time.time() < end:
+        for args in (["resume"], ["list", "tree"], ["list", "nodes", "--json"], ["find", "--tree", "goal"], ["doctor"]):
+            r = tw(c, t, *args)
+            if r.rc != 0 and args[0] != "doctor":
+                c.fail("reader failed during mutation: awt %s -> %s" % (" ".join(args), r.err.strip()[:100]))
+            if args[-1] == "--json":
+                try:
+                    json.loads(r.out)
+                except ValueError:
+                    c.fail("invalid JSON during mutation")
+    stop.set()
+    [x.join() for x in th]
+    tree_audit(c, top)
+
+
+@attack("tree-hostile-layout")
+def a_tree_hostile_layout(c):
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    t = tnode(c, w, "task", "t")
+    deep = t
+    for i in range(10):
+        deep = tnode(c, deep, "task", "d%d" % i) or deep
+    os.symlink(top, os.path.join(t, "agents-loop"))
+    os.makedirs(os.path.join(t, "agents"), exist_ok=True)
+    os.symlink(top, os.path.join(t, "agents", "up"))
+    os.symlink("/", os.path.join(t, "agents", "rootlink"))
+    os.makedirs(os.path.join(t, "agents", "no-awt-dir"))
+    legacy = os.path.join(t, "agents", "legacy")
+    os.makedirs(os.path.join(legacy, ".awt"))
+    with open(os.path.join(legacy, ".awt", "events.jsonl"), "w") as g:
+        g.write("")
+    bad = os.path.join(t, "agents", "corrupt")
+    os.makedirs(os.path.join(bad, ".awt"))
+    with open(os.path.join(bad, ".awt", "events.jsonl"), "wb") as g:
+        g.write(b"{not json\n\xff\xfe\n")
+    for n in ("Case", "case", "CASE"):
+        tnode(c, t, "agent", n)
+    os.makedirs(os.path.join(w, "tasks", "file-not-dir"), exist_ok=True)
+    with open(os.path.join(w, "tasks", "plain-file"), "w") as g:
+        g.write("x")
+    for i in range(150 if c.quick else 400):
+        tnode(c, t, "agent", "s%03d" % i)
+    for node in (top, w, t, deep, legacy, bad):
+        readers(c, node)
+    d = tw(c, t, "doctor").out
+    for needle in ("symlink", "no node row"):
+        if needle not in d:
+            c.fail("doctor did not report %r" % needle)
+
+
+@attack("tree-status-race")
+def a_tree_status_race(c):
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    for rnd in range(8 if c.quick else 30):
+        t = tnode(c, w, "task", "t%d" % rnd)
+        with cf.ThreadPoolExecutor(2) as ex:
+            f1 = ex.submit(tw, c, t, "status", "done")
+            f2 = ex.submit(tw, c, t, "init", "--kind", "task", "--name", "late", "--goal", "g", "--done", "d")
+            r1, r2 = f1.result(), f2.result()
+        kids = tree_nodes(t)[0]
+        if r1.rc == 1 and not kids and r2.rc == 0:
+            c.fail("done refused although no child existed afterwards")
+        if r1.rc == 0 and kids:
+            d = tw(c, w, "doctor").out
+            if "is done but" not in d and "late" in " ".join(kids):
+                c.fail("done parent with an active child was not reported by doctor")
+        readers(c, t)
+
+
+@attack("tree-parallel-agents")
+def a_tree_parallel_agents(c):
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    t = tnode(c, w, "task", "t")
+    n = 20 if c.quick else 50
+    agents = [tnode(c, t, "agent", "a%02d" % i, key="agt_%d" % i) for i in range(n)]
+    stop = threading.Event()
+
+    def w_(i):
+        j = 0
+        env = c.env(AWT_BY="agt_%d" % i)
+        while not stop.is_set() and agents[i]:
+            j += 1
+            r = c.raw([sys.executable, "-I", AWT, "--dir", agents[i], "state", "--now", "step %d of %d" % (j, i), "--next", "n"], cwd=c.base, env=env, args=["state"])
+            if r.rc != 0:
+                c.fail("agent write failed: " + r.err[:100])
+    th = [threading.Thread(target=w_, args=(i,)) for i in range(n)]
+    [x.start() for x in th]
+    end = time.time() + (4 if c.quick else 12)
+    while time.time() < end:
+        r = tw(c, t, "resume")
+        if r.rc != 0:
+            c.fail("resume failed under writes")
+        r = tw(c, t, "list", "nodes", "--json")
+        try:
+            if len(json.loads(r.out)) != n:
+                c.fail("node count changed under writes")
+        except ValueError:
+            c.fail("invalid JSON under writes")
+    stop.set()
+    [x.join() for x in th]
+    for i in range(n):
+        rows = [json.loads(l) for l in rd_node(agents[i]) if l.strip()]
+        if any(r.get("by") not in ("agt_%d" % i, "agent") for r in rows):
+            c.fail("row from another agent in agt_%d's log" % i)
+    tree_audit(c, top)
+
+
+def rd_node(node):
+    with open(os.path.join(node, ".awt", "events.jsonl"), "rb") as g:
+        return g.read().decode("utf-8", "replace").splitlines()
+
+
+@attack("tree-budget-fuzz")
+def a_tree_budget_fuzz(c):
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    chars = ["a", "é", "😀", "漢", " ", "\t", "\x1b", "\u202e"]
+    word = lambda n: "".join(c.rng.choice(chars) for _ in range(n))
+    for i in range(10):
+        tw(c, w, "decide", "rule " + word(c.rng.randrange(1, 280)), "--why", "w", "--tag", "rule")
+    cur = w
+    for i in range(c.rng.randrange(1, 6)):
+        cur = tnode(c, cur, "task", "t%d" % i) or cur
+    for i in range(c.rng.randrange(5, 60)):
+        a = tnode(c, cur, "agent", "a%d" % i)
+        if a:
+            tw(c, a, "state", "--now", "n" + word(c.rng.randrange(1, 690)), "--next", "x" + word(c.rng.randrange(1, 290)))
+    r = tw(c, cur, "resume")
+    if len(r.out) > 5200:
+        c.fail("brief %d > 5200" % len(r.out))
+    if any(len(l) > 1300 for l in r.out.splitlines()):
+        c.fail("a brief line is absurdly long")
+    tree_audit(c, top)
+
+
+@attack("tree-secret-hygiene")
+def a_tree_secrets(c):
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    for k, v in SEC.items():
+        for flag in ("--name", "--key"):
+            a = ["init", "--kind", "task", "--goal", "g", "--done", "d", "--name", "ok", "--key", "ok"]
+            a[a.index(flag) + 1] = "x " + v
+            r = tw(c, w, *a)
+            if r.rc == 0:
+                c.fail("secret %s accepted in %s" % (k, flag))
+    for dp, dns, fns in os.walk(top):
+        for n in fns:
+            try:
+                data = open(os.path.join(dp, n), encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            for rx in SECRE:
+                if rx.search(data):
+                    c.fail("secret-shaped text reached disk: " + os.path.join(dp, n))
+    if tree_nodes(w)[0]:
+        c.fail("a refused init left a node behind")
 
 
 # ---------------------------------------------------------------- driver
