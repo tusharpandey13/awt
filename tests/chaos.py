@@ -1588,6 +1588,37 @@ def a_tree_race_key(c):
     tree_audit(c, top)
 
 
+@attack("tree-race-key-depths")
+def a_tree_race_key_depths(c):
+    """One key requested from different parents at different depths: one node in the whole tree."""
+    top = tree_root(c)
+    wss = [os.path.join(top, tw(c, top, "init", "--kind", "workspace", "--name", "w%d" % i).out.split()[1]) for i in range(3)]
+    n = 12 if c.quick else 30
+
+    def go(i):
+        w = wss[i % 3]
+        if i % 2:
+            return tw(c, w, "init", "--kind", "task", "--name", "t%d" % i, "--key", "DK", "--goal", "g", "--done", "d")
+        return tw(c, top, "init", "--kind", "workspace", "--name", "x%d" % i, "--key", "DK")
+    with cf.ThreadPoolExecutor(n) as ex:
+        rs = list(ex.map(go, range(n)))
+    if any(r.rc != 0 for r in rs):
+        c.fail("a keyed creator failed: " + next(r.err for r in rs if r.rc != 0)[:120])
+    found = []
+
+    def walk(base):
+        nodes, _ = tree_nodes(base)
+        for p in nodes:
+            r = first_row(p)
+            if r and r.get("key") == "DK":
+                found.append(p)
+            walk(p)
+    walk(top)
+    if len(found) != 1:
+        c.fail("expected one node for key DK in the whole tree, found %d" % len(found))
+    tree_audit(c, top)
+
+
 @attack("tree-race-names")
 def a_tree_race_names(c):
     top = tree_root(c)
