@@ -3,10 +3,10 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const ON = process.env.AWT_E2E_PASEO === "1";
 const REPO = resolve(import.meta.dirname, "..", "..");
@@ -16,6 +16,7 @@ const FAKE = join(PLUGIN, "test", "fake", "acp_agent.py");
 let tmp = "", home = "", repo = "", root = "", env: NodeJS.ProcessEnv = {}, wsId = "";
 
 const paseo = (...a: string[]) => execFileSync("paseo", ["--home", home, ...a], { env, encoding: "utf8", timeout: 120_000 });
+const settle = () => { try { for (const a of agents()) paseo("wait", a.id, "--timeout", "30"); } catch {} };
 const awt = (dir: string, ...a: string[]) => execFileSync(join(REPO, "awt"), ["--dir", dir, ...a], { env, encoding: "utf8" });
 const free = () => new Promise<number>((ok) => { const s = createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); });
 const nodes = (): any[] => JSON.parse(awt(root, "list", "nodes", "--all", "--json"));
@@ -35,10 +36,12 @@ before(async () => {
   symlinkSync(join(REPO, "awt"), join(tmp, "bin", "awt"));
   env = { ...process.env, HOME: tmp, AWT_BIN: join(REPO, "awt"), AWT_ROOT: root, AWT_TIMEOUT_MS: "20000", PATH: `${join(tmp, "bin")}:${process.env.PATH}` };
   execFileSync("git", ["init", "-q", repo]);
+  for (const k of Object.keys(env)) if (k.startsWith("PASEO_")) delete env[k];
   const port = await free();
   writeFileSync(join(home, "config.json"), JSON.stringify({
     version: 1, pluginsEnabled: true,
-    daemon: { listen: `127.0.0.1:${port}`, mcp: { injectIntoAgents: false } },
+    daemon: { listen: `127.0.0.1:${port}`, relay: { enabled: false }, mcp: { injectIntoAgents: false } },
+    features: { dictation: { enabled: false } },
     agents: { providers: { fake: { extends: "acp", label: "Fake", command: ["python3", FAKE] } } },
   }));
   paseo("daemon", "start", "--timeout", "90");
@@ -48,18 +51,30 @@ before(async () => {
   wsId = (Array.isArray(ws) ? ws[0] : ws).workspaceId ?? JSON.parse(paseo("workspace", "ls", "--json"))[0].workspaceId;
 });
 
-after(() => {
-  if (!ON) return;
-  try { paseo("daemon", "stop"); } catch {}
+// Stop the temp daemon; if that fails, kill it by the pid in its own home, then remove the home.
+function cleanup() {
+  if (!tmp) return;
+  try { paseo("daemon", "stop"); } catch {
+    try {
+      const f = join(home, "paseo.pid");
+      if (existsSync(f)) process.kill(Number(/"?pid"?\D*(\d+)/.exec(readFileSync(f, "utf8"))?.[1]));
+    } catch {}
+  }
   rmSync(tmp, { recursive: true, force: true });
-});
+  tmp = "";
+}
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => { cleanup(); process.exit(1); });
+after(cleanup);
 
-test("D1 the plugin loads in a real daemon", { skip: !ON }, () => {
+let firstId = "";
+
+test("E0 the plugin loads in a real daemon", { skip: !ON }, () => {
   assert.match(paseo("plugin", "ls"), /awt\s+running/);
 });
 
-test("D2 a new agent gets its node, env, and an awt on PATH that reads it", { skip: !ON }, () => {
-  const id = run("first", 'RUN: env | grep ^AWT_ ; awt note "hello from agent" ; awt resume | head -3');
+test("E1 a new agent gets its node, env, and an awt on PATH that reads it", { skip: !ON }, () => {
+  firstId = run("first", 'RUN: env | grep ^AWT_ ; awt note "hello from agent" ; awt resume | head -3');
+  const id = firstId;
   const out = logs(id);
   assert.match(out, new RegExp(`AWT_BY=${id}`));
   assert.match(out, /AWT_DIR=.*\/tasks\/main\/agents\/first/);
@@ -71,27 +86,41 @@ test("D2 a new agent gets its node, env, and an awt on PATH that reads it", { sk
   assert.match(awt(root, "doctor"), /0 quarantined/);
 });
 
-test("D3 the agent is nudged once after a turn with no handoff", { skip: !ON }, () => {
-  const id = agents().find((a) => a.name === "first").id;
-  const out = logs(id);
-  assert.equal((out.match(/Before you stop, record where things stand/g) ?? []).length >= 1, true);
+test("E2 awt note from the agent lands in its node, not the task's", { skip: !ON }, () => {
+  const events = (d: string) => readFileSync(join(d, ".awt", "events.jsonl"), "utf8");
+  const dir = /AWT_DIR=(\S+)/.exec(logs(firstId))![1];
+  const task = dirname(dirname(dir));
+  assert.match(task, /\/tasks\/main$/);
+  assert.match(events(dir), /hello from agent/);
+  assert.doesNotMatch(events(task), /hello from agent/);
 });
 
-test("D4 a handoff recorded during the turn suppresses the nudge", { skip: !ON }, () => {
+test("E7 the agent is nudged exactly once after a turn with no handoff", { skip: !ON }, () => {
+  settle();
+  // The fake agent echoes the nudge prompt back, so one nudge shows up as exactly one echo.
+  assert.equal((logs(firstId).match(/echo: Before you stop, record where things stand/g) ?? []).length, 1);
+});
+
+test("E8 a handoff recorded during the turn suppresses the nudge", { skip: !ON }, () => {
   const id = run("second", 'RUN: awt state --now "did x" --next "do y"');
-  assert.doesNotMatch(logs(id), /Before you stop, record where things stand/);
+  settle();
+  assert.doesNotMatch(logs(id), /echo: Before you stop, record where things stand/);
 });
 
-test("D5 reopening an agent keeps the same node", { skip: !ON }, () => {
+test("E4 restarting the daemon and resuming an agent keeps the same node", { skip: !ON }, () => {
   const id = agents().find((a) => a.name === "second").id;
   const before = nodes().filter((x) => x.kind === "agent").length;
+  paseo("daemon", "restart", "--timeout", "90");
   paseo("send", id, "RUN: echo again");
+  settle();
+  assert.equal(nodes().filter((x) => x.kind === "agent" && x.key === `paseo:agent/${id}`).length, 1);
   assert.equal(nodes().filter((x) => x.kind === "agent").length, before);
 });
 
-test("M11 migrate-paseo against the real daemon is idempotent and lossless", { skip: !ON }, () => {
+test("M11 migrate-paseo reads the on-disk store written by a real daemon, idempotently", { skip: !ON }, () => {
   const mroot = join(tmp, "mroot");
   const mig = () => execFileSync(join(REPO, "migrate-paseo"), ["--home", home, mroot], { env: { ...env, AWT_ROOT: mroot }, encoding: "utf8" });
+  // The store is the one a real daemon wrote, so this checks the reader against the real on-disk format.
   mig();
   const a = JSON.parse(awt(mroot, "list", "nodes", "--all", "--json"));
   const keys = a.map((x: any) => x.key);

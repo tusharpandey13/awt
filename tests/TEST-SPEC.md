@@ -15,11 +15,11 @@ Companion to `SPEC.md`. It covers the node tree, the Paseo plugin and `migrate-p
 | File | Covers | Runs |
 |---|---|---|
 | `tests/test_tree.py` | Node tree: init, resolution, reads, status, doctor | always |
-| `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots and, if present, a real daemon | always; real daemon part is gated |
+| `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots | always |
 | `tests/test_docs.py` | Existing. Extended: every `awt` command shown in the docs and the tree-form `AGENTS.md` block uses real verbs and flags | always |
 | `tests/chaos.py` | Existing. New attacks in groups `tree`, `migrate`, `plugin` | `--quick` in CI, full nightly |
 | `paseo-plugin/test/*.test.ts` | Plugin hooks, driven by recorded payloads against real `awt` | always (needs Node) |
-| `paseo-plugin/test/e2e.test.ts` | Plugin in a real daemon with a scripted agent | gated: `AWT_E2E_PASEO=1` or auto when `paseo` is on `PATH` |
+| `paseo-plugin/test/daemon.test.ts` | Plugin in a real daemon with a scripted agent | gated: `AWT_E2E_PASEO=1` or auto when `paseo` is on `PATH` |
 | `tests/agentic/scenarios.py` | Existing. New scenarios `tree-resume`, `subagent`, `cross-ref`, `switch-task` | on demand, spends tokens |
 | `fixtures/paseo-v0/` | Snapshots in the format `migrate-paseo --from` reads | |
 
@@ -29,7 +29,7 @@ Commands, in the order a contributor runs them:
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tests/chaos.py --quick
 (cd paseo-plugin && npm test)
-AWT_E2E_PASEO=1 python3 -m unittest tests.test_migrate_paseo.RealDaemon   # optional
+(cd paseo-plugin && AWT_E2E_PASEO=1 npm run test:daemon)                  # optional, ~70 s
 python3 tests/agentic/run.py                                              # when prompts or interfaces change
 ```
 
@@ -139,7 +139,7 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 - M8 No agent timeline text is copied anywhere. A grep of the tree for a marker string placed in the snapshot's message fields finds nothing.
 - M9 Secret-shaped titles are redacted in the node, named in the report, and never written raw.
 - M10 CLI source: with a stub `paseo` on `PATH` that serves the real CLI's JSON shapes (captured once from the installed version and committed), the result equals the snapshot route for non-ambiguous agents.
-- M11 `RealDaemon` (gated): start a daemon with a temp `--home`, create 2 workspaces and 3 agents with the scripted agent, run `migrate-paseo` with no `--from`, compare with expected. Skipped with a visible reason if `paseo` is absent.
+- M11 (gated, `paseo-plugin/test/daemon.test.ts`): the on-disk store written by a real daemon in a temp `--home` (1 workspace, 2 agents made with the scripted agent) is read by `migrate-paseo --home`; every workspace and agent key is present, and a second run leaves the node count unchanged. It does not compare against an expected tree. Skipped unless `AWT_E2E_PASEO=1`.
 
 ## Plugin (`paseo-plugin/test`)
 
@@ -159,14 +159,19 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P12 Every `resolved` URL in `package-lock.json` is on `registry.npmjs.org`.
 - P13 The workspace label uses `projectDisplayName` from `projects.list`.
 
-Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: `paseo-plugin/test/fake/acp_agent.py`, which runs the shell command in a `RUN: <cmd>` prompt in the environment Paseo launched it with, as an agent would, and echoes anything else. Checked on Paseo 0.15.4: a scripted ACP provider works, and the daemon needs `pluginsEnabled: true` in its config. Run with `npm run test:daemon` in `paseo-plugin/` (D1–D5 and M11). Not covered yet: spawning a subagent, because the fake agent has no way to start one.
+Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: `paseo-plugin/test/fake/acp_agent.py`, which runs the shell command in a `RUN: <cmd>` prompt in the environment Paseo launched it with, as an agent would, and echoes anything else. Checked on Paseo 0.15.4: a scripted ACP provider works, and the daemon needs `pluginsEnabled: true` in its config. Run with `npm run test:daemon` in `paseo-plugin/` (E0, E1, E2, E4, E7, E8 and M11). The daemon config turns the relay and dictation off, and the tests strip `PASEO_*` from the environment, so nothing leaves the temp home. Not covered yet: spawning a subagent, because the fake agent has no way to start one.
 
+- E0 The plugin shows as running in the daemon.
 - E1 Create workspace and agent with the CLI: nodes appear with their keys, agent's environment contains `AWT_DIR`.
 - E2 The scripted agent runs `awt note`; the row is in its node, not the task's.
 - E3 The scripted agent spawns a subagent: the child node sits under the parent's node and gets the subagent block.
 - E4 Restart the daemon, resume the agent: same node, no duplicate.
 - E5 Archive the workspace: node `done` or `paused`; nothing deleted.
 - E6 Disable the plugin: agents still start and run; nothing is written.
+- E7 After a turn with no handoff the agent is nudged exactly once (C34 against a real daemon).
+- E8 A handoff recorded during the turn suppresses the nudge.
+
+Not covered by tests yet: E3, E5, E6.
 
 ## Agentic (spends tokens)
 

@@ -29,18 +29,23 @@ def main():
         m = json.loads(line)
         i, method, p = m.get("id"), m.get("method"), m.get("params") or {}
         if method == "initialize":
-            reply(i, {"protocolVersion": 1, "agentCapabilities": {"loadSession": False, "promptCapabilities": {}}, "authMethods": []})
+            reply(i, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True, "promptCapabilities": {}}, "authMethods": []})
         elif method == "session/new":
             n += 1
             reply(i, {"sessionId": "fake-%d-%d" % (os.getpid(), n)})
         elif method == "session/prompt":
             text = "".join(b.get("text", "") for b in p.get("prompt", []) if isinstance(b, dict))
             if text.startswith("RUN:"):
-                r = subprocess.run(text[4:].strip(), shell=True, capture_output=True, text=True, cwd=os.getcwd())
-                say(p["sessionId"], "exit=%d %s%s" % (r.returncode, r.stdout, r.stderr))
+                try:
+                    r = subprocess.run(text[4:].strip(), shell=True, capture_output=True, text=True, cwd=os.getcwd(), timeout=60)
+                    say(p["sessionId"], "exit=%d %s%s" % (r.returncode, r.stdout, r.stderr))
+                except subprocess.TimeoutExpired:
+                    say(p["sessionId"], "exit=124 timed out after 60s")
             else:
                 say(p["sessionId"], "echo: " + text)
             reply(i, {"stopReason": "end_turn"})
+        elif method in ("session/load", "session/resume"):
+            reply(i, {})
         elif i is not None:
             reply(i, {})
 
