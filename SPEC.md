@@ -120,7 +120,7 @@ Add one last line when the newest state is missing: `No handoff yet. Before stop
 
 ## Listing
 
-Listings walk the filesystem, so a file a person drops into `context/`, `docs/`, `outbox/` or `misc/` is discoverable with no registration. Any other top-level file or directory except `.awt`, `.git`, `.claude`, `scratch`, `awt`, `AGENTS.md`, `README.md`, `CLAUDE.md`, `.gitignore`, `legacy` shows under `misc`; `legacy/` also shows under `misc`. Title for a file: capture title, else first `# ` heading, else first nonblank line, cut to 60 chars, else `(binary)`. Read at most 4 KB per file. `docs/_superseded/` is hidden unless `--all`. `outbox` lines show effect state for files an effect references. Do not follow symlinks; show them as `path -> target`. Unreadable files never break a listing.
+Listings walk the filesystem, so a file a person drops into `context/`, `docs/`, `outbox/` or `misc/` is discoverable with no registration. Any other top-level file or directory except `.awt`, `.git`, `.claude`, `scratch`, `awt`, `AGENTS.md`, `README.md`, `CLAUDE.md`, `.gitignore`, `legacy` shows under `misc`; in a tree node, `workspaces/`, `tasks/` and `agents/` are reserved for child nodes and never show (standalone behaviour is unchanged); `legacy/` also shows under `misc`. Title for a file: capture title, else first `# ` heading, else first nonblank line, cut to 60 chars, else `(binary)`. Read at most 4 KB per file. `docs/_superseded/` is hidden unless `--all`. `outbox` lines show effect state for files an effect references. Do not follow symlinks; show them as `path -> target`. Unreadable files never break a listing.
 
 ## Effects
 
@@ -270,19 +270,20 @@ New row type, written once at creation by `init`:
 |---|---|
 | `node` | `kind`, `name` 60, `key` optional 200 |
 
-`key` is an external identity such as `paseo:workspace/wks_1f2e`. Keys are unique among siblings. The name is cosmetic: the directory is `[a-z0-9-]` slug, max 50, with a numeric suffix on collision, like `capture`.
+`key` is an external identity such as `paseo:workspace/wks_1f2e`. Keys are unique across the whole tree. The name is cosmetic: the directory is `[a-z0-9-]` slug, max 50, with a numeric suffix on collision, like `capture`.
 
 ### Creating nodes
 
 `init --kind root|workspace|task|agent [--name N] [--key K] [--goal T --done T]`
 
-- Without `--kind`, `init` is unchanged.
+- Without `--kind`, `init` is unchanged. `--name` and `--key` need `--kind` (exit 2 otherwise).
+- `init` never converts: on a directory whose first row is a `node` row it refuses unless `--kind` equals that node's kind (re-running `--kind root` on a root is a no-op); plain `init` on a tree node is refused. `--kind root` is refused on a directory that has records but no `node` row (a root needs a directory without records).
 - `--kind root`: creates the root in the resolved directory (`--dir`, `AWT_DIR` or `cwd`). Writes the contract in its tree form.
 - Any other kind: the parent is the resolved node. Refuse an illegal kind/parent pair (fix names the legal kinds). `--name` is required.
-- The child is built under `<parent>/<kinds>/.new-<random>/` with its `.awt/events.jsonl` complete, then moved into place with `rename`. A crash leaves only a `.new-*` directory, which no listing shows and `doctor` reports. A `rename` onto an existing directory fails, so two racing creators cannot both win.
-- With `--key`, the check for an existing sibling with that key and the `rename` happen under `flock` on the parent's `.awt/events.jsonl`. A match prints the existing path and exits 0 (idempotent). A different `--name` with an existing key is not a new node; the existing one is returned.
+- The child is built under `<parent>/<kinds>/.new-<random>/` with its `.awt/events.jsonl` complete, then moved into place with `rename`. A crash leaves only a `.new-*` directory, which no listing shows and `doctor` reports. A `rename` onto an existing non-empty directory fails, so two racing creators cannot both win; an existing empty directory with the chosen slug is taken over, with no data lost.
+- With `--key`, the check for an existing node with that key and the `rename` happen under `flock` on the tree root's `.awt/events.jsonl`. The search starts at the tree root (the topmost node above the resolved one) and covers every descendant, so a key is unique across the whole tree. A match prints the existing node's path relative to the resolved node and its kind, and exits 0 (idempotent), wherever it is and whatever `--name`, parent or kind was asked. If the filesystem has no `flock`, the command refuses with fix "keyed init needs a local filesystem". Without `--key`, a retry after a crash can leave a duplicate (`t`, `t-2`): a harness that retries must pass `--key`.
 - `--goal`/`--done` are required for `task`, optional for the others. `workspace` and `agent` get a placeholder goal from `--name` when absent.
-- Output: one line, `init <path relative to the resolved node> <kind>`.
+- Output: one line, `init <path relative to the resolved node> <kind>` for child kinds. `--kind root` and plain `init` print `init <dir>: <what was made>`.
 
 Layout by kind:
 

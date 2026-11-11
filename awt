@@ -34,7 +34,7 @@ ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.
         "effect.step": ("planned", "claimed", "sent", "unknown", "dropped")}
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
 SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
-           "legacy", "context", "docs", "outbox", "misc", "workspaces", "tasks", "agents"}
+           "legacy", "context", "docs", "outbox", "misc"}
 IGNORE = ["scratch/", ".awt/claims/", ".awt/blobs/", ".awt/runs/"]
 SECRETS = [(n, re.compile(p)) for n, p in [
     ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
@@ -369,7 +369,7 @@ def check(typ, f):
             cap = CAPS.get("%s.%s" % (typ, k))
             if cap and len(s) > cap:
                 die("%s.%s is %d chars, cap is %d" % (typ, k, len(s), cap),
-                    "put the detail in docs/ and reference it from a shorter text")
+                    "use %s of at most %d chars" % (k, cap) if typ == "node" else "put the detail in docs/ and reference it from a shorter text")
             n = secret(s)
             if n:
                 die("%s.%s matches secret pattern %s" % (typ, k, n), "remove the secret; reference where it lives instead")
@@ -575,7 +575,8 @@ def entries(tops):
 
 def section_files(name, all_):
     if name == "misc":
-        tops = ["misc", "legacy"] + sorted(n for n in os.listdir(ROOT) if n not in SKIPTOP)
+        skip = SKIPTOP | (set(PLURAL.values()) if not node_info(ROOT)["legacy"] else set())
+        tops = ["misc", "legacy"] + sorted(n for n in os.listdir(ROOT) if n not in skip)
     else:
         tops = [name]
     res = entries([t for t in tops if os.path.lexists(P(t))])
@@ -774,6 +775,39 @@ def build_node(path, kind, name, key, goal, done):
         ROOT = old
 
 
+def tree_top(node):
+    """The topmost node above node, walking up through reserved child directories (at most 8 levels)."""
+    for _ in range(8):
+        d = os.path.dirname(node)
+        up = os.path.dirname(d)
+        if os.path.basename(d) in PLURAL.values() and not os.path.islink(d) and is_node_dir(up):
+            node = up
+        else:
+            break
+    return node
+
+
+def find_key(top, key):
+    """Path of the node under top (top included) whose key matches, or None. Reserved dirs only, no symlinks, limits as in SPEC."""
+    todo, seen = [(top, 0)], 0
+    while todo:
+        node, depth = todo.pop()
+        seen += 1
+        if node_info(node)["key"] == key:
+            return node
+        if depth >= 8 or seen > 2000:
+            continue
+        for plural in PLURAL.values():
+            d = os.path.join(node, plural)
+            if os.path.islink(d) or not os.path.isdir(d):
+                continue
+            for n in sorted(os.listdir(d), reverse=True):
+                p = os.path.join(d, n)
+                if not n.startswith(".new-") and not os.path.islink(p) and is_node_dir(p):
+                    todo.append((p, depth + 1))
+    return None
+
+
 def init_child(a):
     global ROOT
     kind = a.kind
@@ -799,14 +833,18 @@ def init_child(a):
     os.makedirs(base, exist_ok=True)
     lockfd = None
     if a.key:
-        lockfd = os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-        fcntl.flock(lockfd, fcntl.LOCK_EX)
+        top = tree_top(ROOT)
+        lockfd = os.open(os.path.join(top, ".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(lockfd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(lockfd)
+            die("cannot lock %s" % top, "keyed init needs a local filesystem; put the tree on one")
     try:
         if a.key:
-            for n in sorted(os.listdir(base)):
-                p = os.path.join(base, n)
-                if not n.startswith(".new-") and not os.path.islink(p) and is_node_dir(p) and node_info(p)["key"] == a.key:
-                    return out("init %s %s" % (rel(p), kind))
+            p = find_key(top, a.key)
+            if p:
+                return out("init %s %s" % (os.path.relpath(p, ROOT), node_info(p)["kind"]))
         tmp = os.path.join(base, ".new-" + os.urandom(4).hex())
         os.mkdir(tmp)
         try:
@@ -841,7 +879,20 @@ def cmd_init(a):
     ROOT = os.path.realpath(os.path.expanduser(ROOT))
     if bool(a.goal) != bool(a.done):
         die("--goal and --done go together", "give both", 2)
+    if (a.name or a.key) and not a.kind:
+        die("--name and --key need --kind", "give --kind root|workspace|task|agent, or drop them", 2)
     tree = a.kind == "root"
+    ni = node_info(ROOT)
+    if not ni["legacy"] and ni["kind"] != a.kind:
+        die("%s is a %s node; init cannot turn it into %s" % (ROOT, ni["kind"], "a " + a.kind if a.kind else "a standalone task"),
+            "add children with: awt init --kind KIND --name NAME")
+    if tree and ni["legacy"]:
+        try:
+            has_rows = os.path.getsize(os.path.join(ROOT, ".awt", "events.jsonl")) > 0
+        except OSError:
+            has_rows = False
+        if has_rows:
+            die("%s already has records and no node row" % ROOT, "a root needs a directory without .awt records; use an empty one")
     for d in (("workspaces",) if tree else ("context", "docs", "outbox", "misc", "scratch")) + (".awt/claims", ".awt/blobs", ".awt/runs"):
         os.makedirs(P(d), exist_ok=True)
     os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))

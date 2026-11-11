@@ -62,6 +62,15 @@ class Docs(unittest.TestCase):
         self.assertGreater(seen, 30)
         self.assertEqual(sorted(set(bad)), [])
 
+    def test_tree_block_was_derived_cleanly(self):
+        blocks = dict(docs())
+        tree, plain = blocks["tree AGENTS.md block"], blocks["AGENTS.md block"]
+        self.assertIn("./awt", plain)
+        for stale in ("./awt", "Everything about this task lives here", "docs/<brief>.out.md"):
+            self.assertNotIn(stale, tree)
+        for fresh in ("$AWT_DIR/out.md", "from any directory"):
+            self.assertIn(fresh, tree)
+
     def test_no_real_paths_or_hosts_in_docs(self):
         for src, text in docs():
             self.assertNotRegex(text, r"/Users/[a-z]+/")
