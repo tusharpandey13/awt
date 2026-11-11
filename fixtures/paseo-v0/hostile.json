@@ -1,0 +1,132 @@
+{
+  "projects": [
+    {
+      "id": "prj_1",
+      "name": "parsekit",
+      "path": "/tmp/parsekit"
+    }
+  ],
+  "workspaces": [
+    {
+      "id": "wks_1",
+      "projectId": "prj_1",
+      "project": "parsekit",
+      "name": "main",
+      "cwd": "/tmp/parsekit",
+      "archived": false
+    },
+    {
+      "id": "wks_empty",
+      "projectId": "prj_1",
+      "project": "parsekit",
+      "name": "no agents",
+      "cwd": "/tmp/none",
+      "archived": false
+    }
+  ],
+  "agents": [
+    {
+      "id": "agt_1",
+      "name": "Token AKIAABCDEFGHIJKLMNOP leaked",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_2",
+      "name": "",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_3",
+      "name": "  \t\n ",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_4",
+      "name": "日本語 😀 title ../../etc/passwd",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_5",
+      "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "../evil",
+      "name": "path-like id",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_1",
+      "name": "duplicate id",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "name": "no id"
+    },
+    "not an object",
+    {
+      "id": "agt_6",
+      "name": "‮tricky\u001b[31m",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_7",
+      "name": "ws unknown",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_gone",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    }
+  ]
+}

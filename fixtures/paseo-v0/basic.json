@@ -1,0 +1,108 @@
+{
+  "projects": [
+    {
+      "id": "prj_1",
+      "name": "parsekit",
+      "path": "/tmp/parsekit"
+    },
+    {
+      "id": "prj_2",
+      "name": "docs-site",
+      "path": "/tmp/docs-site"
+    }
+  ],
+  "workspaces": [
+    {
+      "id": "wks_1",
+      "projectId": "prj_1",
+      "project": "parsekit",
+      "name": "main",
+      "cwd": "/tmp/parsekit",
+      "archived": false
+    },
+    {
+      "id": "wks_2",
+      "projectId": "prj_1",
+      "project": "parsekit",
+      "name": "retry-bug",
+      "cwd": "/tmp/parsekit-wt",
+      "archived": false
+    },
+    {
+      "id": "wks_3",
+      "projectId": "prj_2",
+      "project": "docs-site",
+      "name": "main",
+      "cwd": "/tmp/docs-site",
+      "archived": false
+    }
+  ],
+  "agents": [
+    {
+      "id": "agt_1",
+      "name": "Plan the parser rewrite",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_2",
+      "name": "Review the plan",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_3",
+      "name": "Fix retry storm",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit-wt",
+      "workspaceId": "wks_2",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_4",
+      "name": "Explore backoff",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit-wt",
+      "workspaceId": "wks_2",
+      "parentAgentId": "agt_3",
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_5",
+      "name": "Read the RFC",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit-wt",
+      "workspaceId": "wks_2",
+      "parentAgentId": "agt_4",
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_6",
+      "name": "Draft changelog",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/docs-site",
+      "workspaceId": "wks_3",
+      "parentAgentId": null,
+      "archived": true,
+      "background": false
+    }
+  ]
+}

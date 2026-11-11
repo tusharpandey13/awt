@@ -1,0 +1,26 @@
+[
+  {
+    "workspaceId": "wks_1",
+    "project": "parsekit",
+    "name": "main",
+    "isolation": "local",
+    "cwd": "/tmp/parsekit",
+    "background": false
+  },
+  {
+    "workspaceId": "wks_2",
+    "project": "parsekit",
+    "name": "retry-bug",
+    "isolation": "local",
+    "cwd": "/tmp/parsekit-wt",
+    "background": false
+  },
+  {
+    "workspaceId": "wks_3",
+    "project": "docs-site",
+    "name": "main",
+    "isolation": "local",
+    "cwd": "/tmp/docs-site",
+    "background": false
+  }
+]

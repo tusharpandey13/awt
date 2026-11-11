@@ -1,0 +1,70 @@
+{
+  "projects": [],
+  "workspaces": [
+    {
+      "id": "wks_1",
+      "projectId": null,
+      "project": "parsekit",
+      "name": "main",
+      "cwd": "/tmp/parsekit",
+      "archived": false
+    }
+  ],
+  "agents": [
+    {
+      "id": "agt_1",
+      "name": "Lost child",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": "agt_missing",
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_2",
+      "name": "Cycle a",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": "agt_3",
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_3",
+      "name": "Cycle b",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": "agt_2",
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_4",
+      "name": "Child of background",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": "agt_5",
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_5",
+      "name": "Background parent",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_1",
+      "parentAgentId": null,
+      "archived": false,
+      "background": true
+    }
+  ]
+}

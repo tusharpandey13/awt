@@ -1,0 +1,73 @@
+{
+  "projects": [
+    {
+      "id": "prj_1",
+      "name": "parsekit",
+      "path": "/tmp/parsekit"
+    }
+  ],
+  "workspaces": [
+    {
+      "id": "wks_1",
+      "projectId": "prj_1",
+      "project": "parsekit",
+      "name": "main",
+      "cwd": "/tmp/parsekit",
+      "archived": false
+    },
+    {
+      "id": "wks_2",
+      "projectId": "prj_1",
+      "project": "parsekit",
+      "name": "second",
+      "cwd": "/tmp/parsekit",
+      "archived": false
+    }
+  ],
+  "agents": [
+    {
+      "id": "agt_1",
+      "name": "On the shared cwd",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": null,
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_2",
+      "name": "Exact id",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": "wks_2",
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_3",
+      "name": "Nowhere",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/elsewhere",
+      "workspaceId": null,
+      "parentAgentId": null,
+      "archived": false,
+      "background": false
+    },
+    {
+      "id": "agt_4",
+      "name": "Helper",
+      "provider": "claude",
+      "model": "sonnet",
+      "cwd": "/tmp/parsekit",
+      "workspaceId": null,
+      "parentAgentId": null,
+      "archived": false,
+      "background": true
+    }
+  ]
+}

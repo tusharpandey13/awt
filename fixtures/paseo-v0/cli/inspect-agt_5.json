@@ -1,0 +1,11 @@
+{
+  "Id": "agt_5",
+  "Name": "Read the RFC",
+  "Provider": "claude",
+  "Model": "sonnet",
+  "Status": "idle",
+  "Archived": false,
+  "Cwd": "/tmp/parsekit-wt",
+  "Worktree": null,
+  "ParentAgentId": "agt_4"
+}

@@ -1,0 +1,14 @@
+[
+  {
+    "projectId": "prj_1",
+    "name": "parsekit",
+    "kind": "git",
+    "path": "/tmp/parsekit"
+  },
+  {
+    "projectId": "prj_2",
+    "name": "docs-site",
+    "kind": "git",
+    "path": "/tmp/docs-site"
+  }
+]

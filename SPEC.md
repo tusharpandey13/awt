@@ -388,7 +388,8 @@ Each agent node gets `goal` from its Paseo title (cut to the cap), a `ref kind=p
 
 Properties:
 - Idempotent: a second run, or a run after a crash, imports only what is missing and appends a `status` row only when it differs. Names are never changed after creation.
-- A lock: a second concurrent run exits 1 with a fix.
+- Existing nodes are found by key across the whole tree before anything is created, so a node is never duplicated or moved when its parent changes in Paseo. Refs and statuses are read in process and written through `awt`.
+- A lock: a second concurrent run exits 1 with a fix. The report file doubles as the lock (`flock`), because `awt` itself takes `flock` on `events.jsonl`.
 - `legacy/paseo-migration.md` in the root: counts, every ambiguity, every skipped item with its reason.
 - Exit 1 if any Paseo item is neither imported nor listed as skipped, as in `migrate-wt`.
 - `migrate-wt` is unchanged. A tracker output already has the `tasks/<id>/` shape and can be moved under a workspace's `tasks/` directory.

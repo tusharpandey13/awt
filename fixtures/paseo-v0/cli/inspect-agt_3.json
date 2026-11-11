@@ -1,0 +1,11 @@
+{
+  "Id": "agt_3",
+  "Name": "Fix retry storm",
+  "Provider": "claude",
+  "Model": "sonnet",
+  "Status": "idle",
+  "Archived": false,
+  "Cwd": "/tmp/parsekit-wt",
+  "Worktree": null,
+  "ParentAgentId": null
+}

@@ -1866,6 +1866,163 @@ def a_tree_secrets(c):
         c.fail("a refused init left a node behind")
 
 
+# ---------------------------------------------------------------- migrate-paseo
+MIG = os.path.join(os.path.dirname(HERE), "migrate-paseo")
+
+
+def mig(c, root, snap, *extra, timeout=None, allow=(0, 1)):
+    p = c.path("snap-%d.json" % c.nxt())
+    with open(p, "w", encoding="utf-8", errors="surrogatepass") as g:
+        json.dump(snap, g, ensure_ascii=False)
+    return c.raw([sys.executable, MIG, root, "--from", p] + list(extra), cwd=c.base, args=None, allow=allow, timeout=timeout or 300, label="migrate-paseo %s --from %s" % (root, p))
+
+
+def gen_snapshot(rng, n, hostile=True):
+    words = ["fix", "plan", "Review", "日本語", "😀", "x" * 120, "", "  ", "a/b", "../..", "tok " + "AK" + "IA" + "ABCDEFGHIJKLMNOP", "\x1b[31mred", "\u202eflip"]
+    ws = [dict(id="wks_%d" % i, projectId="prj_%d" % (i % 3), project="proj%d" % (i % 3), name=rng.choice(words[:6]) or "w", cwd="/tmp/c%d" % (i % 4), archived=rng.random() < 0.2) for i in range(max(2, n // 10))]
+    ids = ["agt_%d" % i for i in range(n)]
+    ags = []
+    for i, a in enumerate(ids):
+        par = rng.choice(ids) if rng.random() < 0.4 else None
+        ags.append(dict(id=a, name=rng.choice(words) if hostile else "agent %d" % i, provider="p", model="m", cwd="/tmp/c%d" % rng.randrange(6),
+                        workspaceId=rng.choice(ws)["id"] if rng.random() < 0.6 else None, parentAgentId=par, archived=rng.random() < 0.2, background=hostile and rng.random() < 0.05))
+    if hostile:
+        ags += [dict(id=rng.choice(ids), name="dup"), dict(name="no id"), "junk", dict(id="x" * 400, name="long id"), dict(id="bad\nid", name="ctl")]
+        ws += [dict(id="wks_0", name="dup ws"), dict(name="no id")]
+    rng.shuffle(ags)
+    return dict(projects=[dict(id="prj_%d" % i, name="proj%d" % i, path="/tmp/p%d" % i) for i in range(3)], workspaces=ws, agents=ags)
+
+
+def nodes_of(c, root):
+    r = tw(c, root, "list", "nodes", "--all", "--json")
+    try:
+        return json.loads(r.out)
+    except ValueError:
+        c.fail("list nodes --json is not JSON after migration")
+        return []
+
+
+def mig_hash(root):
+    h = __import__("hashlib").sha256()
+    for dp, dns, fns in os.walk(root):
+        dns[:] = sorted(d for d in dns if not d.startswith(".new-"))
+        for n in sorted(fns):
+            p = os.path.join(dp, n)
+            data = open(p, "rb").read()
+            if n == "events.jsonl":
+                data = re.sub(rb'"ts":"[^"]*"', b'"ts":""', data)
+            h.update(os.path.relpath(p, root).encode("utf-8", "surrogateescape") + b"\0" + data)
+    return h.hexdigest()
+
+
+@attack("migrate-snapshot-fuzz")
+def a_mig_fuzz(c):
+    for rnd in range(2 if c.quick else 6):
+        root = c.path("root%d" % rnd)
+        snap = gen_snapshot(c.rng, 60 if c.quick else 400)
+        r = mig(c, root, snap)
+        if r.rc not in (0, 1) or TRACE in r.err:
+            c.fail("migrate-paseo crashed: rc=%s %s" % (r.rc, r.err.strip()[-160:]))
+            continue
+        rows = nodes_of(c, root)
+        keys = [x["key"] for x in rows]
+        if len(keys) != len(set(keys)):
+            c.fail("duplicate keys after migration")
+        want = set()
+        seen = set()
+        for a in snap["agents"]:
+            if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"].strip() and len(a["id"]) <= 150 and not re.search(r"[\x00-\x1f\x7f]", a["id"]) and a["id"] not in seen:
+                seen.add(a["id"])
+                if not a.get("background"):
+                    want.add("paseo:agent/" + a["id"])
+        miss = want - set(keys)
+        if miss and r.rc == 0:
+            c.fail("%d usable agents neither imported nor reported (exit 0)" % len(miss))
+        rep = open(os.path.join(root, "legacy", "paseo-migration.md"), encoding="utf-8").read()
+        if "AK" + "IA" + "ABCDEFGHIJKLMNOP" in rep:
+            c.fail("secret in the report")
+        for dp, dns, fns in os.walk(root):
+            for n in fns:
+                try:
+                    data = open(os.path.join(dp, n), encoding="utf-8", errors="replace").read()
+                except OSError:
+                    continue
+                if any(rx.search(data) for rx in SECRE):
+                    c.fail("secret-shaped text on disk: " + os.path.join(dp, n))
+                    break
+        tree_audit(c, root)
+
+
+@attack("migrate-kill-and-resume")
+def a_mig_kill(c):
+    snap = gen_snapshot(c.rng, 40, hostile=False)
+    a_root, b_root = c.path("a", "root"), c.path("b", "root")  # same root name and same snapshot path, so the trees can be compared byte for byte
+    p = c.path("snap.json")
+    with open(p, "w") as g:
+        json.dump(snap, g)
+    run = lambda root: c.raw([sys.executable, MIG, root, "--from", p], cwd=c.base, args=None, allow=(0, 1), timeout=300)
+    if run(a_root).rc != 0:
+        c.fail("clean run failed")
+        return
+    for i in range(6 if c.quick else 20):
+        cmd = [sys.executable, MIG, b_root, "--from", p]
+        c.log(" ".join(cmd))
+        pr = subprocess.Popen(cmd, env=c.env(), cwd=c.base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(c.rng.random() * (1.5 if c.quick else 3))
+        try:
+            os.killpg(pr.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        pr.wait()
+    r = run(b_root)
+    if r.rc != 0:
+        c.fail("run after kills failed: " + r.err[:120])
+    if mig_hash(a_root) != mig_hash(b_root):
+        c.fail("killed-and-resumed tree differs from an uninterrupted run")
+    tree_audit(c, b_root)
+
+
+@attack("migrate-concurrent-runs")
+def a_mig_conc(c):
+    snap = gen_snapshot(c.rng, 30, hostile=False)
+    root = c.path("root")
+    with cf.ThreadPoolExecutor(3) as ex:
+        rs = list(ex.map(lambda i: mig(c, root, snap), range(3)))
+    for r in rs:
+        if r.rc == 1 and "another migrate-paseo is running" not in r.err and "fix:" not in r.err:
+            c.fail("unexplained failure: " + r.err[:120])
+    if not any(r.rc == 0 for r in rs):
+        c.fail("no run succeeded")
+    if mig(c, root, snap).rc != 0:
+        c.fail("settling run failed")
+    keys = [x["key"] for x in nodes_of(c, root)]
+    if len(keys) != len(set(keys)):
+        c.fail("duplicate keys after concurrent runs")
+    tree_audit(c, root)
+
+
+@attack("migrate-moving-target")
+def a_mig_moving(c):
+    snap = gen_snapshot(c.rng, 40, hostile=False)
+    root = c.path("root")
+    mig(c, root, snap)
+    names = {x["key"]: x["path"] for x in nodes_of(c, root)}
+    for rnd in range(3 if c.quick else 8):
+        for a in snap["agents"]:
+            if c.rng.random() < 0.3:
+                a["archived"] = not a.get("archived")
+            if c.rng.random() < 0.2:
+                a["name"] = "renamed %d" % c.rng.randrange(99)
+        snap["agents"] = snap["agents"][: len(snap["agents"]) - c.rng.randrange(0, 4)] + [dict(id="agt_new%d_%d" % (rnd, i), name="new", cwd="/tmp/c1", archived=False) for i in range(2)]
+        if mig(c, root, snap).rc not in (0, 1):
+            c.fail("run failed")
+    now = {x["key"]: x["path"] for x in nodes_of(c, root)}
+    moved = [k for k in names if k in now and names[k] != now[k]]
+    if moved:
+        c.fail("nodes changed place or name: %s" % moved[:3])
+    tree_audit(c, root)
+
+
 # ---------------------------------------------------------------- driver
 def main():
     ap = argparse.ArgumentParser()

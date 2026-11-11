@@ -1,0 +1,11 @@
+{
+  "Id": "agt_6",
+  "Name": "Draft changelog",
+  "Provider": "claude",
+  "Model": "sonnet",
+  "Status": "idle",
+  "Archived": true,
+  "Cwd": "/tmp/docs-site",
+  "Worktree": null,
+  "ParentAgentId": null
+}
