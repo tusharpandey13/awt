@@ -4,7 +4,7 @@ For the person running the agent. [SPEC.md](../SPEC.md) is the contract; this pa
 
 ## 1. Adopt it
 
-**New directory.** Copy `awt` in (see the [README](../README.md#setup)), then:
+**New directory.** Copy `awt` in (see the [README](../README.md#quick-start)), then:
 
 ```sh
 ./awt init --goal "Cut parsekit retry storms" --done "Fix merged, #eng told, PK-142 closed"
