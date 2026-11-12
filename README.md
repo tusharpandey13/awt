@@ -64,7 +64,26 @@ cd tasks/retry-bug && awt init --kind agent --name chat-1
 awt list tree
 ```
 
-`resume` in a node shows its ancestors' goals and `rule` decisions and a one-line rollup of its children. `awt find --tree TERM` searches up and down. Agents run anywhere with `AWT_DIR` set to their node. The full contract is in [SPEC.md](SPEC.md#node-tree).
+`resume` in a node shows its ancestors' goals and `rule` decisions and a one-line rollup of its children. `awt find --up|--down TERM` searches ancestors or descendants; `awt find --tree TERM` searches the whole tree under the nearest root. Agents run anywhere with `AWT_DIR` set to their node. The full contract is in [SPEC.md](SPEC.md#node-tree).
+
+## Paseo
+
+If you use Paseo, the `awt` plugin keeps one node tree for everything you do there: a workspace node per Paseo workspace, a `main` task in each, an agent node per agent chat, and subagents under their parent agent. Agents get `AWT_DIR` (their node) in their environment and an `awt_resume` tool; archiving marks nodes done or paused. Details: [paseo-plugin/OVERVIEW.md](paseo-plugin/OVERVIEW.md).
+
+Install `awt` on the daemon's `PATH`, then (Paseo 0.15.4 or later):
+
+```sh
+paseo plugin install git:tusharpandey13/awt:paseo-plugin --ref v0.2.0
+```
+
+The tree lives at `${XDG_DATA_HOME:-~/.local/share}/awt`; set `AWT_ROOT` in the daemon's environment to move it.
+
+To bring existing Paseo history into the tree, run the one-off importer from a clone of this repo. It only reads `~/.paseo` and writes through `awt`; a second run changes nothing:
+
+```sh
+awt/migrate-paseo --dry-run "${XDG_DATA_HOME:-$HOME/.local/share}/awt"   # shows the plan
+awt/migrate-paseo "${XDG_DATA_HOME:-$HOME/.local/share}/awt"
+```
 
 ## Big tasks and cost
 

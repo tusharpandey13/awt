@@ -4,7 +4,7 @@ sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
 import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, subprocess, time
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HOST = socket.gethostname()
 ROOT = None
 BY = "agent"
