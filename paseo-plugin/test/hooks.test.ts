@@ -34,6 +34,7 @@ test("P2 agent.create.before appends the static block once and touches nothing e
   const out = await r.call("agent.create.before", { request: { config, env: { A: "1" } } });
   assert.equal(out.config.systemPrompt, "be kind\n\n" + AWT_BLOCK);
   assert.ok(AWT_BLOCK.length <= 700, String(AWT_BLOCK.length));
+  assert.match(AWT_BLOCK, /find --like/);
   assert.deepEqual({ ...out.config, systemPrompt: undefined }, { ...config, systemPrompt: undefined });
   assert.deepEqual(out.env, { A: "1" });
   const again = await r.call("agent.create.before", { request: out });
