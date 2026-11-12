@@ -10,7 +10,7 @@ def run(*a):
 
 
 def docs():
-    for name in ["README.md"] + sorted(glob.glob(os.path.join(REPO, "docs", "*.md"))):
+    for name in ["README.md", "AGENTS.md"] + sorted(glob.glob(os.path.join(REPO, "docs", "*.md"))):
         path = name if os.path.isabs(name) else os.path.join(REPO, name)
         if os.path.basename(path) == "example-session.md":  # a recording, including an agent's own wrong guess
             continue
