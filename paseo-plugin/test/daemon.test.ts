@@ -95,16 +95,22 @@ test("E2 awt note from the agent lands in its node, not the task's", { skip: !ON
   assert.doesNotMatch(events(task), /hello from agent/);
 });
 
-test("E7 the agent is nudged exactly once after a turn with no handoff", { skip: !ON }, () => {
+test("E7 a turn with no handoff leaves the agent's last reply as state in scope auto, and no prompt in the chat", { skip: !ON }, () => {
   settle();
-  // The fake agent echoes the nudge prompt back, so one nudge shows up as exactly one echo.
-  assert.equal((logs(firstId).match(/echo: Before you stop, record where things stand/g) ?? []).length, 1);
+  assert.doesNotMatch(logs(firstId), /Before you stop, record where things stand/);
+  const dir = /AWT_DIR=(\S+)/.exec(logs(firstId))![1];
+  const st = JSON.parse(awt(dir, "list", "state", "--all", "--json"));
+  assert.equal(st.length >= 1, true);
+  assert.equal(st.at(-1).scope, "auto");
+  assert.match(st.at(-1).now, /^\[auto\] exit=0 /);
 });
 
-test("E8 a handoff recorded during the turn suppresses the nudge", { skip: !ON }, () => {
+test("E8 a handoff recorded during the turn means no auto state", { skip: !ON }, () => {
   const id = run("second", 'RUN: awt state --now "did x" --next "do y"');
   settle();
-  assert.doesNotMatch(logs(id), /echo: Before you stop, record where things stand/);
+  const dir = nodes().find((x) => x.key === `paseo:agent/${id}`)!;
+  const st = JSON.parse(awt(join(root, dir.path), "list", "state", "--all", "--json"));
+  assert.deepEqual(st.map((x: any) => x.scope), ["main"]);
 });
 
 test("E4 restarting the daemon and resuming an agent keeps the same node", { skip: !ON }, () => {

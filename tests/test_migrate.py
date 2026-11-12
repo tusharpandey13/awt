@@ -233,7 +233,7 @@ class T(unittest.TestCase):
         self.assertEqual(h, tree_hash(cp))
         sk = skipped_list(os.path.join(self.new, "legacy", "MIGRATION.md"))
         self.assertEqual(unaccounted(cp, self.new, sk), [])
-        self.assertIn("awt", sk)
+        self.assertIn(os.path.basename(os.path.realpath(REPO)), sk)
 
 
 if __name__ == "__main__":

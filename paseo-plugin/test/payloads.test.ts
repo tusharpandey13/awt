@@ -47,7 +47,7 @@ test("P11 every recorded payload type-checks against the installed @getpaseo/plu
 });
 
 test("P11 the recorded payloads drive the hooks end to end", async () => {
-  const r = rig({}, WS);
+  const r = rig({ AWT_NUDGE: "1" }, WS);
   rigs.push(r);
   const agentId = load("agent.create.after").agent.id;
   const wsId = load("workspace.create.after").workspace.id;

@@ -123,7 +123,7 @@ Same style as today: seeded, one line per attack, a failure prints the seed and 
 - C31 *Awt failing.* `awt` missing, hanging, exiting non-zero or writing garbage on stdout: every hook still returns, within the timeout, with the request unchanged (no prompt block either).
 - C32 *Malformed payloads.* Missing `workspaceId`, `parentAgentId` pointing at an unknown agent, null metadata, huge titles: no throw.
 - C33 *Replay.* Every hook delivered twice and out of order (`after` before `before`): the tree is the same as with one ordered delivery (I7).
-- C34 *Nudge loop.* A completed turn without state triggers one follow-up; no further follow-up until the agent has recorded state, even if it records nothing again.
+- C34 *Nudge loop* (needs `AWT_NUDGE=1`; without it no prompt is ever sent). A completed turn without state triggers one follow-up; no further follow-up until the agent has recorded state, even if it records nothing again.
 - C35 *No dir, no nudge.* An agent that never got an `AWT_DIR` is never nudged.
 - C36 *Duplicate keys.* The same key on nodes at two depths: logged, the agent is untouched, other agents are unaffected.
 - C37 *Slow but working awt.* Each call succeeds but the chain exceeds the deadline: `open.before` returns the request unchanged at the deadline.
@@ -158,7 +158,8 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node, the parent read from `parentAgentId` or the label `paseo.parent-agent-id`; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
 - P6 `awt_resume` takes no input and returns the brief of the node found for the calling agent's key; an agent id with no node errors. A key on two nodes resolves to nothing (C36).
-- P7 `agent.turn.after`: nudge only for completed turns of non-subagents that have an `AWT_DIR`, with no newer state, at most once per stretch (C34, C35); not for failed or canceled turns.
+- P14 `agent.turn.after` without `AWT_NUDGE`: no message is sent; with no `main` state since the turn started, the last reply is recorded in scope `auto`; never replaces an agent's own handoff; unchanged replies add nothing; `AWT_AUTO_HANDOFF=0` records nothing.
+- P7 (with `AWT_NUDGE=1`) `agent.turn.after`: nudge only for completed turns of non-subagents that have an `AWT_DIR`, with no newer state, at most once per stretch (C34, C35); not for failed or canceled turns.
 - P8 `agent.permission.before` allows only requests whose every target resolves (realpath) inside the calling agent's own node dir; sibling or parent node, `../`, a symlink out, `AWT_ROOT`, globs, shell and unknown shapes are untouched. It never denies. `awt effect apply` requests are left to the person.
 - P9 Archive hooks: `done` when allowed, `paused` when refused.
 - P10 Background agents: not in this version (Paseo 0.15.4 does not report them); only `purpose: interactive` opens get a node, env or tool.
@@ -175,8 +176,8 @@ Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scrip
 - E4 Restart the daemon, resume the agent: same node, no duplicate.
 - E5 Archive the workspace: node `done` or `paused`; nothing deleted.
 - E6 Disable the plugin: agents still start and run; nothing is written.
-- E7 After a turn with no handoff the agent is nudged exactly once (C34 against a real daemon).
-- E8 A handoff recorded during the turn suppresses the nudge.
+- E7 After a turn with no handoff the chat holds no extra prompt and the node has an `auto` state from the agent's last reply (P14 against a real daemon).
+- E8 A handoff recorded during the turn means no `auto` state.
 
 Not covered by the daemon test: E3, E5, E6. E5 is covered at hook level by P9; E6 only by C31 (awt failing), which leaves requests unchanged.
 

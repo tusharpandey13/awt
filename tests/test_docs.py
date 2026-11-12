@@ -1,6 +1,10 @@
 """Every ./awt command shown in the docs must use a real verb and real flags."""
 import glob, os, re, subprocess, sys, tempfile, shutil, unittest
 
+# Hermetic: an agent running the tests has AWT_DIR pointing at its own node; the tests must never act on it.
+for _k in ("AWT_DIR", "AWT_BY"):
+    os.environ.pop(_k, None)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AWT = os.path.join(REPO, "awt")
 
