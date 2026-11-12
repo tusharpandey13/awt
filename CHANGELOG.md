@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+### Added
+- `find --like TEXT [--limit N]`: ranked related decisions, answers, notes, refs and states from every workspace in the tree.
+- `decide` and `ask` print up to 3 `related:` records after the id line. `--related N` or `AWT_RELATED` sets the number; 0 turns it off. The lookup never fails the write and stops after 2 s.
+- `list --since ISO8601 [--down] --json`: rows written since a time, for the Paseo plugin.
+- Paseo plugin: a per-turn `awt.receipt` timeline line showing what was stored (`AWT_RECEIPT=0|changes`), `AWT_RELATED` forwarded to agents, and prompt lines for `find --like` and for calling `awt_resume` after compaction (Paseo has no session-hook field).
+- The task `AGENTS.md` template points at `find --like`.
+
 ### Changed
+- Distribution: `awt` must be a Python 3.9+ executable; the standard library is preferred, not required. It adds no dependency today.
 - Paseo plugin: the handoff follow-up prompt is off by default. It showed up as a message in every chat and cost a model turn. The prompt block and the `awt_resume` brief already ask for a handoff. `AWT_NUDGE=1` turns it back on.
 - Paseo plugin: after a turn without a handoff, the agent's last reply is recorded as state in scope `auto` instead. Nothing is sent to the chat. `AWT_AUTO_HANDOFF=0` turns it off.
 - `resume`: the changes since the last handoff are measured from the agent's own state, not from the plugin's `auto` stand-in, so work after a real handoff stays visible.
