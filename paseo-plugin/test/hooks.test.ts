@@ -104,8 +104,70 @@ test("P4 a subagent whose parent has no node lands under the task and a note nam
   assert.ok(notes.some((t) => t.includes("agt_ghost")), JSON.stringify(notes));
 });
 
-test("P7 turn.after nudges once for a completed turn with no handoff", async () => {
+test("P7 by default no follow-up prompt is ever sent", async () => {
   const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  for (let i = 0; i < 4; i++) {
+    await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: `t${i}` });
+    await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: `t${i}`, outcome: { kind: "completed" }, timeline: [] });
+  }
+  assert.equal(r.sent.length, 0);
+});
+
+const completed = { kind: "completed" };
+const turn = async (r: Rig, id: string, n: number) => {
+  await r.call("agent.turn.before", { agent: agentPayload(id), turnId: `t${n}` });
+  await r.call("agent.turn.after", { agent: agentPayload(id), turnId: `t${n}`, outcome: completed, timeline: [] });
+};
+
+test("P13 without a handoff the last reply is kept as state in scope auto, and nothing is sent to the chat", async () => {
+  const r = mk({}, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.said.set("agt_1", ["older", "Fixed the tokenizer; tests green."]);
+  await turn(r, "agt_1", 1);
+  assert.equal(r.sent.length, 0);
+  const st = r.rows(open.env.AWT_DIR, "state");
+  assert.equal(st.length, 1);
+  assert.equal(st[0].scope, "auto");
+  assert.match(st[0].now, /^\[auto\] Fixed the tokenizer; tests green\.$/);
+  assert.match(r.awt(open.env.AWT_DIR, "resume"), /\[auto\].*Fixed the tokenizer/s);
+});
+
+test("P13 a handoff the agent wrote is never replaced, and an unchanged reply adds no row", async () => {
+  const r = mk({}, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.said.set("agt_1", ["one"]);
+  await turn(r, "agt_1", 1);
+  await turn(r, "agt_1", 2); // same reply: awt refuses an unchanged state, nothing is added
+  assert.equal(r.rows(open.env.AWT_DIR, "state").length, 1);
+  await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t3" });
+  r.awt(open.env.AWT_DIR, "state", "--now", "did x", "--next", "do y");
+  r.said.set("agt_1", ["one", "two"]);
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "t3", outcome: completed, timeline: [] });
+  const st = r.rows(open.env.AWT_DIR, "state");
+  assert.equal(st.length, 2);
+  assert.equal(st[1].scope, "main");
+  assert.equal(r.sent.length, 0);
+});
+
+test("P13 AWT_AUTO_HANDOFF=0 turns the stand-in off; failed turns and empty replies write nothing", async () => {
+  const off = mk({ AWT_AUTO_HANDOFF: "0" }, WS);
+  const o = await off.call("agent.open.before", openReq("agt_1"));
+  off.said.set("agt_1", ["hello"]);
+  await turn(off, "agt_1", 1);
+  assert.equal(off.rows(o.env.AWT_DIR, "state").length, 0);
+
+  const r = mk({}, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  await turn(r, "agt_1", 1); // nothing said yet
+  r.said.set("agt_1", ["hello"]);
+  await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t2" });
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "t2", outcome: { kind: "failed", error: { message: "x" } }, timeline: [] });
+  assert.equal(r.rows(open.env.AWT_DIR, "state").length, 0);
+});
+
+test("P7 with AWT_NUDGE=1, turn.after nudges once for a completed turn with no handoff", async () => {
+  const r = mk({ AWT_NUDGE: "1" }, WS);
   const open = await r.call("agent.open.before", openReq("agt_1"));
   const done = { kind: "completed" };
   await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t1" });
@@ -124,7 +186,7 @@ test("P7 turn.after nudges once for a completed turn with no handoff", async () 
 });
 
 test("P7 no nudge for failed, canceled, subagent or unknown turns", async () => {
-  const r = mk({}, WS);
+  const r = mk({ AWT_NUDGE: "1" }, WS);
   await r.call("agent.open.before", openReq("agt_1"));
   for (const outcome of [{ kind: "failed", error: { message: "x" } }, { kind: "canceled", reason: "user" }]) {
     await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t" });
@@ -153,7 +215,7 @@ test("P4 a subagent whose parent is only a label nests under the parent, in open
 });
 
 test("P7 no nudge for a subagent known only by its label", async () => {
-  const r = mk({}, WS);
+  const r = mk({ AWT_NUDGE: "1" }, WS);
   await r.call("agent.open.before", openReq("agt_p"));
   await r.call("agent.open.before", openReq("agt_c", { labels: { "paseo.parent-agent-id": "agt_p" } }));
   await r.call("agent.turn.before", { agent: agentPayload("agt_c"), turnId: "t" });

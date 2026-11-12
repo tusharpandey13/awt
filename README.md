@@ -87,7 +87,7 @@ If you use Paseo, the `awt` plugin builds and maintains the tree for you:
 - a workspace node per Paseo workspace, with a `main` task in each;
 - an agent node per agent chat, with subagents nested under their parent agent;
 - `AWT_DIR` in every agent's environment, plus an `awt_resume` tool;
-- one nudge when an agent ends a turn without a handoff, and no more until it records one;
+- when an agent ends a turn without a handoff, its last reply is kept as a state in scope `auto` (no message in the chat, no extra model turn). An optional follow-up prompt is available with `AWT_NUDGE=1`, off by default;
 - archived agents and workspaces marked done, or paused when work is still open.
 
 Put `awt` on the daemon's `PATH`, then (Paseo 0.15.4 or later):

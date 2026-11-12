@@ -8,7 +8,21 @@ import { awt, parseJson, withSignal } from "./awt.js";
 import type { AwtConfig } from "./config.js";
 import { readConfig } from "./config.js";
 import { NUDGE, withBlock } from "./prompt.js";
-import { Tree } from "./tree.js";
+import { Tree, clean, cut } from "./tree.js";
+
+/** The text of the last assistant message in a timeline page, wherever the page keeps its items. */
+export function lastAssistantText(page: unknown): string | null {
+  let found: string | null = null;
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 6 || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) return void v.forEach((x) => walk(x, depth + 1));
+    const o = v as Record<string, unknown>;
+    if (o.type === "assistant_message" && typeof o.text === "string" && o.text.trim()) found = o.text;
+    else Object.values(o).forEach((x) => walk(x, depth + 1));
+  };
+  walk(page, 0);
+  return found;
+}
 
 type Log = (message: string) => void;
 
@@ -243,10 +257,25 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       const started = turnStart.get(agent.id);
       turnStart.delete(agent.id);
       if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !withDir.has(agent.id)) return;
+      if (!cfg.nudge && !cfg.autoHandoff) return;
       const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
       if (!r) return;
-      const last = parseJson<{ ts?: string }[]>(r.stdout, []).map((s) => Date.parse(s.ts ?? "")).filter(Number.isFinite).sort((a, b) => b - a)[0] ?? 0;
-      if (last >= started) return;
+      const rows = parseJson<{ ts?: string; scope?: string }[]>(r.stdout, []);
+      const newest = (pick: (s: { scope?: string }) => boolean) =>
+        rows.filter(pick).map((s) => Date.parse(s.ts ?? "")).filter(Number.isFinite).sort((x, y) => y - x)[0] ?? 0;
+      const last = newest((s) => s.scope === "main" || s.scope === undefined);
+      if (last >= started) return; // the agent recorded its own handoff this turn
+
+      if (cfg.autoHandoff && !cfg.nudge) {
+        // No message is sent into the chat. The agent's last reply stands in for the handoff, in a scope of its own,
+        // so it never replaces a handoff the agent wrote and `resume` shows it next to one.
+        const text = lastAssistantText(await ctx.paseo.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 20 }));
+        if (!text) return;
+        await tree.onNode(`paseo:agent/${agent.id}`, (node) =>
+          awt(cfg, node, ["state", "--scope", "auto", "--now", "[auto] " + cut(clean(text), 240), "--next", "not recorded: the agent ended its turn without a handoff"], "paseo-plugin"));
+        return;
+      }
+
       const before = nudgedAt.get(agent.id);
       if (before !== undefined && last < before) return; // nudged already, and nothing recorded since
       nudgedAt.set(agent.id, Date.now());

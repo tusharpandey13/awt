@@ -121,7 +121,7 @@ test("C33 replayed and reordered hooks give the same tree as one ordered deliver
 });
 
 test("C34 an agent that never records state is nudged once, then not again until it records state", async () => {
-  const r = mk({}, WS);
+  const r = mk({ AWT_NUDGE: "1" }, WS);
   const opened = await r.call("agent.open.before", openReq("agt_1"));
   const turn = async (i: number) => {
     await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: `t${i}` });
@@ -139,7 +139,7 @@ test("C34 an agent that never records state is nudged once, then not again until
 });
 
 test("C35 an agent without an AWT_DIR is never nudged", async () => {
-  const r = mk({}, WS);
+  const r = mk({ AWT_NUDGE: "1" }, WS);
   await r.call("agent.turn.before", { agent: agentPayload("agt_9"), turnId: "t" });
   await r.call("agent.turn.after", { agent: agentPayload("agt_9"), turnId: "t", outcome: { kind: "completed" }, timeline: [] });
   assert.equal(r.sent.length, 0);

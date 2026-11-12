@@ -127,6 +127,8 @@ Settings, read from the daemon's environment:
 | `AWT_BIN` | `awt` | The CLI to run |
 | `AWT_ROOT` | `${XDG_DATA_HOME:-~/.local/share}/awt` | Where the tree lives |
 | `AWT_TIMEOUT_MS` | `5000` | How long one `awt` call may take |
+| `AWT_AUTO_HANDOFF` | on | `0` stops the plugin keeping an agent's last reply as an `auto` state when it ended a turn without a handoff |
+| `AWT_NUDGE` | off | `1` sends a follow-up prompt when an agent ends a turn without a handoff. Off by default: it adds a visible message and a model turn to the chat |
 
 To upgrade, install again with the new `--ref`. To remove: `paseo plugin remove awt`; the tree stays on disk.
 

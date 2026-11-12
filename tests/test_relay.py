@@ -1,6 +1,10 @@
 """relay tests. A fake claude stands in for the model, so these spend no tokens."""
 import json, os, shutil, stat, subprocess, sys, tempfile, time, unittest
 
+# Hermetic: an agent running the tests has AWT_DIR pointing at its own node; the tests must never act on it.
+for _k in ("AWT_DIR", "AWT_BY"):
+    os.environ.pop(_k, None)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAKE = r"""#!/bin/sh
 # Finds the unit id in the prompt, logs the call, then acts on the unit's behaviour file.
