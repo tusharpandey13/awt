@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, subprocess, time
+import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, signal, socket, subprocess, time
 
 VERSION = "0.2.0"
 HOST = socket.gethostname()
@@ -53,30 +53,30 @@ AGENTS_BLOCK = BLOCK_BEGIN + r'''
 
 Everything about this task lives here. Keep records with `./awt`. Never hand-edit `.awt/`.
 
-**Start:** unless you are a subagent with its own brief, run `./awt resume` and follow it.
-**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel workstreams: add `--scope <name>`.
+**Start:** run `./awt resume` and follow it, unless you are a subagent with a brief.
+**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel work: add `--scope <name>`.
 
 | You have | Do |
 |---|---|
-| A link to something readable later (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Prefer this to copying. |
-| A link you cannot open | Still record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
-| Text with no usable link (pasted chat, meeting notes, research) | `./awt capture --from slack --title "..." [file]` |
-| A plan, ADR, result or other working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
-| A decision | `./awt decide "the choice" --why "the reason"`. Reversing one: add `--supersedes <id>` |
-| A small fact worth keeping | `./awt note "..."` |
+| A link (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Don't copy it. |
+| An unopenable link | Record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
+| No usable link (pasted chat, notes, research) | `./awt capture --from slack --title "..." [file]` |
+| A plan, ADR, result or working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
+| A decision | `./awt decide "the choice" --why "the reason"`. Reversing: add `--supersedes <id>` |
+| A small fact | `./awt note "..."` |
 | A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
-| Anything else | `misc/`. Throwaway work: `scratch/`. |
+| Anything else | `misc/`. Throwaway: `scratch/`. |
 
-**Anything leaving this machine** (message, comment, PR, ticket edit, published doc) goes through the outbox. Never send it directly.
+**Anything leaving this machine** (message, comment, PR, ticket, published doc) goes through the outbox. Never send it directly.
 
 1. Write the draft in `outbox/`.
 2. `./awt effect plan --target "slack:#eng" --body outbox/x.md`. Add `--run '<cmd>'` only if a command can send it.
 3. Stop and show the person. They send it or approve `./awt effect apply`. Then `./awt effect mark <id> sent`.
 
-Effect state `unknown` means it may have been sent. Never resend, use `--again` or mark it. Ask a person.
+State `unknown` means it may have been sent. Never resend or use `--again`. Ask a person.
 
-**Find things:** `./awt list`, `./awt find "term"`. Check before asking.
-**Stuck or refused:** read the `fix:` line, then `./awt help agents`.
+**Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace. Check before deciding or asking; `decide` and `ask` list related records too, so read them.
+**Stuck or refused:** read `fix:`, then `./awt help agents`.
 **Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
 ''' + BLOCK_END + "\n"
 README = '''# {goal}
@@ -240,6 +240,7 @@ USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
   init --kind root|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
   state --now T --next T      note T                   decide C --why T         ask T
+  find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
   supersede OLD NEW           status active|paused|done
   effect plan|show|apply|mark doctor                   save MESSAGE
@@ -1242,7 +1243,30 @@ def cmd_resume(a):
     sys.stdout.write(brief(getattr(a, "scope", None)))
 
 
+def since_rows(a):
+    try:
+        t = datetime.datetime.fromisoformat(a.since.replace("Z", "+00:00"))
+        t = (t if t.tzinfo else t.replace(tzinfo=datetime.timezone.utc)).timestamp()
+    except ValueError:
+        die("--since needs an ISO 8601 time, got %r" % a.since, "awt list --since 2026-01-31T10:00:00Z --json", 2)
+    rows = []
+    for p in scope_nodes(False, False, a.down)[0]:
+        for r in load_at(p)["rows"]:
+            if epoch(r["ts"]) >= t:
+                row = {k: r.get(k) for k in ("type", "ts", "by", "id")}
+                row["scope"] = r.get("scope", "main") if r["type"] == "state" else None
+                if a.down:
+                    row["node"] = None if p == ROOT else os.path.relpath(p, ROOT)
+                rows.append(row)
+    return sorted(rows, key=lambda r: r["ts"])
+
+
 def cmd_list(a):
+    if a.since or a.down:
+        if not a.since or not a.json or a.section:
+            die("--since goes with --json, --down goes with --since, neither takes a section", "awt list --since ISO8601 [--down] --json", 2)
+        print(json.dumps(since_rows(a), ensure_ascii=False))
+        return
     D = load()
     if a.json:
         if not a.section:
@@ -1267,26 +1291,125 @@ def shown(p, top):
     return os.path.relpath(r, c) if under(r, c) or under(c, os.path.realpath(top)) else r
 
 
-def cmd_find(a):
-    term, start = a.term.lower(), ROOT
-    anchor = tree_top(start)
-    hits, targets, over = find_in(ROOT, term, shown(ROOT, anchor)), [], False
-    top = anchor if a.tree else start
-    if a.tree and top != start and node_info(top)["kind"] == "root":
+def scope_nodes(tree, up, down):
+    """The nodes a cross-node read covers, ROOT first, and whether a limit cut the walk: the --tree set, or --up and --down alone."""
+    start = ROOT
+    top = tree_top(start) if tree else start
+    targets, over = [], False
+    if tree and top != start and node_info(top)["kind"] == "root":
         ds, over = descendants(top)
         targets = [top] + [p for p, _ in ds if p != start]
     else:
-        if a.up or a.tree:
+        if up or tree:
             targets += ancestors(start)
-        if a.down or a.tree:
+        if down or tree:
             ds, over = descendants(start)
             targets += [p for p, _ in ds]
-    for p in targets:
+    return [start] + targets, over
+
+
+def cmd_find(a):
+    if a.like is not None:
+        return find_like(a)
+    if a.term is None:
+        die("find needs a TERM or --like TEXT", 'awt find "term"', 2)
+    if a.limit is not None:
+        die("--limit goes with --like", 'awt find --like "text" --limit N', 2)
+    term, start = a.term.lower(), ROOT
+    anchor = tree_top(start)
+    nodes, over = scope_nodes(a.tree, a.up, a.down)
+    hits = []
+    for p in nodes:
         hits += find_in(p, term, shown(p, anchor))
     for h in hits[:K["hits"]]:
         out(h)
     if len(hits) > K["hits"]:
         out("+%d more" % (len(hits) - K["hits"]))
+    if over:
+        out("+ " + LIMIT)
+
+
+STOPWORDS = set("""a about after all also an and any are as at be been but by can could did do does for from had has have he her his how i if in into
+is it its may me might more most my no not of on one or our out she so some than that the their them then there these they this to too up
+us was we were what when where which who why will with would you your""".split())
+
+
+def words(text):
+    """The meaning-bearing words of a text: lowercase [a-z0-9][a-z0-9_./-]+ tokens, stopwords and tokens under 3 characters dropped, no repeats."""
+    seen = []
+    for w in re.findall(r"[a-z0-9][a-z0-9_./-]+", text.lower()):
+        w = w.strip("._/-")
+        if len(w) >= 3 and w not in STOPWORDS and w not in seen:
+            seen.append(w)
+    return seen
+
+
+def recall_rows(D, prefix, skip=None):
+    """Candidate records of one node for recall: (sort ts, words, line, rule?). Current decisions, questions, notes, refs, the main state."""
+    at = " @" + prefix if prefix else ""
+    res = []
+
+    def add(r, ident, text, line, rule=False):
+        res.append((r["ts"], set(words(ident + " " + text)), line, rule))
+    for d in D["cur_dec"]:
+        if d["id"] != skip:
+            tag = " [%s]" % ",".join(d["tags"]) if d.get("tags") else ""
+            add(d, d["id"], d["choice"] + " " + d["why"], "%s%s%s: %s (why: %s)" % (d["id"], at, tag, d["choice"], d["why"]), "rule" in (d.get("tags") or []))
+    for i, q in D["q"].items():
+        if i != skip:
+            ans = D["ans"].get(i)
+            add(q, i, q["text"] + (" " + ans["text"] if ans else ""), "%s%s: %s%s" % (i, at, q["text"], " → " + ans["text"] if ans else ""))
+    for n in D["notes"]:
+        if n["id"] != skip:
+            add(n, n["id"], n["text"], "%s%s: %s" % (n["id"], at, n["text"]))
+    for r in D["refs"].values():
+        add(r, "", r["title"] + " " + r.get("why", ""), "ref%s: %s%s <%s>" % (at, r["title"], " (why: %s)" % r["why"] if r.get("why") else "", r["target"]))
+    st = D["states"].get("main")
+    if st:
+        add(st, "", st["now"] + " " + st["next"], "state%s: %s | next: %s" % (at, st["now"], st["next"]))
+    return res
+
+
+def recall(text, limit, nodes, skip=None, deadline=None, width=200):
+    """(lines, stopped): the best-matching records across the --tree node set, ranked by rarity of the shared words. Never raises."""
+    q = words(text)
+    if not q:
+        return [], False
+    cands, stopped = [], False
+    anchor = tree_top(ROOT)
+    for p in nodes:
+        if deadline is not None and time.time() >= deadline:
+            stopped = True
+            break
+        try:
+            cands += recall_rows(load_at(p), shown(p, anchor), skip)
+        except Exception:
+            continue
+    df = {}
+    for _, ws, _, _ in cands:
+        for w in ws:
+            df[w] = df.get(w, 0) + 1
+    need = 1 if len(q) <= 2 else 2
+    scored = []
+    for ts, ws, line, rule in cands:
+        shared = [w for w in q if w in ws]
+        if len(shared) >= need:
+            scored.append((sum(math.log(1 + len(cands) / df[w]) for w in shared) * (1.5 if rule else 1), ts, line))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [cut(" ".join(l.split()), width) for _, _, l in scored[:limit]], stopped
+
+
+def find_like(a):
+    if a.term is not None:
+        die("--like cannot be combined with a TERM", 'awt find --like "text"', 2)
+    limit = 10 if a.limit is None else a.limit
+    if not 1 <= limit <= K["hits"]:
+        die("--limit must be 1 to %d" % K["hits"], 'awt find --like "text" --limit 10', 2)
+    narrow = (a.up or a.down) and not a.tree
+    nodes, over = scope_nodes(not narrow, a.up, a.down)
+    lines, _ = recall(a.like, limit, nodes)
+    for l in lines or ["no related records"]:
+        out(l)
     if over:
         out("+ " + LIMIT)
 
@@ -1350,6 +1473,38 @@ def cmd_note(a):
     out(i + " noted")
 
 
+def related_limit(a):
+    """How many related records decide and ask list: --related, else AWT_RELATED, else 3. A bad flag is a usage error; a bad variable is ignored."""
+    if a.related is not None:
+        if not 0 <= a.related <= 20:
+            die("--related must be 0 to 20", "awt decide ... --related 3", 2)
+        return a.related
+    v = os.environ.get("AWT_RELATED")
+    if v is not None:
+        try:
+            if 0 <= int(v) <= 20:
+                return int(v)
+        except ValueError:
+            pass
+        print("warning: AWT_RELATED=%s ignored (use 0 to 20); using 3" % v[:40], file=sys.stderr)
+    return 3
+
+
+def show_related(text, limit, skip):
+    """The write is already done and printed; nothing here may change its outcome."""
+    if not limit:
+        return
+    try:
+        ms = float(os.environ.get("AWT_RELATED_MS", "2000"))  # a test hook; the documented budget is 2 s
+        lines, stopped = recall(text, limit, scope_nodes(True, False, False)[0], skip, time.time() + ms / 1000, 200 - len("related: "))
+        for l in lines:
+            out("related: " + l)
+        if stopped:
+            out("related: (lookup stopped at 2 s; run awt find --like ...)")
+    except Exception:
+        pass
+
+
 def cmd_decide(a):
     D = load()
     if a.supersedes:
@@ -1358,14 +1513,18 @@ def cmd_decide(a):
         if a.supersedes in D["sup"]:
             die("%s is already superseded" % a.supersedes, "supersede the current one: --supersedes " + current_superseder(D, a.supersedes))
     i = new_id("d")
+    related = related_limit(a)
     emit("decision", id=i, choice=a.choice, why=a.why, supersedes=a.supersedes, tags=a.tag)
     out(i + " decided")
+    show_related(a.choice + " " + a.why, related, i)
 
 
 def cmd_ask(a):
     i = new_id("q")
+    related = related_limit(a)
     emit("question", id=i, text=a.text)
     out(i + " asked")
+    show_related(a.text, related, i)
 
 
 def cmd_answer(a):
@@ -1857,12 +2016,12 @@ def build():
     T, F = {}, dict(action="store_true")
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
     V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {}), (("--json",), F)])
-    V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F)])
-    V(sp, "find", [("term", T)], [(("--up",), F), (("--down",), F), (("--tree",), F)])
+    V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
+    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int))])
     V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])
     V(sp, "note", [("text", T)])
-    V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append"))])
-    V(sp, "ask", [("text", T)])
+    V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append")), (("--related",), dict(type=int))])
+    V(sp, "ask", [("text", T)], [(("--related",), dict(type=int))])
     V(sp, "answer", [("id", T), ("text", T)])
     V(sp, "ref", [("target", T)], [(("--title",), dict(required=True)), (("--why",), T), (("--kind",), T), (("--no-access",), F)])
     V(sp, "capture", [("file", dict(nargs="?"))], [(("--from",), dict(required=True, dest="from_")), (("--title",), dict(required=True)), (("--ref",), T)])

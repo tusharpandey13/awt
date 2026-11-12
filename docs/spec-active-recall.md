@@ -4,7 +4,7 @@ Status: draft for review. Nothing here is built yet. Once approved, the normativ
 
 ## Problem
 
-awt records well but is rarely read back. Three gaps:
+`awt` records well but is rarely read back. Three gaps:
 
 1. **No cross-referencing.** Agents only consult earlier decisions, answers and notes when a person tells them to.
 2. **Records stand alone.** `decide` and `ask` write a row and print its id. Nothing shows that a related decision, or the answer to the same question, already exists in another workspace.
@@ -14,7 +14,7 @@ awt records well but is rarely read back. Three gaps:
 
 - When an agent records something, it sees related records from the whole tree, and so does the person reading the transcript.
 - Agents know cross-referencing exists and use it when they need it (on demand), without past data being pushed into every turn.
-- After each turn, the person sees what awt stored for that turn.
+- After each turn, the person sees what `awt` stored for that turn.
 - Context cost stays flat. Nothing is added to a turn unless the agent asks for it or has just written a record.
 
 ## Non-goals
@@ -92,7 +92,7 @@ This is a pointer only. No data is injected.
 
 ## R4. Turn receipt in Paseo
 
-After every turn of an agent that has a node (subagents included), the plugin appends one plugin timeline item that shows what awt stored during that turn.
+After every turn of an agent that has a node (subagents included), the plugin appends one plugin timeline item that shows what `awt` stored during that turn.
 
 - **When:** in `agent.turn.after`, for any outcome (completed, failed or canceled), after the stand-in handoff has been written, so the receipt includes it.
 - **What counts:** event rows with `ts` at or after the turn's start, in the agent's own node and its descendant subagent nodes.
