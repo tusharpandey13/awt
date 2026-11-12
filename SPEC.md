@@ -112,7 +112,7 @@ Sections in this order, each with a budget in one constants table. Total at most
 | 2 | Newest state in full with its age and scope; other scopes one line each | 1,200 |
 | 3 | Open questions | 600 |
 | 4 | Effects needing attention: `planned`, `unknown`, conflicts, with the next command | 500 |
-| 5 | Changes since the newest state: files in the root newer than it (count, up to 8 paths; excluding `.awt/`, `.git/`, `scratch/`), and for each `repo` ref on this host `git log` commit subjects since then plus a dirty count. No state yet: say so. Git failure: one degraded line. | 500 |
+| 5 | Changes since the newest state, not counting scope `auto` (the Paseo plugin's stand-in handoff) unless it is the only one: files in the root newer than it (count, up to 8 paths; excluding `.awt/`, `.git/`, `scratch/`), and for each `repo` ref on this host `git log` commit subjects since then plus a dirty count. No state yet: say so. Git failure: one degraded line. | 500 |
 | 6 | Current decisions: tag `rule` first, then newest, each cut to 120 chars | 800 |
 | 7 | One inventory line (counts of refs, no-access refs, context, docs, outbox, misc), quarantine count if nonzero, the pointer `./awt list`, `./awt find <term>` | 200 |
 

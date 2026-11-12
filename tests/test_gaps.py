@@ -138,6 +138,18 @@ class SmallInvariants(Base):
         self.assertNotIn(AKIA, r.stdout + r.stderr)
         self.assertEqual(self.rows("note"), [])
 
+    def test_auto_state_does_not_reset_the_changes_baseline(self):
+        # resume section 5: the plugin's stand-in handoff (scope auto) must not hide work since the agent's own
+        import time
+        self.init()
+        self.ok("state", "--now", "own handoff", "--next", "n")
+        time.sleep(1.1)
+        with open(self.p("docs", "after-handoff.md"), "w") as f:
+            f.write("x")
+        time.sleep(1.1)
+        self.ok("state", "--scope", "auto", "--now", "[auto] reply", "--next", "not recorded")
+        self.assertIn("docs/after-handoff.md", self.ok("resume").stdout)
+
     def test_default_by_is_agent(self):
         self.init()
         self.ok("note", "x")

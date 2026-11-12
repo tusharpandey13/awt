@@ -12,16 +12,20 @@ import { Tree, clean, cut } from "./tree.js";
 
 /** The text of the last assistant message in a timeline page, wherever the page keeps its items. */
 export function lastAssistantText(page: unknown): string | null {
-  let found: string | null = null;
+  const found: { text: string; id?: string }[] = [];
   const walk = (v: unknown, depth: number): void => {
     if (depth > 6 || v === null || typeof v !== "object") return;
     if (Array.isArray(v)) return void v.forEach((x) => walk(x, depth + 1));
     const o = v as Record<string, unknown>;
-    if (o.type === "assistant_message" && typeof o.text === "string" && o.text.trim()) found = o.text;
+    if (o.type === "assistant_message" && typeof o.text === "string" && (o.text.trim() || typeof o.messageId === "string")) found.push({ text: o.text, id: typeof o.messageId === "string" ? o.messageId : undefined });
     else Object.values(o).forEach((x) => walk(x, depth + 1));
   };
   walk(page, 0);
-  return found;
+  const last = found[found.length - 1];
+  if (!last) return null;
+  // A streamed reply can arrive as several items with one messageId: join them.
+  const text = last.id === undefined ? last.text : found.filter((f) => f.id === last.id).map((f) => f.text).join("");
+  return text.trim() ? text : null;
 }
 
 type Log = (message: string) => void;

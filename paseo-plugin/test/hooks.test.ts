@@ -120,7 +120,7 @@ const turn = async (r: Rig, id: string, n: number) => {
   await r.call("agent.turn.after", { agent: agentPayload(id), turnId: `t${n}`, outcome: completed, timeline: [] });
 };
 
-test("P13 without a handoff the last reply is kept as state in scope auto, and nothing is sent to the chat", async () => {
+test("P14 without a handoff the last reply is kept as state in scope auto, and nothing is sent to the chat", async () => {
   const r = mk({}, WS);
   const open = await r.call("agent.open.before", openReq("agt_1"));
   r.said.set("agt_1", ["older", "Fixed the tokenizer; tests green."]);
@@ -133,7 +133,7 @@ test("P13 without a handoff the last reply is kept as state in scope auto, and n
   assert.match(r.awt(open.env.AWT_DIR, "resume"), /\[auto\].*Fixed the tokenizer/s);
 });
 
-test("P13 a handoff the agent wrote is never replaced, and an unchanged reply adds no row", async () => {
+test("P14 a handoff the agent wrote is never replaced, and an unchanged reply adds no row", async () => {
   const r = mk({}, WS);
   const open = await r.call("agent.open.before", openReq("agt_1"));
   r.said.set("agt_1", ["one"]);
@@ -150,7 +150,7 @@ test("P13 a handoff the agent wrote is never replaced, and an unchanged reply ad
   assert.equal(r.sent.length, 0);
 });
 
-test("P13 AWT_AUTO_HANDOFF=0 turns the stand-in off; failed turns and empty replies write nothing", async () => {
+test("P14 AWT_AUTO_HANDOFF=0 turns the stand-in off; failed turns and empty replies write nothing", async () => {
   const off = mk({ AWT_AUTO_HANDOFF: "0" }, WS);
   const o = await off.call("agent.open.before", openReq("agt_1"));
   off.said.set("agt_1", ["hello"]);
@@ -315,4 +315,16 @@ test("P13 the project display name labels the workspace", async () => {
   await r.call("workspace.create.after", { workspace: { id: "wks_1", projectId: "prj_1", cwd: "/tmp/other", name: "main", archivedAt: null } });
   const ws = r.nodes().find((x) => x.key === "paseo:workspace/wks_1")!;
   assert.equal(ws.path, "workspaces/parsekit-main");
+});
+
+test("P14 a reply streamed as several items with one messageId is joined", async () => {
+  const { lastAssistantText } = await import("../server/hooks.js");
+  const page = { entries: [
+    { item: { type: "assistant_message", text: "old", messageId: "m1" } },
+    { item: { type: "assistant_message", text: "Done: ", messageId: "m2" } },
+    { item: { type: "assistant_message", text: "tests pass.", messageId: "m2" } },
+  ] };
+  assert.equal(lastAssistantText(page), "Done: tests pass.");
+  assert.equal(lastAssistantText({ entries: [{ item: { type: "assistant_message", text: "a" } }, { item: { type: "assistant_message", text: "  " } }] }), "a");
+  assert.equal(lastAssistantText({ entries: [] }), null);
 });

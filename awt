@@ -866,7 +866,8 @@ def brief(scope=None):
         o.append(fit("## Effects needing attention", [cut(c("%s %s %s: %s" % (e["id"], e["state"], e["target"], eff_next(e)))) for e in att], "effects", "effects"))
     ch = []
     if sts:
-        since = epoch(sts[0]["ts"])
+        # the plugin's stand-in handoff (scope auto) is not a handoff: measure from the agent's own
+        since = epoch(next((r for r in sts if r.get("scope", "main") != "auto"), sts[0])["ts"])
         nf = newer_files(since)
         if nf:
             ch += ["%d files newer than state:" % len(nf)] + ["  " + cut(x) for x in nf[:K["newer"]]]
