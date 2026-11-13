@@ -34,6 +34,7 @@ test("P2 agent.create.before appends the static block once and touches nothing e
   const out = await r.call("agent.create.before", { request: { config, env: { A: "1" } } });
   assert.equal(out.config.systemPrompt, "be kind\n\n" + AWT_BLOCK);
   assert.ok(AWT_BLOCK.length <= 700, String(AWT_BLOCK.length));
+  assert.match(AWT_BLOCK, /find --like/);
   assert.deepEqual({ ...out.config, systemPrompt: undefined }, { ...config, systemPrompt: undefined });
   assert.deepEqual(out.env, { A: "1" });
   const again = await r.call("agent.create.before", { request: out });
@@ -93,6 +94,22 @@ test("P4 a subagent opened before its parent is known gets a parent ref and a no
   const notes = r.rows(child.env.AWT_DIR, "note").map((n) => n.text);
   assert.ok(notes.some((t) => t.includes("agt_p")), JSON.stringify(notes));
   assert.ok(r.rows(child.env.AWT_DIR, "ref").some((x) => x.kind === "node" && x.target === parent.env.AWT_DIR));
+});
+
+test("P4 the parent note and ref are the plugin's rows, not the subagent's", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_p"));
+  const child = await r.call("agent.open.before", openReq("agt_c"));
+  await r.call("agent.create.after", { agent: agentPayload("agt_c", { parentAgentId: "agt_p" }) });
+  for (const type of ["note", "ref"]) {
+    const rows = r.rows(child.env.AWT_DIR, type);
+    assert.ok(rows.length > 0, type);
+    assert.ok(rows.every((x) => x.by === "paseo-plugin"), type + " " + JSON.stringify(rows));
+  }
+  const ghost = mk({}, WS);
+  await ghost.call("agent.create.after", { agent: agentPayload("agt_c", { parentAgentId: "agt_ghost" }) });
+  const kid = ghost.nodes().find((x) => x.key === "paseo:agent/agt_c")!;
+  assert.ok(ghost.rows(ghost.root + "/" + kid.path, "note").every((x) => x.by === "paseo-plugin"));
 });
 
 test("P4 a subagent whose parent has no node lands under the task and a note names the missing parent", async () => {

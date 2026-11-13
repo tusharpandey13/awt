@@ -15,6 +15,7 @@ Companion to `SPEC.md`. It covers the node tree, the Paseo plugin and `migrate-p
 | File | Covers | Runs |
 |---|---|---|
 | `tests/test_tree.py` | Node tree: init, resolution, reads, status, doctor | always |
+| `tests/test_recall.py` | Active recall: `find --like`, related lines on `decide`/`ask`, `list --since`, the template and prompt pointers | always |
 | `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots | always |
 | `tests/test_docs.py` | Existing. Extended: every `awt` command shown in the docs and the tree-form `AGENTS.md` block uses real verbs and flags | always |
 | `tests/chaos.py` | Existing. New attacks in groups `tree`, `migrate`; the plugin attacks (C30-C40) are in `paseo-plugin/test/resilience.test.ts` | `--quick` in CI, full nightly |
@@ -96,6 +97,32 @@ Names are scenario ids.
 - T50 Two agents write to their own nodes in parallel (20 processes, 50 writes each): no row lost, no row crosses nodes, each node's log is valid JSON lines (I3).
 - T51 `AWT_BY` is stamped on every row written under it.
 
+## Active recall (`test_recall.py`)
+
+Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across nodes, Paseo plugin).
+
+- T-R1a `find --like` ranks a rare shared word above a common one; ties go to the newest row.
+- T-R1b Superseded decisions and `auto` states never match.
+- T-R1c Hits from a sibling workspace carry the right node prefix from an agent node and from a cwd outside the tree.
+- T-R1d `rule` decisions get the x1.5 boost.
+- T-R1e No hits: `no related records`, exit 0.
+- T-R1f `--like` with a TERM, or `--limit` without `--like`: exit 2.
+- T-R1g (chaos `tree-recall-2000`) A 2,000-node tree: `find --like` in 2 s or less and the 5-line cap holds; `decide` under 4.5 s.
+- T-R1h `--limit` 1 to 40 (others exit 2); each line is cut to 200 characters.
+- T-R1i `--up`/`--down` narrow the scope; answers, refs and ids match; paths and ids are words.
+- T-R1j Trailing `.`, `/`, `-`, `_` are not part of a word.
+- T-R2a `decide` prints at most 3 related lines by default and never the new row.
+- T-R2b `--related 0` and `AWT_RELATED=0` print only the id line.
+- T-R2c `--related 25` is exit 2; `AWT_RELATED=abc` warns on stderr and uses 3.
+- T-R2d `ask` shows the answer of an already answered question elsewhere.
+- T-R2e A corrupt events file in another node does not fail the write.
+- T-R2f A simulated exceeded budget (`AWT_RELATED_MS`): the write stands, the stop line prints.
+- T-R2g The 200-character cut of a `related:` line includes its prefix.
+- T-R3a The task `AGENTS.md` template has the `find --like` line.
+- T-R3b The plugin block is at most 700 characters and names `find --like`.
+- T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
+- T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
+
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
 
 Same style as today: seeded, one line per attack, a failure prints the seed and the commands. Quick mode picks small counts of each.
@@ -153,7 +180,7 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by the installed `@getpaseo/plugin` SDK (so `tsc` catches drift, P11; recordings from a real daemon come with tier 2), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
 
 - P1 `workspace.create.after`: workspace node exists with key and refs (working directory, project, workspace) and a `main` task; the project's display name labels the workspace (P13); replay adds nothing.
-- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars; no brief text enters the prompt.
+- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars, naming `find --like`; no brief text enters the prompt.
 - P3 `agent.open.before` for a workspace with no task: task `main` is created once, even for several simultaneous agents.
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node, the parent read from `parentAgentId` or the label `paseo.parent-agent-id`; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
@@ -165,6 +192,13 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P10 Background agents: not in this version (Paseo 0.15.4 does not report them); only `purpose: interactive` opens get a node, env or tool.
 - P11 `tsc --noEmit` over the plugin and its tests passes against the installed `@getpaseo/plugin` (a drift check). The harness mocks of `paseo` are typed against `PaseoApi`. Recorded hook payloads (fictional `parsekit` data) live in `paseo-plugin/test/payloads/`, one per registered hook; `payloads.test.ts` type-checks each against `PluginHookPayload` and feeds them through the hooks. Run by `npm test`.
 - P12 Every `resolved` URL in `package-lock.json` is on `registry.npmjs.org`.
+- P15 A turn that wrote a decision and a note appends one `awt.receipt` with matching counts and ids; failed, canceled and subagent turns get one too; at most 5 ids; a subagent's rows count under its parent.
+- P16 A turn that wrote nothing appends `empty: true`. `AWT_RECEIPT=changes` skips empty receipts and those whose only row is the auto state; `0` appends nothing; an unknown value shows receipts and logs one warning.
+- P17 The receipt follows the stand-in handoff and has `auto: true`; a handoff the agent wrote is not `auto`.
+- P18 An append that throws is logged and the turn is unaffected.
+- P19 `AWT_RELATED` in the daemon env reaches the agent env from `agent.open.before`; unset, it is absent.
+- P20 The renderer schema rejects an unknown version or bad data without throwing.
+- P21 A plugin instance that never saw `agent.open.before` for an agent whose node exists gets the auto handoff and a receipt on its next full turn; an agent with no node gets neither; a turn whose `turn.before` was missed gets nothing.
 - P13 The workspace label uses `projectDisplayName` from `projects.list`.
 
 Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: `paseo-plugin/test/fake/acp_agent.py`, which runs the shell command in a `RUN: <cmd>` prompt in the environment Paseo launched it with, as an agent would, and echoes anything else. Checked on Paseo 0.15.4: a scripted ACP provider works, and the daemon needs `pluginsEnabled: true` in its config. Run with `npm run test:daemon` in `paseo-plugin/` (E0, E1, E2, E4, E7, E8 and M11). The daemon config turns the relay and dictation off, and the tests strip `PASEO_*` from the environment, so nothing leaves the temp home. Not covered yet: spawning a subagent, because the fake agent has no way to start one.
@@ -177,6 +211,9 @@ Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scrip
 - E5 Archive the workspace: node `done` or `paused`; nothing deleted.
 - E6 Disable the plugin: agents still start and run; nothing is written.
 - E7 After a turn with no handoff the chat holds no extra prompt and the node has an `auto` state from the agent's last reply (P14 against a real daemon).
+- E9 (gated) Receipts render in the chat.
+- E10 (gated) Receipts are absent from the provider's input; if they are not, receipts default to off and the spec is revised.
+- E11 (gated) Compaction: the prompt line is what brings the brief back; `AgentSessionConfig` has no hooks field (checked at build time, see SPEC.md).
 - E8 A handoff recorded during the turn means no `auto` state.
 
 Not covered by the daemon test: E3, E5, E6. E5 is covered at hook level by P9; E6 only by C31 (awt failing), which leaves requests unchanged.

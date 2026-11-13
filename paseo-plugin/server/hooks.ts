@@ -9,6 +9,8 @@ import type { AwtConfig } from "./config.js";
 import { readConfig } from "./config.js";
 import { NUDGE, withBlock } from "./prompt.js";
 import { Tree, clean, cut } from "./tree.js";
+import { readReceipt } from "./receipt.js";
+import { RECEIPT_KIND, RECEIPT_VERSION } from "../shared/receipt.js";
 
 /** The text of the last assistant message in a timeline page, wherever the page keeps its items. */
 export function lastAssistantText(page: unknown): string | null {
@@ -117,6 +119,7 @@ async function within<T>(cfg: AwtConfig, signal: AbortSignal | undefined, log: L
 export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): () => void {
   const cfg = readConfig(env);
   const tree = new Tree(cfg, log);
+  if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, off, changes or on; showing receipts`);
   const turnStart = new Map<string, number>();
   /** Agents whose last open.before gave them an AWT_DIR. Only these are nudged. */
   const withDir = new Set<string>();
@@ -124,6 +127,13 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   const nudgedAt = new Map<string, number>();
   /** Parent of each agent seen in open.before, whose request carries labels (the later hooks' agent payload may not). */
   const parents = new Map<string, string>();
+  /** After a reload withDir is empty; an agent that already has a node is still tracked. */
+  const tracked = async (id: string): Promise<boolean> => {
+    if (withDir.has(id)) return true;
+    if (!(await tree.find(`paseo:agent/${id}`))) return false;
+    withDir.add(id);
+    return true;
+  };
   const parentOf = (a: { id: string; parentAgentId?: string | null; labels?: Readonly<Record<string, string>> | null }): string | null =>
     a.parentAgentId ?? parentFromLabels(a.labels) ?? parents.get(a.id) ?? null;
 
@@ -232,7 +242,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     return within(cfg, ctx.signal, log, "agent.open.before", request, async () => {
       const node = await agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider, labels: request.labels }, ctx);
       withDir.add(request.agentId);
-      return { ...request, env: { ...request.env, AWT_DIR: node, AWT_BY: request.agentId }, tools: [...request.tools.filter((t) => t.name !== "awt_resume"), awtResume] };
+      const env = { ...request.env, AWT_DIR: node, AWT_BY: request.agentId, ...(cfg.related ? { AWT_RELATED: cfg.related } : {}) };
+      return { ...request, env, tools: [...request.tools.filter((t) => t.name !== "awt_resume"), awtResume] };
     });
   }));
 
@@ -243,10 +254,10 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       if (parentId) {
         const parent = await tree.find(`paseo:agent/${parentId}`);
         if (!parent) {
-          await awt(cfg, node, ["note", `started by agent ${parentId}; it has no node, so this node is under the task`], agent.id);
+          await awt(cfg, node, ["note", `started by agent ${parentId}; it has no node, so this node is under the task`], "paseo-plugin");
         } else if (!node.startsWith(parent + "/")) {
-          await awt(cfg, node, ["note", `started by agent ${parentId}; its node is ${parent}`], agent.id);
-          await awt(cfg, node, ["ref", parent, "--title", "parent agent", "--kind", "node"], agent.id);
+          await awt(cfg, node, ["note", `started by agent ${parentId}; its node is ${parent}`], "paseo-plugin");
+          await awt(cfg, node, ["ref", parent, "--title", "parent agent", "--kind", "node"], "paseo-plugin");
         }
       }
     });
@@ -256,11 +267,11 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     turnStart.set(agent.id, Date.now());
   }));
 
-  add(server.addHook("agent.turn.after", async ({ agent, outcome }, ctx) => {
+  add(server.addHook("agent.turn.after", async ({ agent, outcome, turnId }, ctx) => {
+    const started = turnStart.get(agent.id);
+    turnStart.delete(agent.id);
     await safe(log, "agent.turn.after", undefined, async () => {
-      const started = turnStart.get(agent.id);
-      turnStart.delete(agent.id);
-      if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !withDir.has(agent.id)) return;
+      if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !(await tracked(agent.id))) return;
       if (!cfg.nudge && !cfg.autoHandoff) return;
       const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
       if (!r) return;
@@ -290,6 +301,14 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
         else nudgedAt.set(agent.id, before);
         throw error;
       }
+    });
+    // After the stand-in handoff, so the receipt counts it. Any outcome, subagents included; a failure here never touches the turn.
+    await safe(log, "agent.turn.after receipt", undefined, async () => {
+      if (cfg.receipt === "off" || started === undefined || !(await tracked(agent.id))) return;
+      const node = await tree.find(`paseo:agent/${agent.id}`);
+      const data = node ? await readReceipt(cfg, node, new Date(started), agent.id) : null;
+      if (!data || (cfg.receipt === "changes" && (data.empty || (data.auto && data.counts.state === 1 && Object.keys(data.counts).length === 1)))) return;
+      await ctx.paseo.agents.ref(agent.id).timeline.append({ type: "plugin", id: `${RECEIPT_KIND}.${turnId ?? started}`, kind: RECEIPT_KIND, version: RECEIPT_VERSION, data });
     });
   }));
 

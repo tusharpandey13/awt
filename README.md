@@ -78,7 +78,7 @@ cd tasks/retry-bug && awt init --kind agent --name chat-1
 awt list tree
 ```
 
-`resume` in a node shows its ancestors' goals and `rule` decisions, plus a one-line rollup of its children. `awt find --up TERM` and `awt find --down TERM` search ancestors or descendants, and `awt find --tree TERM` searches the whole tree under the nearest root. An agent can run anywhere with `AWT_DIR` set to its node. The full contract is in [SPEC.md](SPEC.md#node-tree).
+`resume` in a node shows its ancestors' goals and `rule` decisions, plus a one-line rollup of its children. `awt find --up TERM` and `awt find --down TERM` search ancestors or descendants, and `awt find --tree TERM` searches the whole tree under the nearest root. `awt find --like "a sentence"` ranks related decisions, answers and notes from every workspace, and `decide` and `ask` print up to three `related:` records after they write (`--related N` or `AWT_RELATED` changes the number, 0 turns it off). An agent can run anywhere with `AWT_DIR` set to its node. The full contract is in [SPEC.md](SPEC.md#node-tree).
 
 ## Paseo
 
@@ -86,8 +86,9 @@ If you use Paseo, the `awt` plugin builds and maintains the tree for you:
 
 - a workspace node per Paseo workspace, with a `main` task in each;
 - an agent node per agent chat, with subagents nested under their parent agent;
-- `AWT_DIR` in every agent's environment, plus an `awt_resume` tool;
+- `AWT_DIR` in every agent's environment, plus an `awt_resume` tool, and a short prompt block that points agents at `awt find --like` and tells them to call `awt_resume` again after compaction;
 - when an agent ends a turn without a handoff, its last reply is kept as a state in scope `auto` (no message in the chat, no extra model turn). An optional follow-up prompt is available with `AWT_NUDGE=1`, off by default;
+- after every turn, one muted line in the chat shows what is stored in awt (`awt · 1 decision d-... · handoff`, or `nothing stored this turn`). `AWT_RECEIPT=changes` hides the empty ones, `0` turns it off;
 - archived agents and workspaces marked done, or paused when work is still open.
 
 Put `awt` on the daemon's `PATH`, then (Paseo 0.15.4 or later):
