@@ -47,7 +47,7 @@ awt --dir $RB ref https://example.invalid/backoff --title "Backoff and jitter no
 N1=$(first awt --dir $PK/tasks/main note "CI retries flaky tests twice")
 Q1=$(first awt --dir $GW ask "Is the 30 s gateway timeout a hard limit?"); awt --dir $GW answer $Q1 "Yes, the gateway enforces it"
 awt --dir $GW state --now "Gateway timeout mapped" --next "Write the jitter soak test"                                     # S_MAIN (written after REF1)
-N_LONG=$(first awt --dir $GW note "$(printf 'zephyrine window %.0s' $(seq 1 25))")                                          # 425 chars
+N_LONG=$(first awt --dir $GW note "$(printf 'zephyrine window %.0s' $(seq 1 15))")                                          # 254 chars; note text is capped at 280
 awt --dir $A1 state --scope auto --now "[auto] exit=0 quillwort sweep done" --next -                                         # auto, must never surface
 awt --dir $B1 state --now "Checked quillwort fixture" --next -                                                               # main, may surface
 ```
@@ -71,7 +71,7 @@ Pre: F1 copy. Query `Qx="gateway backoff jitter"` (3 words, so a hit needs 2 sha
 
 | # | Step | Expected |
 |---|---|---|
-| 1 | `cd $T/repo/parsekit; AWT_DIR=$A1 $AWT find --like "$Qx"` | exit 0; exactly 3 lines, in this order: line 1 `^$D_RULE @$LL \[rule\]: Retry gateway calls with exponential backoff and full jitter \(why: Fixed backoff synchronised the clients and overloaded the gateway\)$`; line 2 contains ` @$GW` and `Gateway timeout mapped`; line 3 contains ` @$RB` and `Backoff and jitter notes`. All prefixes absolute (cwd outside the tree) |
+| 1 | `cd $T/repo/parsekit; AWT_DIR=$A1 $AWT find --like "$Qx"` | exit 0; exactly 3 lines, in this order: line 1 `^$D_RULE @$LL \[rule\]: Retry gateway calls with exponential backoff and full jitter \(why: Fixed backoff synchronised the clients and overloaded the gateway\)$`; line 2 contains ` @$GW` and `Gateway timeout mapped`; line 3 contains ` @$RB` and `Backoff and jitter notes`. All prefixes absolute (cwd outside the tree). Every hit line is cut to 200 chars, so with a long temp path compare to the expected text after the cut (first 199 chars plus `~`) |
 | 2 | `cd $T/elsewhere; $AWT --dir $A1 find --like "$Qx"` | stdout byte-identical to step 1 |
 | 3 | `cd $R; $AWT find --like "$Qx"` | same 3 lines with prefixes `workspaces/ledgerline`, `workspaces/ledgerline/tasks/gateway`, `workspaces/parsekit/tasks/retry-bug` |
 | 4 | `cd $RB; $AWT find --like "$Qx"` | `D_RULE` prefix is `../../../ledgerline`; the REF1 line has no ` @` segment (own node) |
@@ -120,7 +120,7 @@ Pre: F1 copy. `cd $T/repo/parsekit; export AWT_DIR=$A1`.
 |---|---|---|
 | 1 | `$AWT ask "Is the gateway timeout a hard limit for retries?"` | exit 0; exactly 3 lines: `^q-[0-9a-f]{8} asked$`; `^related: $Q1 @$GW: Is the 30 s gateway timeout a hard limit\? → Yes, the gateway enforces it$`; a line with ` @$GW` and `Gateway timeout mapped` |
 | 2 | `Q2=$(first $AWT --dir $B1 ask "Which jitter cap applies to the soak tenants?")`; then step-1 style `$AWT ask "What jitter cap applies to soak tenants?"` | first related line is `^related: $Q2 @$B1: Which jitter cap applies to the soak tenants\?$` (no `→`) |
-| 3 | `$AWT --dir $B1 answer $Q2 "Ten seconds"`; repeat the step-2 ask | the `Q2` related line ends with ` → Ten seconds` |
+| 3 | `$AWT --dir $B1 answer $Q2 "Ten seconds"`; repeat the step-2 ask | the `Q2` related line contains ` → Te` and equals the expected text after the 200-char cut (a long temp prefix cuts the answer) |
 
 Proves R2 (answered questions show their answer; unanswered ones show without `→`).
 
@@ -158,15 +158,15 @@ Pre: F1 copy. In `$RB`: `note "t0 marker"`; `T0=$($AWT --dir $RB list notes --js
 
 Proves R4 (`list --since`, `--down`, `node`, `scope`, inclusive boundary).
 
-### E-R7 Large tree timing, 2,000 nodes (R1, R2)
+### E-R7 Large tree timing, 2,000 descendants (R1, R2)
 
-Pre: tree L built with the real `awt` (run in background, output to a log; cache the tree as a tarball keyed by the `awt` sha): root + 10 workspaces `w00..w09` × 10 tasks `t00..t09` × 18 agents `a00..a17` (1,911 nodes) + 89 extra agents under `w00/tasks/t00` = 2,000 nodes. Every node gets `note "routine note K about the retry budget"`; every 10th agent a decision `"Keep the retry budget at K"`. Plant `D_DEEP` in `w09/tasks/t09/agents/a17`: `decide "Shard the vellichor index by tenant" --why "Hot tenants starve the vellichor queue" --tag rule`.
+Pre: tree L built with the real `awt` (run in background, output to a log; cache the tree as a tarball keyed by the `awt` sha): root + 10 workspaces `w00..w09` × 10 tasks `t00..t09` × 18 agents `a00..a17` (1,910 descendants) + 90 extra agents under `w00/tasks/t00` = 2,000 descendants of the root (the cap counts descendants, not the searched top: SPEC.md and `awt` agree on the 2,000 cap, and `awt` excludes the top). Every node gets `note "routine note K about the retry budget"`; every 10th agent a decision `"Keep the retry budget at K"`. Plant `D_DEEP` in `w09/tasks/t09/agents/a17`: `decide "Shard the vellichor index by tenant" --why "Hot tenants starve the vellichor queue" --tag rule`.
 
 | # | Step | Expected |
 |---|---|---|
 | 1 | One warm-up, then 3 runs: `cd $L; /usr/bin/time -p $AWT find --like "vellichor index shard"` | each `real` < 2.0 s; line 1 is `D_DEEP` with prefix `workspaces/w09/tasks/t09/agents/a17`; no limit line |
 | 2 | `AWT_DIR=$L/workspaces/w00/tasks/t00/agents/a00 /usr/bin/time -p $AWT decide "Shard the vellichor index by region" --why "Region skew"` | `real` < 2.5 s; a related line names `D_DEEP`; no `lookup stopped at 2 s` line |
-| 3 | Add a 2,001st node (an agent under `w00/tasks/t01`); repeat step 1 | exit 0; output ends with the walk-limit line in the same words `find --tree` uses |
+| 3 | Add a 2,001st descendant (an agent under `w00/tasks/t01`); repeat step 1 | exit 0; output ends with the walk-limit line in the same words `find --tree` uses |
 
 Proves R1 scope caps and the 2 s budget on real data (T-R1g/T-R2f cover the simulated cases).
 
@@ -386,6 +386,21 @@ Pre: D0 started with the plugin built from `a35fea8` (`git show` into `$T/oldplu
 | R5 compaction | E-R17 | T-R5a |
 | Distribution | E-R21 | none |
 | Upgrade / I8 | E-R20, E-R22 | I8 suite |
+
+## 5a. CLI-tier coverage and gaps
+
+All CLI journeys (E-R1 to E-R8, E-R20, E-R21) have a test in `tests/test_e2e_recall.py`. Run it with `python3 -m unittest discover -s tests -p test_e2e_recall.py`. Daemon-gated (E-R9 to E-R16, E-R22) and agentic (E-R17 to E-R19) journeys are outside this file.
+
+Gaps and partial coverage:
+
+| Journey | Why not covered | What would cover it |
+|---|---|---|
+| E-R7 (default run) | The 2,000-descendant tree takes minutes to build, so the test is skipped unless `AWT_E2E_SLOW=1` (it passes with it; a cached tree makes reruns ~17 s) | Run it in `chaos-full` CI with `AWT_E2E_SLOW=1` |
+| E-R8 b), f) | `chmod 000` has no effect for uid 0 | Run as a non-root user (the sub-checks run automatically then) |
+| E-R21 step 2 | Runs only if `python3.9` is on `PATH` | Add python3.9 to the CI image |
+| E-R1 step 8, E-R4 step 3 | Compared after the 200-char cut because temp paths are long; the "ends with `Ten seconds`" form is not asserted | None needed |
+| U3 (nothing outside `$T` changes) | Not checked directly; each test uses a private HOME and temp dir | A before/after snapshot of a sentinel HOME |
+| I3 for argparse type errors (finding) | `find --limit x` and `<cmd> --related x` exit 2 with `error:` but no `fix:` (generic argparse path, all verbs). Left unchanged | Wrap `ArgumentParser.error` to add a `fix:` line; then drop `expectedFailure` on `IntArgsNeedFix` |
 
 ## 6. Open questions (untestable or ambiguous in the feature spec)
 
