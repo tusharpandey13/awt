@@ -1981,8 +1981,13 @@ def cmd_save(a):
 
 
 # ---------- main ----------
+class Parser(argparse.ArgumentParser):
+    def error(self, message):  # usage errors keep exit 2 and gain a fix: line (I3)
+        die("%s: %s" % (self.prog, message), "%s --help" % self.prog, 2)
+
+
 def build():
-    p = argparse.ArgumentParser(prog="awt", add_help=False)
+    p = Parser(prog="awt", add_help=False)
     sp = p.add_subparsers(dest="verb")
 
     def V(parent, name, pos=(), opt=()):
