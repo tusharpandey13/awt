@@ -29,10 +29,10 @@ REQ = {
     "ref": ["target", "title", "kind", "access"], "capture": ["path", "from", "title", "sha"],
     "doc": ["path", "action", "by_doc"], "effect": ["id", "step"], "node": ["kind", "name"],
 }
-KINDS = ("root", "workspace", "task", "agent")
-LEGAL = {"root": ("workspace",), "workspace": ("task",), "task": ("task", "agent"), "agent": ("agent",)}
-PLURAL = {"workspace": "workspaces", "task": "tasks", "agent": "agents"}
-NODE_DIRS = {"root": (), "workspace": ("context", "docs", "misc"), "task": ("context", "docs", "outbox", "misc", "scratch"), "agent": ("scratch",)}
+KINDS = ("root", "project", "workspace", "task", "agent")
+LEGAL = {"root": ("project", "workspace"), "project": ("workspace",), "workspace": ("task",), "task": ("task", "agent"), "agent": ("agent",)}
+PLURAL = {"project": "projects", "workspace": "workspaces", "task": "tasks", "agent": "agents"}
+NODE_DIRS = {"root": (), "project": ("context", "docs", "misc"), "workspace": ("context", "docs", "misc"), "task": ("context", "docs", "outbox", "misc", "scratch"), "agent": ("scratch",)}
 ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
         "effect.step": ("planned", "begun", "claimed", "sent", "unknown", "dropped")}
 LIMIT = "tree exceeds depth %d / %d nodes; deeper nodes are not covered" % (K["depth"], K["nodes"])
@@ -84,9 +84,10 @@ TREE_BLOCK = (AGENTS_BLOCK.replace("./awt", "awt")
               .replace("write output to `docs/<brief>.out.md`", "write the result to `$AWT_DIR/out.md`"))
 TREE_README = '''# {goal}
 
-Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `workspaces/<name>/tasks/<name>/agents/<name>/`.
+Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `projects/<name>/workspaces/<name>/tasks/<name>/agents/<name>/` (a workspace may also sit directly under the root, in `workspaces/`).
 
 - `awt list tree`: everything below here
+- `awt init --kind project --name NAME`: add a project (optional); from inside it, `--kind workspace --name NAME`
 - `awt init --kind workspace --name NAME`: add a workspace; from inside it, `--kind task --name NAME --goal T --done T`
 - Agents run with `AWT_DIR` set to their own node
 '''
@@ -220,7 +221,7 @@ If `./relay` exists and the work splits into parts, do not run them all in one s
 
 USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
-  init --kind root|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
+  init --kind root|project|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
   state --now T --next T      note T                   decide C --why T         ask T
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
@@ -1054,7 +1055,7 @@ def init_child(a):
     if kind == "task" and not a.goal:
         die("a task needs --goal and --done", "give both")
     goal = a.goal or a.name
-    done = a.done or ("ongoing" if kind == "workspace" else "agent work recorded")
+    done = a.done or ("ongoing" if kind in ("project", "workspace") else "agent work recorded")
     check("node", dict(kind=kind, name=a.name, key=a.key, by=BY))
     check("task", dict(goal=goal, done_means=done, by=BY))
     base = P(PLURAL[kind])
@@ -1110,7 +1111,7 @@ def cmd_init(a):
     if bool(a.goal) != bool(a.done):
         die("--goal and --done go together", "give both", 2)
     if (a.name or a.key) and not a.kind:
-        die("--name and --key need --kind", "give --kind root|workspace|task|agent, or drop them", 2)
+        die("--name and --key need --kind", "give --kind root|project|workspace|task|agent, or drop them", 2)
     tree = a.kind == "root"
     ni = node_info(ROOT)
     if not ni["legacy"] and ni["kind"] != a.kind:
@@ -1628,7 +1629,7 @@ def cmd_status(a):
         for p, _ in ds:
             d, i = load_at(p), node_info(p)
             where = rel(p)
-            if i["kind"] in ("workspace", "task") and d["status"] == "active":
+            if i["kind"] in ("project", "workspace", "task") and d["status"] == "active":
                 bl.append("%s %s is active (%s)" % (i["kind"], i["name"], where))
             bl += ["question %s open in %s" % (q["id"], where) for q in d["open_q"]]
             bl += ["effect %s is %s in %s" % (e["id"], e["state"], where) for e in attention(d)]
@@ -1777,6 +1778,7 @@ def tree_problems(root):
     keys = {}
     for node in nodes:
         pk, key = node_info(node)["kind"], node_info(node)["key"]
+        has_projects = pk == "root" and any(node_info(c)["kind"] == "project" for c in children(node))
         if key:
             if key in keys:
                 probs.append(("fail", "duplicate key %s: %s and %s" % (key, os.path.relpath(keys[key], root), os.path.relpath(node, root))))
@@ -1808,6 +1810,8 @@ def tree_problems(root):
                         probs.append(("warn", "%s: a %s sits in %s/, which does not match its node row" % (where, i["kind"], plural)))
                     if i["kind"] not in LEGAL.get(pk, ()):
                         probs.append(("fail", "%s: a %s does not belong in a %s" % (where, i["kind"], pk)))
+                    elif pk == "root" and i["kind"] == "workspace" and has_projects:
+                        probs.append(("warn", "%s: a workspace directly under the root is the legacy placement; run migrate-paseo, or move it under a project" % where))
                 else:
                     probs.append(("warn", "%s is not a node; reserved directories hold nodes only" % where))
         seen = 0
@@ -1827,7 +1831,7 @@ def tree_problems(root):
                 break
         if load_at(node)["status"] == "done":
             for p in children(node):
-                if node_info(p)["kind"] in ("workspace", "task") and load_at(p)["status"] == "active":
+                if node_info(p)["kind"] in ("project", "workspace", "task") and load_at(p)["status"] == "active":
                     probs.append(("warn", "%s is done but %s is still active" % (os.path.relpath(node, root) if node != root else ".", os.path.relpath(p, root))))
     return probs
 

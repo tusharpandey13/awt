@@ -3,7 +3,7 @@ import os, sys
 sys.dont_write_bytecode = True
 if sys.path and sys.path[0] == os.path.dirname(os.path.abspath(__file__)):
     del sys.path[0]
-import argparse, fcntl, hashlib, json, os, re, runpy, subprocess
+import argparse, errno, fcntl, hashlib, json, os, re, runpy, subprocess
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 AWT = os.path.join(HERE, "awt")
@@ -92,7 +92,7 @@ def from_home(home, report):
 
     def txt(v):
         return v if isinstance(v, str) else None
-    projects = [dict(id=r.get("projectId"), name=txt(r.get("customName")) or txt(r.get("displayName")), path=r.get("rootPath")) if isinstance(r, dict) else r
+    projects = [dict(id=r.get("projectId"), name=txt(r.get("customName")) or txt(r.get("displayName")), path=r.get("rootPath"), archived=bool(r.get("archivedAt"))) if isinstance(r, dict) else r
                 for r in listing("projects.json", False)]
     workspaces = [dict(id=r.get("workspaceId"), projectId=txt(r.get("projectId")), name=txt(r.get("displayName")) or txt(r.get("title")) or txt(r.get("branch")),
                        cwd=r.get("cwd"), archived=bool(r.get("archivedAt")), background=bool(r.get("background"))) if isinstance(r, dict) else r
@@ -149,6 +149,8 @@ def normalize(snap, report):
 def plan(snap, report):
     S_ = normalize(snap, report)
     pname = {p["id"]: field(report, "project " + p["id"], "name", p.get("name"), FIELDCAP) or p["id"] for p in S_["projects"]}
+    projs = {p["id"]: dict(id=p["id"], name=pname[p["id"]], archived=bool(p.get("archived")),
+                           path=field(report, "project " + p["id"], "path", os.path.normpath(clean(p.get("path"))) if clean(p.get("path")) else "", CWDCAP)) for p in S_["projects"]}
     wss = {}
     for w in sorted(S_["workspaces"], key=lambda w: w["id"]):
         what = "workspace " + w["id"]
@@ -225,7 +227,7 @@ def plan(snap, report):
         order.append(i)
     for i in sorted(ags):
         visit(i)
-    return wss, ags, order
+    return wss, ags, order, projs
 
 
 # ---------- applying ----------
@@ -290,29 +292,132 @@ def node_status(node):
     return LIB["load_at"](node)["status"]
 
 
-def archive(node, report, label):
-    """Paseo archived it: move an active node to done. awt owns the status after import, so nothing else is ever set."""
+def archive(node, report, label, paused=False):
+    """Paseo archived it: move an active node to done (a project with open work below goes to paused instead).
+    awt owns the status after import, so nothing else is ever set."""
     if node_status(node) != "active":
         return
     r = awt(node, "status", "done", check=False)
     if r.returncode:
-        report["notes"].append("%s could not be marked done: %s" % (label, r.stderr.strip().splitlines()[0][:120] if r.stderr.strip() else "refused"))
+        why = r.stderr.strip().splitlines()[0][:120] if r.stderr.strip() else "refused"
+        if paused and awt(node, "status", "paused", check=False).returncode == 0:
+            report["notes"].append("%s is paused, not done: %s" % (label, why))
+        else:
+            report["notes"].append("%s could not be marked done: %s" % (label, why))
 
 
-def apply(root, wss, ags, order, report, dry):
+UNASSIGNED = "unassigned"
+PKEY = "paseo:project/"
+
+
+def pid_of(w):
+    """The Paseo project id a planned workspace belongs to, or None for the unassigned project."""
+    pid = None if w.get("unassigned") else w.get("projectId")
+    return pid if isinstance(pid, str) and pid and pid != UNASSIGNED else None
+
+
+def project_node(root, pid, projs, report, pnode, dry):
+    """Find or create the project node for a Paseo project id (None: unassigned). Memoised per run."""
+    if pid in pnode:
+        return pnode[pid]
+    pr = projs.get(pid) or {}
+    name = pr.get("name") or pid or UNASSIGNED
+    key = PKEY + (pid or UNASSIGNED)
+    if dry:
+        print("project %s key=%s" % (S(cut(name, NAMECAP)), S(key)))
+        pnode[pid] = None
+        return None
+    p = make(root, "project", node_name(name, "project", report["redacted_kinds"]), key, report, goal=cut(redact(name, report["redacted_kinds"]), GOALCAP), done="ongoing")
+    have = have_refs(p)
+    if pr.get("path") and "[REDACTED:" not in pr["path"]:
+        ensure_ref(p, pr["path"], "root path", no_access=not os.path.exists(pr["path"]), have=have)
+    if pid:
+        ensure_ref(p, key, name, have=have)
+    pnode[pid] = p
+    return p
+
+
+def move_under(node, project, report):
+    """One rename moves a workspace node and everything below it. Atomic: a kill leaves the node in the old place or the new one."""
+    dest_dir = os.path.join(project, "workspaces")
+    if os.path.islink(dest_dir):
+        raise Fail("%s is a symlink" % os.path.relpath(dest_dir, project))
+    os.makedirs(dest_dir, exist_ok=True)
+    base, n = os.path.basename(node), 1
+    while True:
+        dest = os.path.join(dest_dir, base if n == 1 else "%s-%d" % (base, n))
+        if os.path.lexists(dest):  # rename would replace an empty directory; never replace anything
+            n += 1
+            continue
+        try:
+            os.rename(node, dest)
+        except OSError as x:
+            if x.errno in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR):
+                n += 1
+                continue
+            raise Fail("cannot move a workspace node: %s" % x.strerror)
+        report["moved"] += 1
+        INDEX[node_info_key(dest)] = dest
+        return dest
+
+
+def node_info_key(path):
+    return LIB["node_info"](path)["key"]
+
+
+def move_legacy(root, wss, projs, report, pnode, dry):
+    """Workspaces still directly under the root (the pre-project layout) move under their project, one rename each.
+    The project is the workspace's own `ref paseo:project/<id>`, else workspaces.json, else unassigned."""
+    kind_of, key_of = (lambda c: LIB["node_info"](c)["kind"]), node_info_key
+    for c in sorted(LIB["children"](root)):
+        k = key_of(c)
+        if kind_of(c) != "workspace" or not k or not (k.startswith("paseo:workspace/") or k.startswith("paseo:unassigned/")):
+            continue
+        pid = None
+        if not k.startswith("paseo:unassigned/"):
+            refs = sorted(t[len(PKEY):] for t in have_refs(c) if t.startswith(PKEY))
+            wid = k[len("paseo:workspace/"):]
+            pid = refs[0] if refs else pid_of(wss.get(wid, {}))
+            pid = pid if pid != UNASSIGNED else None
+        try:
+            project = project_node(root, pid, projs, report, pnode, dry)
+            if dry:
+                print("move %s under project key=%s" % (S(os.path.relpath(c, root)), S(PKEY + (pid or UNASSIGNED))))
+            else:
+                move_under(c, project, report)
+        except Fail as x:
+            report["failed"].append(("workspace", k, str(x)))
+
+
+def apply(root, wss, ags, order, projs, report, dry):
     hits = report["redacted_kinds"]
     paths = {}
     wnode, tnode = {}, {}
+    pnode = {}
+    have_root = os.path.isdir(os.path.join(root, ".awt"))
+    if dry and have_root:
+        LIB["ROOT"] = root
+        scan(root)
+    for pid in sorted(projs):  # every Paseo project gets a node, even one with no workspace
+        try:
+            project_node(root, pid, projs, report, pnode, dry)
+        except Fail as x:
+            report["failed"].append(("project", pid, str(x)))
+    if have_root or not dry:
+        move_legacy(root, wss, projs, report, pnode, dry)
+    if not dry:
+        scan(root)  # the moves changed every path below them
     for wid in sorted(wss):
         w = wss[wid]
         key = wid if w.get("unassigned") else "paseo:workspace/" + wid
         label = "unassigned--%s" % w["project"] if w.get("unassigned") else "%s--%s" % (w["project"], w["name"])
         if dry:
-            print("workspace %s key=%s" % (S(cut(label, NAMECAP)), S(key)))
+            print("workspace %s key=%s project=%s" % (S(cut(label, NAMECAP)), S(key), S(PKEY + (pid_of(w) or UNASSIGNED))))
             wnode[wid] = tnode[wid] = None
             continue
         try:
-            p = make(root, "workspace", node_name(label, "workspace", hits), key, report, goal=cut(redact(label, hits), GOALCAP), done="ongoing")
+            parent = project_node(root, pid_of(w), projs, report, pnode, dry)
+            p = make(parent, "workspace", node_name(label, "workspace", hits), key, report, goal=cut(redact(label, hits), GOALCAP), done="ongoing")
             have = have_refs(p)
             if w["cwd"] and "[REDACTED:" not in w["cwd"]:
                 ensure_ref(p, w["cwd"], "working directory", no_access=not os.path.exists(w["cwd"]), have=have)
@@ -351,13 +456,17 @@ def apply(root, wss, ags, order, report, dry):
             if w.get("archived") and wnode.get(wid):
                 archive(tnode[wid], report, "task of workspace " + wid)  # awt refuses done on a node with an active child
                 archive(wnode[wid], report, "workspace " + wid)
+        for pid, p in pnode.items():  # after the workspaces: awt refuses done on a project with an active workspace
+            if p and (projs.get(pid) or {}).get("archived"):
+                archive(p, report, "project " + pid, paused=True)
 
 
 def write_report(root, report, src):
     c, f = report["created"], report["found"]
     lines = ["# Paseo migration", "", "Source: %s" % S(src), "",
              "Created: %d workspaces, %d tasks, %d agents" % (c["workspace"], c["task"], c["agent"]),
-             "Already present: %d workspaces, %d tasks, %d agents" % (f["workspace"], f["task"], f["agent"]), ""]
+             "Already present: %d workspaces, %d tasks, %d agents" % (f["workspace"], f["task"], f["agent"]),
+             "Projects: %d created, %d already present; %d workspaces moved under a project" % (c["project"], f["project"], report["moved"]), ""]
     for title, key, fmt in (("Skipped", "skipped", lambda x: "- `%s %s`: %s" % x),
                             ("Ambiguous or unmatched workspace (placed under an unassigned workspace)", "ambiguous", lambda x: "- `%s`: %s" % x),
                             ("Orphans (attached to the task)", "orphans", lambda x: "- `%s`: %s" % x),
@@ -378,23 +487,23 @@ def main():
     ap.add_argument("--from", dest="src")
     ap.add_argument("--home")
     a = ap.parse_args()
-    kinds = ("workspace", "task", "agent")
+    kinds = ("project", "workspace", "task", "agent")
     report = dict(skipped=[], ambiguous=[], orphans=[], redacted=[], notes=[], failed=[], redacted_kinds=set(),
-                  created=dict.fromkeys(kinds, 0), found=dict.fromkeys(kinds, 0))
+                  created=dict.fromkeys(kinds, 0), found=dict.fromkeys(kinds, 0), moved=0)
     try:
         if a.src:
             with open(a.src, encoding="utf-8") as g:
                 snap = json.load(g)
         else:
             snap = from_home(a.home, report)
-        wss, ags, order = plan(snap, report)
+        wss, ags, order, projs = plan(snap, report)
     except (OSError, ValueError, Fail, RecursionError) as x:
         print("error: cannot read the Paseo data: %s" % S(x), file=sys.stderr)
         print("fix: pass --from SNAPSHOT.json, or --home with a Paseo data directory (default ~/.paseo)", file=sys.stderr)
         return 1
     root = os.path.realpath(os.path.expanduser(a.root))
     if a.dry_run:
-        apply(root, wss, ags, order, report, True)
+        apply(root, wss, ags, order, projs, report, True)
         for s in report["skipped"] + report["ambiguous"] + report["orphans"]:
             print("note:", *(S(x) for x in s))
         return 0
@@ -418,13 +527,13 @@ def main():
     try:
         LIB["ROOT"] = root
         scan(root)
-        apply(root, wss, ags, order, report, False)
+        apply(root, wss, ags, order, projs, report, False)
     finally:
         write_report(root, report, a.src or a.home or "~/.paseo")
         os.close(lock)
     c, f = report["created"], report["found"]
-    print("created %d workspaces, %d agents (already present: %d, %d); %d skipped, %d ambiguous, %d orphans, %d failed" % (
-        c["workspace"], c["agent"], f["workspace"], f["agent"], len(report["skipped"]), len(report["ambiguous"]), len(report["orphans"]), len(report["failed"])))
+    print("created %d workspaces, %d agents (already present: %d, %d); %d projects created, %d workspaces moved; %d skipped, %d ambiguous, %d orphans, %d failed" % (
+        c["workspace"], c["agent"], f["workspace"], f["agent"], c["project"], report["moved"], len(report["skipped"]), len(report["ambiguous"]), len(report["orphans"]), len(report["failed"])))
     if report["failed"]:
         for x in report["failed"][:10]:
             print("failed: %s %s: %s" % tuple(S(y) for y in x), file=sys.stderr)

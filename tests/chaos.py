@@ -1421,7 +1421,7 @@ def tree_root(c):
 def tree_nodes(base):
     """Walk only the reserved child directories, the way awt defines a tree. Returns (nodes, leftovers)."""
     nodes, left = [], []
-    for plural in ("workspaces", "tasks", "agents"):
+    for plural in ("projects", "workspaces", "tasks", "agents"):
         d = os.path.join(base, plural)
         if not os.path.isdir(d):
             continue
@@ -1989,6 +1989,62 @@ def a_mig_kill(c):
         c.fail("run after kills failed: " + r.err[:120])
     if mig_hash(a_root) != mig_hash(b_root):
         c.fail("killed-and-resumed tree differs from an uninterrupted run")
+    tree_audit(c, b_root)
+
+
+@attack("migrate-kill-mid-move")
+def a_mig_kill_move(c):
+    """A pre-project tree (workspaces directly under the root) migrated while the process is killed over and over:
+    every workspace ends up under its project exactly once, nothing lost or duplicated, and the result equals an uninterrupted run."""
+    n = 8 if c.quick else 16
+    snap = dict(projects=[dict(id="prj_%d" % i, name="proj%d" % i, path="/tmp/p%d" % i) for i in range(3)],
+                workspaces=[dict(id="wks_%d" % i, projectId="prj_%d" % (i % 3) if i % 5 else None, project="proj%d" % (i % 3), name="w%d" % i, cwd="/tmp/c%d" % i, archived=False) for i in range(n)],
+                agents=[])
+    p = c.path("snap.json")
+    with open(p, "w") as g:
+        json.dump(snap, g)
+    legacy = c.path("legacy", "root")
+    os.makedirs(legacy)
+    tw(c, legacy, "init", "--kind", "root")
+    for w in snap["workspaces"]:
+        node = tnode(c, legacy, "workspace", "%s--%s" % (w["project"], w["name"]), key="paseo:workspace/" + w["id"])
+        if node and w["projectId"] and int(w["id"][4:]) % 2:
+            tw(c, node, "ref", "paseo:project/" + w["projectId"], "--title", "proj")  # half carry the ref, half rely on workspaces.json
+        if node:
+            tnode(c, node, "task", "imported", key="paseo:task/%s/imported" % w["id"])
+    a_root, b_root = c.path("a", "root"), c.path("b", "root")
+    shutil.copytree(legacy, a_root, symlinks=True)
+    shutil.copytree(legacy, b_root, symlinks=True)
+    run = lambda root: c.raw([sys.executable, MIG, root, "--from", p], cwd=c.base, args=None, allow=(0, 1), timeout=300)
+    if run(a_root).rc != 0:
+        c.fail("clean run failed")
+        return
+    for i in range(8 if c.quick else 24):
+        pr = subprocess.Popen([sys.executable, MIG, b_root, "--from", p], env=c.env(), cwd=c.base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(c.rng.random() * (0.8 if c.quick else 1.6))
+        try:
+            os.killpg(pr.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        pr.wait()
+        rows = [x for x in nodes_of(c, b_root) if x["key"] and x["key"].startswith("paseo:workspace/")]
+        keys = [x["key"] for x in rows]
+        if len(keys) != len(set(keys)) or len(keys) != n:
+            c.fail("after a kill, %d workspace keys (%d distinct) for %d workspaces" % (len(keys), len(set(keys)), n))
+            break
+    r = run(b_root)
+    if r.rc != 0:
+        c.fail("run after kills failed: " + r.err[:120])
+    if mig_hash(a_root) != mig_hash(b_root):
+        c.fail("killed-and-resumed tree differs from an uninterrupted run")
+    for root in (a_root, b_root):
+        left = [x["path"] for x in nodes_of(c, root) if x["kind"] == "workspace" and x["path"].startswith("workspaces/")]
+        if left:
+            c.fail("workspaces left in the legacy place: %s" % left[:3])
+    again = mig_hash(b_root)
+    run(b_root)
+    if mig_hash(b_root) != again:
+        c.fail("a rerun after the migration changed the tree")
     tree_audit(c, b_root)
 
 
