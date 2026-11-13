@@ -127,6 +127,13 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   const nudgedAt = new Map<string, number>();
   /** Parent of each agent seen in open.before, whose request carries labels (the later hooks' agent payload may not). */
   const parents = new Map<string, string>();
+  /** After a reload withDir is empty; an agent that already has a node is still tracked. */
+  const tracked = async (id: string): Promise<boolean> => {
+    if (withDir.has(id)) return true;
+    if (!(await tree.find(`paseo:agent/${id}`))) return false;
+    withDir.add(id);
+    return true;
+  };
   const parentOf = (a: { id: string; parentAgentId?: string | null; labels?: Readonly<Record<string, string>> | null }): string | null =>
     a.parentAgentId ?? parentFromLabels(a.labels) ?? parents.get(a.id) ?? null;
 
@@ -264,7 +271,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     const started = turnStart.get(agent.id);
     turnStart.delete(agent.id);
     await safe(log, "agent.turn.after", undefined, async () => {
-      if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !withDir.has(agent.id)) return;
+      if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !(await tracked(agent.id))) return;
       if (!cfg.nudge && !cfg.autoHandoff) return;
       const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
       if (!r) return;
@@ -297,7 +304,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     });
     // After the stand-in handoff, so the receipt counts it. Any outcome, subagents included; a failure here never touches the turn.
     await safe(log, "agent.turn.after receipt", undefined, async () => {
-      if (cfg.receipt === "off" || started === undefined || !withDir.has(agent.id)) return;
+      if (cfg.receipt === "off" || started === undefined || !(await tracked(agent.id))) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);
       const data = node ? await readReceipt(cfg, node, new Date(started), agent.id) : null;
       if (!data || (cfg.receipt === "changes" && (data.empty || (data.auto && data.counts.state === 1 && Object.keys(data.counts).length === 1)))) return;

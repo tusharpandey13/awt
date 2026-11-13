@@ -165,3 +165,27 @@ test("P20 the renderer schema rejects an unknown version or bad data without thr
   assert.equal(receiptLine(good.data), "awt · 1 decision d-9e01b2c3");
   assert.equal(receiptLine({ ...good.data, counts: { decision: 2, note: 1, state: 1 }, ids: ["d-1", "d-2", "n-1"], auto: true }), "awt · 2 decisions · 1 note · handoff [auto]");
 });
+
+test("P21 after a plugin restart, an agent whose node exists gets the auto handoff and a receipt; one with no node gets neither", async () => {
+  const r = mk({}, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.restart(); // new process: no agent.open.before seen for agt_1
+  r.said.set("agt_1", ["Fixed the tokenizer; tests green."]);
+  r.said.set("agt_9", ["Nothing tracked here."]);
+  await begin(r, "agt_1", "t1");
+  await end(r, "agt_1", "t1");
+  const st = r.rows(open.env.AWT_DIR, "state");
+  assert.equal(st.length, 1);
+  assert.equal(st[0].scope, "auto");
+  assert.equal(r.appended.filter((a) => a.id === "agt_1").length, 1);
+  // no node for agt_9, never opened: neither
+  await begin(r, "agt_9", "t1");
+  await end(r, "agt_9", "t1");
+  assert.equal(r.appended.filter((a) => a.id === "agt_9").length, 0);
+  assert.equal(r.nodes().some((n) => n.key === "paseo:agent/agt_9"), false);
+  // a turn whose turn.before was missed gets nothing, the next turn works
+  r.restart();
+  const before = r.appended.length;
+  await end(r, "agt_1", "t2");
+  assert.equal(r.appended.length, before);
+});
