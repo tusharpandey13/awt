@@ -30,8 +30,7 @@ Unit fields:
   tools         default "Bash,Read,Write,Edit,Glob,Grep"
   settings      file or JSON passed to claude --settings; optional
 
-Editing a unit reruns it. Workers cannot approve `./awt effect apply`: non-interactive
-sessions are denied by the task's ask rule, so sending stays with a person.
+Editing a unit reruns it. Workers plan and mark effects, and send only when their unit says so.
 Worker logs: .awt/runs/relay-<id>.<attempt>.jsonl
 Exit: 0 all passed, 1 a unit failed or is blocked, 2 bad plan or usage."""
 
@@ -48,7 +47,7 @@ Where the task stands:
 Rules:
 - Do only this unit. Read only the files you need.
 - Write your full result to docs/{id}.out.md. Make its first line `verdict: ` and a short outcome.
-- Record real decisions with ./awt decide. Put drafts for anything leaving this machine in outbox/ and run ./awt effect plan. Never send anything.
+- Record real decisions with ./awt decide. Put drafts for anything leaving this machine in outbox/. Send only if this unit says to; otherwise leave it for a person.
 - If a person must decide something, run ./awt ask and finish what you can.
 - Before stopping: ./awt state --scope {id} --now "..." --next "...".
 - Your final message is one line. Everything else belongs in files."""

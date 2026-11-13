@@ -216,7 +216,7 @@ class Status(test_tree.TreeBase):
         self.assertIn("sub-1", r.stderr)
         qid = self.rows_of(sub, "question")[0]["id"]
         self.ok("answer", qid, "me", root=sub)
-        self.ok("effect", "plan", "--target", "slack:#x", "--run", "true", root=agent)
+        self.ok("effect", "plan", "--target", "slack:#x", "--how", "true", root=agent)
         r = self.refuses("status", "done", root=task)
         self.assertIn("chat-1", r.stderr)
         eid = self.rows_of(agent, "effect")[0]["id"]
@@ -332,8 +332,8 @@ class Review(test_tree.TreeBase):
         self.ok("note", "n2", root=n)
         self.ok("state", "--now", "x", "--next", "y", root=n)
         self.ok("state", "--now", "x2", "--next", "y2", "--scope", "side", root=n)
-        self.ok("effect", "plan", "--target", "slack:#a", "--run", "true", root=n)
-        self.ok("effect", "plan", "--target", "slack:#b", "--run", "true", "--why", "w", root=n)
+        self.ok("effect", "plan", "--target", "slack:#a", "--how", "true", root=n)
+        self.ok("effect", "plan", "--target", "slack:#b", "--how", "true", "--why", "w", root=n)
         self.ok("ref", "https://example.test/a", "--title", "t", root=n)
         self.ok("ref", "https://example.test/b", "--title", "t", "--why", "w", root=n)
         keys = {}
@@ -347,7 +347,7 @@ class Review(test_tree.TreeBase):
         self.assertEqual(keys["notes"], {"ts", "by", "id", "text"})
         self.assertEqual(keys["state"], {"ts", "by", "scope", "now", "next"})
         self.assertEqual(keys["refs"], {"ts", "by", "target", "title", "kind", "why", "access", "path", "branch", "key"})
-        self.assertEqual(keys["effects"], {"ts", "by", "id", "target", "why", "body", "run", "state", "attempt"})
+        self.assertEqual(keys["effects"], {"ts", "by", "id", "target", "why", "body", "how", "state", "attempt"})
         for sect in ("context", "docs", "outbox", "misc"):
             for r in json.loads(self.ok("list", sect, "--json", root=n).stdout):
                 self.assertEqual(set(r), {"path", "title"})
@@ -427,7 +427,7 @@ class ReadLayer(test_tree.TreeBase):
         self.ok("ask", "task level question?", root=task)
         self.ok("decide", "task plain decision", "--why", "w", root=task)
         self.ok("decide", "task rule decision", "--why", "w", "--tag", "rule", root=task)
-        self.ok("effect", "plan", "--target", "slack:#t", "--run", "true", root=task)
+        self.ok("effect", "plan", "--target", "slack:#t", "--how", "true", root=task)
         out = self.ok("resume", root=agent).stdout
         self.assertIn("## Task", out)
         sect = out.split("## Task")[1].split("\n## ")[0]
@@ -452,7 +452,7 @@ class ReadLayer(test_tree.TreeBase):
             self.ok("state", "--now", "n" * 690, "--next", "x", "--scope", "s%d" % i, root=task)
             self.ok("ask", "q" * 390, root=task)
             self.ok("decide", "c" * 290, "--why", "w", root=task)
-            self.ok("effect", "plan", "--target", "slack:#t%d" % i, "--run", "true", root=task)
+            self.ok("effect", "plan", "--target", "slack:#t%d" % i, "--how", "true", root=task)
         for i in range(12):
             self.ok("decide", "ws rule %d " % i + "r" * 280, "--why", "w", "--tag", "rule", root=ws)
         self.ok("state", "--now", "n" * 690, "--next", "x" * 290, root=agent)
