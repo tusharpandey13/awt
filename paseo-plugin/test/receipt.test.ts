@@ -165,3 +165,8 @@ test("P20 the renderer schema rejects an unknown version or bad data without thr
   assert.equal(receiptLine(good.data), "awt · 1 decision d-9e01b2c3");
   assert.equal(receiptLine({ ...good.data, counts: { decision: 2, note: 1, state: 1 }, ids: ["d-1", "d-2", "n-1"], auto: true }), "awt · 2 decisions · 1 note · handoff [auto]");
 });
+
+test("receipt kind is a valid Paseo renderer kind", () => {
+  // Paseo's client rejects any renderer kind outside this pattern and then loads none of the plugin's client code.
+  assert.match(RECEIPT_KIND, /^[a-z][a-z0-9-]*$/);
+});

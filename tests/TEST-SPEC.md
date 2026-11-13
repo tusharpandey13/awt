@@ -192,7 +192,7 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P10 Background agents: not in this version (Paseo 0.15.4 does not report them); only `purpose: interactive` opens get a node, env or tool.
 - P11 `tsc --noEmit` over the plugin and its tests passes against the installed `@getpaseo/plugin` (a drift check). The harness mocks of `paseo` are typed against `PaseoApi`. Recorded hook payloads (fictional `parsekit` data) live in `paseo-plugin/test/payloads/`, one per registered hook; `payloads.test.ts` type-checks each against `PluginHookPayload` and feeds them through the hooks. Run by `npm test`.
 - P12 Every `resolved` URL in `package-lock.json` is on `registry.npmjs.org`.
-- P15 A turn that wrote a decision and a note appends one `awt.receipt` with matching counts and ids; failed, canceled and subagent turns get one too; at most 5 ids; a subagent's rows count under its parent.
+- P15 A turn that wrote a decision and a note appends one `awt-receipt` with matching counts and ids; failed, canceled and subagent turns get one too; at most 5 ids; a subagent's rows count under its parent.
 - P16 A turn that wrote nothing appends `empty: true`. `AWT_RECEIPT=changes` skips empty receipts and those whose only row is the auto state; `0` appends nothing; an unknown value shows receipts and logs one warning.
 - P17 The receipt follows the stand-in handoff and has `auto: true`; a handoff the agent wrote is not `auto`.
 - P18 An append that throws is logged and the turn is unaffected.
