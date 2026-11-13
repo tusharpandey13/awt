@@ -198,6 +198,7 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P18 An append that throws is logged and the turn is unaffected.
 - P19 `AWT_RELATED` in the daemon env reaches the agent env from `agent.open.before`; unset, it is absent.
 - P20 The renderer schema rejects an unknown version or bad data without throwing.
+- P21 A plugin instance that never saw `agent.open.before` for an agent whose node exists gets the auto handoff and a receipt on its next full turn; an agent with no node gets neither; a turn whose `turn.before` was missed gets nothing.
 - P13 The workspace label uses `projectDisplayName` from `projects.list`.
 
 Tier 2, gated. The plugin is installed in a daemon with a temp `--home`. A scripted agent is configured as a custom ACP provider: `paseo-plugin/test/fake/acp_agent.py`, which runs the shell command in a `RUN: <cmd>` prompt in the environment Paseo launched it with, as an agent would, and echoes anything else. Checked on Paseo 0.15.4: a scripted ACP provider works, and the daemon needs `pluginsEnabled: true` in its config. Run with `npm run test:daemon` in `paseo-plugin/` (E0, E1, E2, E4, E7, E8 and M11). The daemon config turns the relay and dictation off, and the tests strip `PASEO_*` from the environment, so nothing leaves the temp home. Not covered yet: spawning a subagent, because the fake agent has no way to start one.
