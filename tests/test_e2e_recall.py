@@ -652,7 +652,10 @@ class ER20(Cli):
             return job, a, b
         with cf.ThreadPoolExecutor(8) as ex:
             for job, a, b in ex.map(both, jobs):
-                self.assertEqual((b.returncode, b.stdout, b.stderr), (a.returncode, a.stdout, a.stderr), job)
+                if job[1] == ("doctor",):  # v2 phase 0 changes doctor's effect and settings checks on purpose
+                    self.assertEqual(b.returncode, a.returncode, job)
+                else:
+                    self.assertEqual((b.returncode, b.stdout, b.stderr), (a.returncode, a.stdout, a.stderr), job)
                 if job[1] == ("doctor",):
                     self.assertIn("0 quarantined", b.stdout)
         # 2: solo resume, v0.2.0 vs now
