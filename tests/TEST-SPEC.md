@@ -229,6 +229,204 @@ New scenarios in `tests/agentic/scenarios.py`, each run with a real agent in a g
 
 Pass criteria are checked on the files, not on the agent's words.
 
+## Provider journeys (E-P)
+
+Gaps and sources: `docs/e2e-provider-gaps.md`. These journeys prove awt's real interaction with Paseo and with each provider (Claude Code `claude`, opencode `opencode`, pi `pi`). They reuse the isolation rules, universal checks U1-U3, the cleanup and the D0 fixture of `docs/e2e-active-recall.md` §0. Fixtures use the fictional `parsekit` project and made-up ids. No credential or token-shaped literal appears in a fixture, a prompt or this file; a secret probe is built at runtime.
+
+Tiers:
+
+| Tier | Runs | Gate |
+|---|---|---|
+| deterministic-fake | `npm test` (harness rows) or `npm run test:daemon` (daemon rows) in `paseo-plugin/`, or `unittest` for fixture rows | daemon rows: `AWT_E2E_PASEO=1`, Paseo 0.15.4 or later on `PATH`; no tokens |
+| isolated-daemon-real-provider (paid) | `tests/agentic/paseo_run.py --only E-P…` (new) | `AWT_E2E_PAID=1` **and the owner's approval for each run batch**, because it spends tokens. One pilot session per journey first; report its measured cost, then ask before the batch |
+| manual | a person, following the steps | none; read-only |
+
+**Isolation for paid journeys.** They run **only against an isolated daemon home**:
+- `paseo --home $T/home`, with `PASEO_*` stripped and relay, dictation and auto-update off. Never `~/.paseo`; the pre-flight fails if `realpath($T/home)` equals `realpath(~/.paseo)` or if any `PASEO_HOME` is set.
+- Every process runs with `HOME=$T`.
+- Provider state lives under `$T`: `CLAUDE_CONFIG_DIR=$T/claude`; `XDG_DATA_HOME=$T/xdg/data` and `XDG_CONFIG_HOME=$T/xdg/config` for opencode; `PI_CODING_AGENT_DIR=$T/pi`.
+- Credentials are supplied by the owner at run time through the provider's environment variable. The harness never copies `~/.claude`, `~/.local/share/opencode`, `~/.pi/agent/auth.json` or any other credential or state file. Check for a pending macOS SecurityAgent prompt first.
+- Post-flight: the size and mtime of `~/.paseo`, `~/.claude/projects`, `~/.local/share/opencode/opencode.db` and `~/.pi/agent/sessions` are unchanged (U3). If opencode ignores `XDG_DATA_HOME`, this check fails the journey before any result counts.
+
+Use the cheapest model of each provider, at most 10 turns and 300 s per session. Judge from files, hook logs and timelines, never from the agent's words.
+
+**Harness additions (test code only, never product code).**
+- **H5 hook recorder.** A second plugin, `paseo-plugin/test/fake/recorder/`, installed beside awt in the temp daemon. It appends `{hook, ts, payload}` as one JSON line to `$AWT_HOOK_LOG` for every hook in `PluginHookEvents` and `PluginHookRequests`, returns requests unchanged, and redacts nothing (the data is fictional).
+- **H6 fake ACP extensions** in `fake/acp_agent.py`:
+  - it writes every inbound line to `$AWT_FAKE_WIRE` (H1 of active recall);
+  - `MCP: list` and `MCP: call <tool> <json>` run JSON-RPC `tools/list` / `tools/call` against the `paseo` server URL and headers it received in `session/new` `mcpServers`, and reply with the result;
+  - `PERMIT: <kind> <path>` sends `session/request_permission` with `toolCall {kind, locations:[{path}]}` and replies with the outcome it received, or `no answer` after 10 s.
+- **H7 shim**: `awt` first on `PATH` appends `{argv, AWT_DIR, AWT_BY, cwd}` to `$T/argv.jsonl` and execs the real `awt`.
+
+### Deterministic-fake
+
+**E-P1 `awt_resume` is delivered and callable** (paseo-common, gap 3). Setup: D0 with `daemon.mcp.injectIntoAgents: true`, plus H6.
+1. `id=run("tool1", "MCP: list")` → the reply lists `awt_resume`; `session/new` in the wire has an `mcpServers` entry named `paseo` whose URL carries `callerAgentId=<id>`.
+2. `paseo send <id> 'MCP: call awt_resume {}'` → the result text starts with the brief header of the node keyed `paseo:agent/<id>`; `isError` is absent.
+3. A second agent `tool2` calls it → it gets `tool2`'s brief, never `tool1`'s.
+4. Restart the daemon with `injectIntoAgents: false`; new agent `tool3`, `MCP: list` → no `paseo` server in `session/new`. The journey records this as the documented default and asserts that `doctor` or the plugin log names it (see the follow-up in `docs/e2e-provider-gaps.md`).
+
+Pass: steps 1-3 exact; step 4 recorded; U1-U3.
+
+**E-P2 ACP permission to the agent's own node** (paseo-common, gap 2). Setup: D0 + H6.
+0. Probe: `PERMIT: edit $AWT_DIR/scratch/notes.md` with the H5 recorder on → record the `request.detail` that `agent.permission.before` received. If it has no `filePath`, the journey states that ACP edits are not auto-allowed and steps 1-2 become a red test of the mapping.
+1. The same request → outcome `selected` with the allow option, within 5 s.
+2. `PERMIT: edit $T/parsekit/../outside.md` and `PERMIT: edit <sibling agent's AWT_DIR>/x.md` → `no answer` both times; `paseo permit ls` (or the client) shows them pending.
+
+Pass: 1-2 exact; the plugin never sends a deny.
+
+**E-P3 Hook sequence, `turnId` and parent** (paseo-common, gap 1). Setup: D0 + H5.
+1. `run("seq1", "ping")`, `send seq1 "ping"`, a child with `--label paseo.parent-agent-id=<seq1>`, then `paseo agent archive <child>` and `paseo workspace archive W1` on a second workspace.
+2. Read `$AWT_HOOK_LOG`.
+
+Pass:
+- per agent, `agent.create.before` comes first; the relative order of `agent.open.before` and `agent.create.after` is recorded (this settles `SPEC.md` "hook order unverified");
+- every turn has exactly one `turn.before` and one `turn.after` with the same `turnId`, and that `turnId` is not null;
+- the child's payload `agent.parentAgentId` equals `seq1` (or is null; record which; fact 2 of the gaps doc);
+- `agent.archive.after` and `workspace.archive.after` each arrive once, with `archivedAt` set.
+
+The payloads, with ids rewritten to the fictional ones, replace the hand-written files in `test/payloads/` (P11 becomes "recorded").
+
+**E-P4 Archive in a daemon** (paseo-common, gap 8; today's E5). Setup: D0.
+1. Agent `arch1` with a turn, then `paseo agent archive arch1` → node `done`.
+2. Agent `arch2` runs `RUN: awt ask "who owns the parsekit tokenizer?"`; archive it → `paused`.
+3. Archive workspace W1 → the workspace node is `paused` (`arch2` has an open question), and nothing under it is deleted (file count unchanged).
+
+Pass: statuses exact; `doctor` shows `0 quarantined`.
+
+**E-P5 Project `archivedAt`** (paseo-common, gap 8; decision 16). Tier: deterministic-fake (unittest + harness).
+1. `fixtures/paseo-v0/home/projects/projects.json` gains project `prj_0002` `ledgerline`, `archivedAt: "2026-02-01T00:00:00.000Z"`, with one active and one archived workspace. `migrate-paseo --home` → project node `paused` (an active workspace below); once both workspaces are archived, `done`.
+2. A second run is idempotent (I7), and a status the user set survives.
+3. Plugin harness: `workspace.archive.after` for the last workspace of an archived project → the project node goes `done`. Because `projects.list` has no `archivedAt` in 0.15.4, the test pins the source the plugin uses and fails if it is the SDK list.
+
+Pass: red until the project kind lands (phase 1), then green.
+
+**E-P6 Permission shapes per provider** (claude, opencode, pi; gap 2). Tier: deterministic-fake (harness `hooks.test.ts`).
+- Claude: `detail.type` of `read`, `edit` and `write` with `filePath` inside the node → allowed. `Bash` with `detail.type: "shell"` running `awt note x` → untouched.
+- opencode legacy: `external_directory` with `input.patterns` → as P8. opencode 2.x: `name: "external_directory"`, no `input`, `description` listing `<node>/*` → today untouched (red). Decide the 2.x rule (parse `description`, or ask Paseo for structured resources) and make it green.
+- pi: `kind: "question"`, name `Pi confirm` → untouched; nothing is answered.
+
+Pass: `r.answered` exactly as listed; no log lines.
+
+**E-P7 Transcript shape pins** (claude, opencode, pi; gap 7). Tier: deterministic-fake (unittest). Fixtures `fixtures/transcripts/{claude,opencode,pi}/` hold fictional `parsekit` sessions written from the key sets in the gaps doc (facts 12-14):
+- Claude: a main file, a `subagents/agent-<id>.jsonl` with `isSidechain`, and a `compact_boundary` + `isCompactSummary` pair.
+- opencode: an SQLite file created by the test from the 1.19.3 columns, with a child session (`parent_id`) and a `compaction` part.
+- pi: a `version: 3` file with a `compaction` entry and a `toolCall`/`toolResult` pair.
+
+A Paseo `agents/*.json` fixture per provider carries `persistence.sessionId`/`nativeHandle` that join to them. Phase 1 and phase 4 adapters must map each fixture to the same table rows, and the join to the agent node must be exact (`join_confidence` exact). A missing required key is a refusal naming the key, never a guess.
+
+### Isolated-daemon-real-provider (paid; isolated home only; owner approval required)
+
+Common setup for E-P8 to E-P16: the isolation rules above; D0, but with the real provider enabled instead of `fake`, `injectIntoAgents: true`, H5 and H7; workspace W1 on `$T/parsekit` (a git repo with one file `tokenizer.py`). Prompts name exact commands, so the judge reads files, not words.
+
+**E-P8 Claude Code: env, tool, permissions, receipts** (claude; gaps 1-4).
+1. `paseo run --provider claude --workspace W1 --title cc1 "Call the awt_resume tool, then run the shell command: awt note \"cc probe\". Then write the file \$AWT_DIR/scratch/plan.md with one line. Reply DONE."`
+2. Within 120 s, no permission is pending for `awt_resume` or the `plan.md` write. A pending `Bash(awt …)` request is recorded as a finding (unverified fact 1), answered once by the harness, and the journey still continues.
+
+Pass:
+- H5 shows `create.before`, `open.before` and one `turn.before`/`turn.after` pair, `provider: "claude"`;
+- the timeline has a tool call named `mcp__paseo__awt_resume` (or `awt_resume`) with a non-error result;
+- `argv.jsonl` has `note` with `AWT_DIR` equal to the node keyed `paseo:agent/<cc1>` and `AWT_BY=<cc1>`;
+- `plan.md` exists in that node;
+- exactly 1 receipt with `counts.note == 1`.
+
+**E-P9 Claude Code: native subagent** (claude; gap 5). Agent `cc2`: "Use the Task tool to start a subagent that runs: awt note \"from the subagent\". Then run: awt note \"from the parent\"."
+
+Pass:
+- H5 shows no `agent.create.*` for the subagent;
+- the timeline has a `sub_agent` item;
+- `argv.jsonl` shows both notes; record the `AWT_DIR`/`AWT_BY` the subagent used (expected: the parent's);
+- `$CLAUDE_CONFIG_DIR/projects/*/<persistence.sessionId>/subagents/agent-*.jsonl` exists with `isSidechain: true`.
+
+The finding decides whether native subagents need their own node (spec change), and the journey then pins the chosen behaviour.
+
+**E-P10 Claude Code: compaction and transcript** (claude; gaps 6-7). Agent `cc3`: one turn running `awt note "before compact"`; then `paseo send cc3 "/compact"`; then `paseo send cc3 "Continue the parsekit task."`.
+
+Pass:
+- a `compaction` timeline item with `status: completed`;
+- after it, an `awt_resume` call (or `awt resume` in `argv.jsonl`) before any other awt-backed write, in at least 4 of 5 runs (prompt-line path);
+- the transcript `<persistence.sessionId>.jsonl` under `$CLAUDE_CONFIG_DIR/projects/<encoded $T/parsekit>/` has a `system`/`compact_boundary` row and an `isCompactSummary` row;
+- no row anywhere in the transcript contains `awt.receipt` (E-R17 step 3).
+
+**E-P11 opencode: env, tool, permissions, receipts** (opencode; gaps 1-4). As E-P8 with `--provider opencode`, plus: count `opencode serve` processes whose argv contains `$T` before and after starting 3 agents (fact: `AWT_DIR` forces a dedicated server). Record the count; more than agents + 1 fails.
+
+Pass: as E-P8. The `plan.md` write is auto-allowed through `external_directory`; record whether Paseo took the legacy or the 2.x path (from the shape of `request` in H5) and the opencode version.
+
+**E-P12 opencode: child session** (opencode; gap 5). Agent `oc2`: "Use the task tool to have a subagent run: awt note \"from the child\"."
+
+Pass:
+- no `agent.create.*` for the child;
+- a `sub_agent` item;
+- `$T/xdg/data/opencode/opencode.db` has a `session` row whose `parent_id` is the agent's `persistence.sessionId`;
+- record which node the child's note landed in, and whether any child permission request reached `agent.permission.before` with the parent as `agent`.
+
+**E-P13 opencode: compaction and transcript** (opencode; gaps 6-7). As E-P10 with opencode's `/compact`.
+
+Pass:
+- a `compaction` timeline item;
+- a `part` with `data.type = "compaction"` and a set `session.time_compacting` for the agent's session;
+- the brief comes back as in E-P10, at least 4 of 5 runs;
+- record whether the plugin prompt block is still in the `system` of the next request (from the opencode request log, if one exists; otherwise SKIP with the reason).
+
+**E-P14 pi: env, tool, permissions, receipts** (pi; gaps 1-4). Run twice: arm A, pi with no MCP adapter; arm B, pi with the `pi-mcp-adapter` extension installed under `$T/pi`.
+
+Pass, both arms:
+- `AWT_DIR`/`AWT_BY` reach the shell (`argv.jsonl`);
+- no `agent.permission.before` fires for awt-backed writes;
+- 1 receipt per turn.
+
+Arm A: `awt_resume` is absent from the tool list and the agent falls back to `awt resume` (record which). Arm B: `awt_resume` is called and succeeds.
+
+**E-P15 pi: subagent** (pi; gap 5). Only if a subagent extension is installed in `$T/pi` (otherwise SKIP with the reason). Ask the agent to delegate `awt note "from the pi child"`.
+
+Pass:
+- a `sub_agent` item;
+- no `agent.create.*` for the child;
+- record where the note landed;
+- the child transcript named by `Output file:` exists under `$T`.
+
+**E-P16 pi: compaction and transcript** (pi; gaps 6-7). As E-P10, using pi's manual compaction command.
+
+Pass:
+- `compaction` timeline items (start, then completed);
+- the session file at `persistence.nativeHandle` (under `$T/pi/sessions/`) has a `compaction` entry with `firstKeptEntryId` and `tokensBefore`;
+- the header `id` equals `persistence.sessionId`;
+- the brief comes back as in E-P10;
+- the plugin prompt block is present after compaction (it is re-appended each turn; check in the next turn's `system` message if pi records one).
+
+**E-P17 Paseo-level subagent started by a real agent** (claude; gap 5; closes the E3 caveat). Agent `cc4`: "Use the Paseo create_agent tool to start a subagent in this workspace that runs: awt note \"kid via paseo\"."
+
+Pass:
+- the child is a Paseo agent with label `paseo.parent-agent-id=<cc4>`;
+- its node sits under `cc4`'s node;
+- the child's receipt has `counts.note == 1` and `counts.state == 0`;
+- `cc4`'s next receipt counts it (E-R13).
+
+### Manual
+
+**E-P18 Store shape probe after a provider upgrade** (claude, opencode, pi, paseo; gap 7). A person runs a read-only script that prints **key names, types and counts only**, never values:
+- for the newest 30 Claude transcripts;
+- for `opencode.db`: `pragma_table_info` of `session`, `message` and `part`, plus `part.data.type` counts;
+- for pi session files: entry types and `version`;
+- for `~/.paseo/agents/*/*.json` `persistence`.
+
+They compare the output with facts 10-14 in `docs/e2e-provider-gaps.md` and update E-P7's fixtures when anything changed. This journey reads real stores, so its output is reviewed before it is committed, and no value is ever copied into the repo.
+
+**E-P19 Receipts and subagent cards render per provider** (claude, opencode, pi). The Paseo app is connected to the E-P8, E-P11 and E-P14 daemons only, never the owner's daemon. One screenshot per provider shows the receipt line and a `sub_agent` card, stored in the run dir.
+
+### Traceability
+
+| Gap (`docs/e2e-provider-gaps.md`) | Journeys |
+|---|---|
+| 1 hooks | E-P3, E-P8, E-P11, E-P14 |
+| 2 permissions | E-P2, E-P6, E-P8, E-P11, E-P14 |
+| 3 env and `awt_resume` | E-P1, E-P8, E-P11, E-P14 |
+| 4 receipts | E-P8, E-P11, E-P14, E-P17 (+ E-R10 to E-R15) |
+| 5 subagents | E-P9, E-P12, E-P15, E-P17 |
+| 6 compaction | E-P10, E-P13, E-P16 |
+| 7 transcripts | E-P7, E-P10, E-P13, E-P16, E-P18 |
+| 8 archive | E-P3, E-P4, E-P5 |
+
 ## CI
 
 | Job | Runs | Trigger |
