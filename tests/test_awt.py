@@ -1,4 +1,4 @@
-import datetime, json, os, shutil, socket, subprocess, sys, tempfile, time, unittest
+import ast, datetime, json, os, shutil, socket, subprocess, sys, tempfile, time, unittest
 
 AWT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "awt"))
 GITENV = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e.x", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e.x",
@@ -270,7 +270,7 @@ class TestBrief(Base):
         for i in range(25):
             self.ok("decide", long(300, str(i)), "--why", "w", *(["--tag", "rule"] if i % 2 else []))
         for i in range(12):
-            self.plan("--run", "true", target="slack:#" + long(150, "c%d" % i).replace(" ", "-"))
+            self.plan("--how", "true", target="slack:#" + long(150, "c%d" % i).replace(" ", "-"))
         repo = os.path.join(self.tmp, "repo")
         subprocess.run(["git", "init", "-q", repo], check=True, env=self.env)
         self.ok("ref", repo, "--title", "r")
@@ -333,6 +333,8 @@ class TestBrief(Base):
 
 
 class TestEffects(Base):
+    """Declared effects (SPEC section 10): awt keeps the ledger and never runs anything."""
+
     def setUp(self):
         super().setUp()
         self.init()
@@ -341,223 +343,282 @@ class TestEffects(Base):
     def nhits(self):
         return len(slurp(self.hits).split()) if os.path.exists(self.hits) else 0
 
-    def mark(self, eid, to, code=0):
-        return self.bad("effect", "mark", eid, to, code=code) if code else self.ok("effect", "mark", eid, to)
+    def mark(self, eid, to, *extra, code=0):
+        return self.bad("effect", "mark", eid, to, *extra, code=code) if code else self.ok("effect", "mark", eid, to, *extra)
 
-    def apply(self, eid, target="slack:#eng", code=0, *extra):
-        r = self.awt("effect", "apply", eid, "--target", target, *extra)
-        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
-        return r
+    def begin(self, eid, code=0):
+        return self.bad("effect", "begin", eid, code=code) if code else self.ok("effect", "begin", eid)
 
-    def test_manual_flow(self):
+    def key_of(self, e):
+        return [r for r in self.rows("effect") if r["id"] == e][0]["key"]
+
+    def test_declared_flow(self):
         self.write("outbox/m.md", "hello\n")
-        r = self.ok("effect", "plan", "--target", "slack:#eng", "--body", "outbox/m.md")
+        r = self.ok("effect", "plan", "--target", "slack:#eng", "--body", "outbox/m.md", "--how", "echo hi >> hits.txt")
         e = r.stdout.split()[0]
-        self.assertIn("effect mark %s sent" % e, r.stdout)
+        self.assertIn("effect begin %s" % e, r.stdout)
         self.assertEqual(self.state_of(e), "planned")
-        self.assertIn("already planned", self.ok("effect", "plan", "--target", "slack:#eng", "--body", "outbox/m.md").stdout)
+        self.assertIn("already planned", self.ok("effect", "plan", "--target", "slack:#eng", "--body", "outbox/m.md", "--how", "other").stdout)
         self.assertIn("[planned]", self.ok("list", "outbox").stdout)
-        self.assertIn("e-", self.apply(e, code=1).stderr)  # manual: refused
-        self.mark(e, "not-sent", 1)
+        r = self.begin(e)
+        for want in ("outbox/m.md", "how: echo hi >> hits.txt", "effect mark %s sent" % e):
+            self.assertIn(want, r.stdout)
+        self.assertTrue(os.path.exists(self.p(".awt", "claims", self.key_of(e) + ".1")))
+        self.assertEqual(self.state_of(e), "begun")
+        self.mark(e, "sent", "--ref", "https://example.invalid/m/1")
+        self.assertEqual(self.state_of(e), "sent")
+        show = self.ok("effect", "show", e).stdout
+        self.assertIn("https://example.invalid/m/1", show)
+        self.assertIn("how: echo hi >> hits.txt", show)
+        self.assertEqual(self.nhits(), 0)  # --how is text, never run
+        for to in ("sent", "not-sent", "unknown", "dropped"):
+            self.mark(e, to, "--why", "w", code=1)
+        self.begin(e, code=1)
+        self.assertEqual([r["step"] for r in self.rows("effect")], ["planned", "begun", "sent"])
+
+    def test_person_marks_sent_straight_from_planned(self):
+        e = self.plan()
         self.mark(e, "sent")
         self.assertEqual(self.state_of(e), "sent")
-        for to in ("sent", "not-sent", "dropped"):
-            self.mark(e, to, 1)
-        self.apply(e, code=1)
-        self.assertEqual(len(self.rows("effect")), 2)
 
-    def test_drop_and_replan(self):
-        self.write("outbox/m.md", "hello\n")
-        e = self.plan("--body", "outbox/m.md")
+    def test_marks_legal_from_planned_only_sent_and_dropped(self):
+        e = self.plan()
+        for to in ("not-sent", "unknown"):
+            self.mark(e, to, "--why", "w", code=1)
         self.mark(e, "dropped")
         self.assertEqual(self.state_of(e), "dropped")
-        r = self.bad("effect", "plan", "--target", "slack:#eng", "--body", "outbox/m.md")
+        for to in ("sent", "not-sent", "unknown", "dropped"):
+            self.mark(e, to, "--why", "w", code=1)
+        r = self.bad("effect", "plan", "--target", "slack:#eng")
         self.assertIn("--again", r.stderr)
-        self.mark(e, "sent", 1)
-        self.mark(e, "not-sent", 1)
-        self.apply(e, code=1)
-        e2 = self.plan("--body", "outbox/m.md", "--again")
-        self.assertNotEqual(e, e2)
+        self.assertNotEqual(self.plan("--again"), e)
 
-    def test_run_flow_sent_and_env(self):
-        self.write("outbox/m.md", "hello\n")
-        e = self.plan("--body", "outbox/m.md", "--run", 'echo "$AWT_TARGET" >> hits.txt; cat "$AWT_BODY" >> hits.txt')
-        self.bad("effect", "mark", e, "sent")
-        self.mark(e, "not-sent", 1)
-        self.apply(e, "wrong:target", 1)
-        self.assertEqual(self.nhits(), 0)
-        self.apply(e)
-        self.assertEqual(slurp(self.hits).split(), ["slack:#eng", "hello"])
-        self.assertEqual(self.state_of(e), "sent")
-        self.assertTrue(os.path.exists(self.p(".awt", "runs", e + ".1.log")))
-        self.apply(e, code=1)
-        self.assertEqual(self.nhits(), 2)
-        again = self.ok("effect", "plan", "--target", "slack:#eng", "--body", "outbox/m.md", "--run",
-                        'echo "$AWT_TARGET" >> hits.txt; cat "$AWT_BODY" >> hits.txt')
-        self.assertIn(e, again.stdout)
-        self.assertEqual(len(self.rows("effect")), 3)  # planned, claimed, sent
+    def test_begin_claims_once(self):
+        e = self.plan()
+        self.begin(e)
+        r = self.begin(e, code=1)
+        self.assertIn("fix:", r.stderr)
+        e2 = self.plan("--again", target="t2")
+        open(self.p(".awt", "claims", self.key_of(e2) + ".1"), "w").close()  # a claim with no row reads as begun
+        self.assertIn("begun", self.begin(e2, code=1).stderr)
+        self.bad("effect", "begin", "e-00000000", code=4)
 
-    def test_failure_goes_unknown_then_retry(self):
-        e = self.plan("--run", "echo try >> hits.txt; exit 3")
-        self.apply(e, code=1)
-        self.assertEqual(self.state_of(e), "unknown")
-        self.assertIn(e, self.ok("resume").stdout)
-        self.apply(e, code=1)  # never automatic / not planned
-        self.assertEqual(self.nhits(), 1)
-        r = self.bad("effect", "plan", "--target", "slack:#eng", "--run", "echo other")  # open unknown on target
-        self.assertIn("unknown", r.stderr)
-        self.mark(e, "dropped", 1)
-        self.mark(e, "not-sent")
-        self.assertEqual(self.state_of(e), "planned")
-        self.assertEqual([r["attempt"] for r in self.rows("effect")][-1], 2)
-        self.apply(e, code=1)
-        self.assertEqual(self.nhits(), 2)
-        self.assertEqual(self.state_of(e), "unknown")
-        self.mark(e, "sent")
-        self.assertEqual(self.state_of(e), "sent")
-
-    def test_verify_and_timeout(self):
-        e = self.plan("--run", "true", "--verify", "exit 1")
-        self.apply(e, code=1)
-        self.assertEqual(self.state_of(e), "unknown")
-        e2 = self.plan("--run", "sleep 30", "--again", target="t2")
-        t0 = time.time()
-        self.apply(e2, "t2", 1, "--timeout", "1")
-        self.assertLess(time.time() - t0, 15)
-        self.assertEqual(self.state_of(e2), "unknown")
-        e3 = self.plan("--run", "true", "--verify", "true", target="t3")
-        self.apply(e3, "t3")
-
-    def test_overwrite_needs_snapshot_and_snapshot_blob(self):
-        self.bad("effect", "plan", "--target", "t", "--run", "true", "--class", "overwrite")
-        e = self.plan("--run", "true", "--class", "overwrite", "--snapshot", "echo before", target="t")
-        self.apply(e, "t")
-        self.assertEqual(len(os.listdir(self.p(".awt", "blobs"))), 1)
-        e = self.plan("--run", "echo no >> hits.txt", "--class", "overwrite", "--snapshot", "true", target="u")
-        self.apply(e, "u", 1)
-        self.assertEqual(self.nhits(), 0)
-        self.assertEqual(self.state_of(e), "planned")
-
-    def test_after_ordering(self):
-        self.bad("effect", "plan", "--target", "t", "--run", "true", "--after", "e-00000000", code=4)
-        a = self.plan("--run", "echo a >> hits.txt", target="A")
-        b = self.plan("--run", "echo b >> hits.txt", "--after", a, target="B")
-        self.apply(b, "B", 1)
-        self.apply(a, "A")
-        self.apply(b, "B")
-        self.assertEqual(slurp(self.hits).split(), ["a", "b"])
-
-    def test_changed_body_refuses(self):
-        self.write("outbox/m.md", "v1\n")
-        e = self.plan("--body", "outbox/m.md", "--run", "echo sent >> hits.txt")
-        self.write("outbox/m.md", "v2\n")
-        r = self.apply(e, code=1)
-        self.assertIn("plan again", r.stderr)
-        self.assertEqual(self.nhits(), 0)
-        self.assertEqual(self.state_of(e), "planned")
-
-    def test_again_makes_new_key_and_sends_again(self):
-        cmd = "echo sent >> hits.txt"
-        e1 = self.plan("--run", cmd)
-        self.apply(e1)
-        self.assertEqual(self.plan("--run", cmd), e1)
-        e2 = self.plan("--run", cmd, "--again")
-        self.assertNotEqual(e1, e2)
-        k = {r["key"] for r in self.rows("effect") if r["step"] == "planned"}
-        self.assertEqual(len(k), 2)
-        self.apply(e2)
-        self.assertEqual(self.nhits(), 2)
-
-    def test_concurrent_apply_runs_once(self):
-        e = self.plan("--run", "echo hit >> hits.txt; sleep 1")
-        cmd = [sys.executable, "-I", AWT, "--dir", self.root, "effect", "apply", e, "--target", "slack:#eng"]
+    def test_concurrent_begin_wins_once(self):
+        e = self.plan()
+        cmd = [sys.executable, "-I", AWT, "--dir", self.root, "effect", "begin", e]
         ps = [subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env) for _ in range(6)]
         codes = []
         for p in ps:
             p.communicate()
             codes.append(p.returncode)
         self.assertEqual(sorted(codes), [0] + [1] * 5)
-        self.assertEqual(self.nhits(), 1)
-        self.assertEqual(self.state_of(e), "sent")
-        self.assertEqual(len([r for r in self.rows("effect") if r["step"] == "claimed"]), 1)
+        self.assertEqual(len([r for r in self.rows("effect") if r["step"] == "begun"]), 1)
 
-    def key_of(self, e):
-        return [r for r in self.rows("effect") if r["id"] == e][0]["key"]
+    def test_not_sent_returns_to_planned_with_next_attempt(self):
+        e = self.plan()
+        self.begin(e)
+        self.mark(e, "not-sent", code=2)  # needs --why
+        self.mark(e, "not-sent", "--why", "gateway refused")
+        self.assertEqual(self.state_of(e), "planned")
+        self.assertEqual([r["attempt"] for r in self.rows("effect")][-1], 2)
+        self.begin(e)
+        self.assertTrue(os.path.exists(self.p(".awt", "claims", self.key_of(e) + ".2")))
+        self.mark(e, "sent")
 
-    def test_crash_claim_file_without_claimed_row(self):
-        e = self.plan("--run", "echo x >> hits.txt")
-        open(self.p(".awt", "claims", self.key_of(e) + ".1"), "w").close()
+    def test_unknown_needs_why_and_resolves_only_to_sent_or_not_sent(self):
+        e = self.plan()
+        self.begin(e)
+        self.mark(e, "unknown", code=2)
+        self.mark(e, "unknown", "--why", "timed out")
         self.assertEqual(self.state_of(e), "unknown")
         self.assertIn(e, self.ok("resume").stdout)
-        self.apply(e, code=1)
-        self.assertEqual(self.nhits(), 0)
-        self.mark(e, "not-sent")
+        self.mark(e, "dropped", code=1)
+        self.mark(e, "unknown", "--why", "again", code=1)
+        self.write("outbox/o.md", "other\n")
+        r = self.bad("effect", "plan", "--target", "slack:#eng", "--body", "outbox/o.md")  # open unknown on the target
+        self.assertIn("unknown", r.stderr)
+        self.mark(e, "not-sent", "--why", "checked, nothing there")
         self.assertEqual(self.state_of(e), "planned")
-        self.apply(e)
-        self.assertEqual(self.nhits(), 1)
-        e2 = self.plan("--run", "true", "--again", target="other")
+        self.begin(e)
+        self.mark(e, "unknown", "--why", "x")
+        self.mark(e, "sent")
+        self.assertEqual(self.state_of(e), "sent")
+
+    def test_after_ordering(self):
+        self.bad("effect", "plan", "--target", "t", "--after", "e-00000000", code=4)
+        a = self.plan(target="A")
+        b = self.plan("--after", a, target="B")
+        self.begin(b, code=1)
+        self.begin(a)
+        self.mark(a, "sent")
+        self.begin(b)
+
+    def test_changed_body_refuses_begin(self):
+        self.write("outbox/m.md", "v1\n")
+        e = self.plan("--body", "outbox/m.md")
+        self.write("outbox/m.md", "v2\n")
+        self.assertIn("plan again", self.begin(e, code=1).stderr)
+        self.assertEqual(self.state_of(e), "planned")
+
+    def test_again_makes_new_key(self):
+        e1 = self.plan()
+        self.assertEqual(self.plan(), e1)
+        e2 = self.plan("--again")
+        self.assertNotEqual(e1, e2)
+        self.assertEqual(len({r["key"] for r in self.rows("effect")}), 2)
+
+    def test_removed_verbs_and_flags_exit_2_with_a_fix(self):
+        e = self.plan()
+        for args in (("effect", "apply", e, "--target", "slack:#eng"), ("effect", "plan", "--target", "t", "--run", "true"),
+                     ("effect", "plan", "--target", "t", "--snapshot", "true"), ("effect", "plan", "--target", "t", "--verify", "true"),
+                     ("effect", "plan", "--target", "t", "--class", "overwrite"), ("effect", "apply", e, "--timeout", "5"),
+                     ("effect", "plan", "--target", "t", "--run=true")):
+            r = self.bad(*args, code=2)
+            self.assertIn("fix:", r.stderr, args)
+            for verb in ("plan", "begin", "mark"):
+                self.assertIn(verb, r.stderr, args)
+        self.assertEqual(len(self.rows("effect")), 1)
+        for d in ("blobs", "runs"):
+            self.assertFalse(os.path.exists(self.p(".awt", d)), d)
+
+    def test_init_writes_no_ask_rule_and_no_outbox_paragraph(self):
+        st = slurp(self.p(".claude", "settings.json"))
+        self.assertNotIn("effect apply", st)
+        self.assertNotIn('"ask"', st)
+        json.loads(st)
+        ag = slurp(self.p("AGENTS.md"))
+        for gone in ("effect plan", "effect apply", "goes through the outbox"):
+            self.assertNotIn(gone, ag)
+
+    def test_status_done_blocked_while_begun(self):
+        e = self.plan()
+        self.assertIn(e, self.bad("status", "done").stderr)
+        self.begin(e)
+        r = self.bad("status", "done")
+        self.assertIn(e, r.stderr)
+        self.assertIn("begun", r.stderr)
+        self.mark(e, "sent")
+        self.ok("status", "done")
+
+    def test_resume_shows_begun_and_unknown(self):
+        a, b = self.plan(target="A"), self.plan(target="B")
+        self.begin(a)
+        self.begin(b)
+        self.mark(b, "unknown", "--why", "w")
+        out = self.ok("resume").stdout
+        self.assertIn("%s begun" % a, out)
+        self.assertIn("%s unknown" % b, out)
+
+    def test_crash_claim_file_without_begun_row_reads_begun(self):
+        e = self.plan()
+        open(self.p(".awt", "claims", self.key_of(e) + ".1"), "w").close()
+        self.assertEqual(self.state_of(e), "begun")
+        self.assertIn(e, self.ok("resume").stdout)
+        self.begin(e, code=1)
+        self.mark(e, "dropped", code=1)
+        self.mark(e, "not-sent", "--why", "w")
+        self.assertEqual(self.state_of(e), "planned")
+        e2 = self.plan("--again", target="other")
         open(self.p(".awt", "claims", self.key_of(e2) + ".1"), "w").close()
         self.mark(e2, "sent")
         self.assertEqual(self.state_of(e2), "sent")
 
-    def test_crash_claimed_row_with_dead_pid(self):
-        dead = subprocess.Popen(["true"])
-        dead.wait()
-        e = self.plan("--run", "echo x >> hits.txt")
-        self.raw_append(dict(type="effect", id=e, step="claimed", attempt=1, pid=dead.pid))
-        self.assertEqual(self.state_of(e), "unknown")
-        self.apply(e, code=1)
-        self.assertIn("unknown", self.ok("resume").stdout)
-        self.mark(e, "not-sent")
-        self.assertEqual(self.state_of(e), "planned")
+    def test_missing_claims_dir_does_not_stop_begin(self):
+        e = self.plan()
+        shutil.rmtree(self.p(".awt", "claims"))
+        self.begin(e)
+        self.assertEqual(self.state_of(e), "begun")
 
-    def test_claimed_with_live_pid_blocks_marks(self):
-        live = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(lambda: (live.kill(), live.wait()))
-        e = self.plan("--run", "true")
-        self.raw_append(dict(type="effect", id=e, step="claimed", attempt=1, pid=live.pid))
-        self.assertEqual(self.state_of(e), "claimed")
-        for to in ("sent", "not-sent", "dropped"):
-            self.mark(e, to, 1)
-        self.apply(e, code=1)
-
-    def test_conflict_and_illegal_rows_quarantined(self):
-        live = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(lambda: (live.kill(), live.wait()))
-        e = self.plan("--run", "true")
-        self.raw_append(dict(type="effect", id=e, step="claimed", attempt=1, pid=live.pid))
-        self.raw_append(dict(type="effect", id=e, step="claimed", attempt=1, pid=live.pid))
-        self.assertEqual(self.state_of(e), "conflict")
-        self.assertIn("conflict", self.ok("resume").stdout)
-        self.mark(e, "sent")
-        self.assertEqual(self.state_of(e), "sent")
-        self.assertNotIn("quarantined", self.ok("resume").stdout)
-        # illegal transitions are skipped and counted
-        self.raw_append(dict(type="effect", id=e, step="planned", attempt=2))
-        self.raw_append(dict(type="effect", id=e, step="dropped", attempt=1))
+    def test_illegal_rows_are_quarantined(self):
+        e = self.plan()
+        self.raw_append(dict(type="effect", id=e, step="unknown", attempt=1))  # planned -> unknown
+        self.raw_append(dict(type="effect", id=e, step="planned", attempt=2))  # planned -> planned
         self.raw_append(dict(type="effect", id="e-ffffffff", step="sent", attempt=1))  # unknown id
-        self.raw_append(dict(type="effect", id="e-eeeeeeee", step="claimed", attempt=1))
+        self.assertEqual(self.state_of(e), "planned")
+        self.assertIn("3 quarantined", self.ok("resume").stdout)
+        self.raw_append(dict(type="effect", id=e, step="sent", attempt=1))  # a person's mark, legal
+        self.raw_append(dict(type="effect", id=e, step="begun", attempt=1))  # sent -> begun
         self.assertEqual(self.state_of(e), "sent")
-        self.assertIn("4 quarantined", self.ok("resume").stdout)
-        self.bad("effect", "show", "e-ffffffff", code=4)
 
-    def test_illegal_direct_transitions_by_rows(self):
-        self.write("outbox/m.md", "x")
-        man = self.plan("--body", "outbox/m.md", target="man")
-        run = self.plan("--run", "true", target="run")
-        self.raw_append(dict(type="effect", id=man, step="claimed", attempt=1, pid=1))  # manual cannot be claimed
-        self.raw_append(dict(type="effect", id=run, step="sent", attempt=1))  # planned -> sent needs manual
-        self.raw_append(dict(type="effect", id=run, step="unknown", attempt=1))  # planned -> unknown
-        self.raw_append(dict(type="effect", id=run, step="planned", attempt=2))  # planned -> planned
-        self.assertEqual((self.state_of(man), self.state_of(run)), ("planned", "planned"))
-        self.assertIn("4 quarantined", self.ok("resume").stdout)
+    def test_no_code_path_runs_a_subprocess_for_an_effect(self):
+        """Static: nothing reachable from an eff_* verb may start a process. Dynamic: --how text is inert."""
+        tree = ast.parse(slurp(AWT))
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        banned = {"subprocess", "system", "popen", "execv", "execvp", "execl", "spawnv", "fork", "posix_spawn"}
+        seen, todo = set(), [n for n in funcs if n.startswith("eff_")]
+        self.assertGreaterEqual(len(todo), 4)
+        while todo:
+            name = todo.pop()
+            if name in seen or name not in funcs:
+                continue
+            seen.add(name)
+            for n in ast.walk(funcs[name]):
+                if isinstance(n, ast.Attribute) and n.attr in banned or isinstance(n, ast.Name) and n.id in banned:
+                    self.fail("%s reaches %s" % (name, getattr(n, "attr", getattr(n, "id", ""))))
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                    todo.append(n.func.id)
+        self.assertIn("load", seen)
+        e = self.plan("--how", "touch hits.txt; echo $(id) >> hits.txt")
+        self.begin(e)
+        self.mark(e, "sent")
+        self.assertFalse(os.path.exists(self.hits))
 
-    def test_status_done_blocked_by_effects(self):
-        e = self.plan("--run", "true")
-        r = self.bad("status", "done")
-        self.assertIn(e, r.stderr)
-        self.apply(e)
-        self.ok("status", "done")
+
+class TestLegacyEffects(Base):
+    """Trees written before declared effects: claimed reads as begun, legacy fields are shown, nothing on disk changes."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        self.raw_append(dict(type="effect", id="e-0000000a", step="planned", attempt=1, target="jira:PK-1", key="k" * 64,
+                             body="outbox/c.md", body_sha="0" * 64, run="jira-cli comment PK-1", **{"class": "overwrite"},
+                             snapshot="jira-cli show PK-1", verify="jira-cli show PK-1", why="legacy"))
+        self.raw_append(dict(type="effect", id="e-0000000a", step="claimed", attempt=1, pid=999999, timeout=300))
+        self.raw_append(dict(type="effect", id="e-0000000b", step="planned", attempt=1, target="slack:#eng", key="j" * 64, run="echo hi"))
+        self.raw_append(dict(type="effect", id="e-0000000c", step="planned", attempt=1, target="slack:#ops", key="i" * 64, run="echo ho"))
+        self.raw_append(dict(type="effect", id="e-0000000c", step="claimed", attempt=1, pid=999999, timeout=300))
+        self.raw_append(dict(type="effect", id="e-0000000c", step="unknown", attempt=1, reason="exit code 3"))
+        for d, n in (("runs", "e-0000000a.1.log"), ("blobs", "a" * 64)):
+            os.makedirs(self.p(".awt", d), exist_ok=True)
+            self.write(".awt/%s/%s" % (d, n), "old output\n")
+        self.before = self.events()
+
+    def test_claimed_reads_as_begun_and_unknown_stays(self):
+        self.assertEqual(self.state_of("e-0000000a"), "begun")
+        self.assertEqual(self.state_of("e-0000000c"), "unknown")
+        out = self.ok("resume").stdout
+        self.assertIn("e-0000000a begun", out)
+        self.assertIn("e-0000000c unknown", out)
+        self.assertNotIn("quarantined", out)
+
+    def test_show_prints_legacy_fields_run_as_how_and_files(self):
+        s = self.ok("effect", "show", "e-0000000a").stdout
+        for want in ("how: jira-cli comment PK-1", "legacy class: overwrite", "legacy snapshot: jira-cli show PK-1",
+                     "legacy verify: jira-cli show PK-1", "legacy file: .awt/runs/e-0000000a.1.log", "legacy file: .awt/blobs/" + "a" * 64):
+            self.assertIn(want, s)
+        j = [r for r in json.loads(self.ok("list", "effects", "--json").stdout) if r["id"] == "e-0000000a"][0]
+        self.assertEqual(j["how"], "jira-cli comment PK-1")
+
+    def test_planned_run_effect_is_an_ordinary_planned_effect(self):
+        self.assertEqual(self.state_of("e-0000000b"), "planned")
+        self.ok("effect", "begin", "e-0000000b")
+        self.ok("effect", "mark", "e-0000000b", "sent")
+        self.assertEqual(self.state_of("e-0000000b"), "sent")
+        self.assertFalse(os.path.exists(self.p("hits.txt")))
+
+    def test_legacy_begun_resolves_with_marks(self):
+        self.ok("effect", "mark", "e-0000000a", "not-sent", "--why", "checked")
+        self.assertEqual(self.state_of("e-0000000a"), "planned")
+        self.ok("effect", "mark", "e-0000000c", "sent")
+
+    def test_reads_and_marks_never_rewrite_the_log_or_delete_runs_and_blobs(self):
+        for args in (("resume",), ("list", "effects"), ("effect", "show", "e-0000000a"), ("doctor",), ("status", "done")):
+            self.awt(*args)
+        self.assertEqual(self.events(), self.before)
+        self.ok("effect", "mark", "e-0000000a", "sent")
+        self.assertTrue(self.events().startswith(self.before))
+        self.assertTrue(os.path.exists(self.p(".awt", "runs", "e-0000000a.1.log")))
+        self.assertTrue(os.path.exists(self.p(".awt", "blobs", "a" * 64)))
 
 
 class SecretPatterns(unittest.TestCase):

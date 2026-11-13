@@ -204,8 +204,8 @@ class Task:
         m = IDRX.search(s.run(*a, **k).out)
         return m.group(0) if m else None
 
-    def plan(s, target, run=None, body=None, extra=()):
-        a = ["effect", "plan", "--target", target] + (["--run", run] if run else []) + (["--body", body] if body else []) + list(extra)
+    def plan(s, target, how=None, body=None, extra=()):
+        a = ["effect", "plan", "--target", target] + (["--how", how] if how else []) + (["--body", body] if body else []) + list(extra)
         r = s.run(*a)
         m = re.match(r"(e-[0-9a-f]{8})", r.out)
         return (m.group(1) if m else None), r
@@ -253,16 +253,19 @@ def put(t, nm, data):
             raise
 
 
-def escape(t, eid):
+def no_quarantine(c, t):
+    m = re.search(r"(\d+) quarantined", t.run("doctor").out)
+    if m and int(m.group(1)):
+        c.fail("awt itself wrote %s rows that its own reader quarantines" % m.group(1))
+
+
+def escape(c, t, eid):
     """Is there a legal way out of whatever state the effect is in?"""
     st = t.state(eid)
-    if st == "claimed":
-        wait_for(lambda: t.state(eid) != "claimed", 5, 0.2)
-        st = t.state(eid)
     if st in ("sent", "dropped"):
         return True
-    if st in ("unknown", "conflict"):
-        if t.run("effect", "mark", eid, "not-sent").rc:
+    if st in ("begun", "unknown"):
+        if t.run("effect", "mark", eid, "not-sent", "--why", "chaos").rc:
             return False
         st = t.state(eid)
     if st == "planned":
@@ -356,13 +359,11 @@ def a_fuzz(c):
         elif v == 8: a = ["status", r.choice(["active", "paused", "done", A()])]
         elif v == 9: a = ["list", r.choice(SECTIONS + [A()])] + opt("--all")
         elif v == 10: a = ["find", A()]
-        elif v == 11: a = ["effect", "plan", "--target", A(), r.choice(["--body", "--run"]), r.choice(["outbox/b.md", A()] if False else ["outbox/b.md"]) if False else "outbox/b.md"]
-        elif v == 12: a = ["effect", "plan", "--target", r.choice(["slack:#a", "slack:#b", A()]), "--run", r.choice(runs)] + opt("--class", r.choice(["additive", "overwrite", A()])) + opt("--again") + opt("--snapshot", r.choice(["echo s", "true"])) + opt("--verify", r.choice(["true", "false"])) + opt("--after", ID("e")) + opt("--why", A())
+        elif v == 11: a = ["effect", "plan", "--target", A(), "--body", "outbox/b.md"]
+        elif v == 12: a = ["effect", "plan", "--target", r.choice(["slack:#a", "slack:#b", A()])] + opt("--how", r.choice(runs)) + opt("--again") + opt("--why", A())
         elif v == 13: a = ["effect", "show", ID("e")]
-        elif v == 14:
-            e = ID("e")
-            a = ["effect", "apply", e, "--target", targets.get(e, A())] + opt("--timeout", r.choice(["1", "0", "-3", "abc", "99999999999999999999"]))
-        elif v == 15: a = ["effect", "mark", ID("e"), r.choice(["sent", "not-sent", "dropped", A()])] + opt("--ref", A()) + opt("--why", A())
+        elif v == 14: a = [r.choice(["effect", "effect"]), r.choice(["begin", "apply"]), ID("e")] + opt("--timeout", r.choice(["1", "0", "abc"]))
+        elif v == 15: a = ["effect", "mark", ID("e"), r.choice(["sent", "not-sent", "unknown", "dropped", A()])] + opt("--ref", A()) + opt("--why", A())
         elif v == 16: a = ["doctor"]
         elif v == 17: a = ["save", A()]
         elif v == 18: a = ["resume"] + opt("--hook")
@@ -398,197 +399,112 @@ def ctr(c):
     return c.path("ctr%d" % c.nxt())
 
 
-@attack("effect-race-apply")
+@attack("effect-race-begin")
 def a_race(c):
     t = Task(c)
     C = ctr(c)
     for rnd in range(1 if c.quick else 3):
-        tgt = "slack:#r%d" % rnd
-        eid, _ = t.plan(tgt, run="echo x >> %s; sleep 1" % shlex.quote(C))
+        eid, _ = t.plan("slack:#r%d" % rnd, how="echo x")
         with cf.ThreadPoolExecutor(24) as ex:
-            rs = list(ex.map(lambda _: t.run("effect", "apply", eid, "--target", tgt), range(24)))
+            rs = list(ex.map(lambda _: t.run("effect", "begin", eid), range(24)))
+        for r in rs:  # the sender is the agent: it sends once per successful begin
+            if r.rc == 0:
+                open(C, "a").write("x\n")
         if cnt(C) != rnd + 1:
-            c.fail("round %d: sender ran %d times for one effect (want exactly 1)" % (rnd, cnt(C) - rnd))
-        if sum(r.rc == 0 for r in rs) != 1:
-            c.fail("round %d: %d applies succeeded (want 1)" % (rnd, sum(r.rc == 0 for r in rs)))
-        t.run("effect", "apply", eid, "--target", tgt)
-        if cnt(C) != rnd + 1:
-            c.fail("apply after sent ran the sender again")
-        if t.state(eid) != "sent":
-            c.fail("state after race is %s, not sent" % t.state(eid))
+            c.fail("round %d: %d begins succeeded for one effect (want exactly 1)" % (rnd, cnt(C) - rnd))
+        if t.state(eid) != "begun":
+            c.fail("state after race is %s, not begun" % t.state(eid))
+        if t.run("effect", "begin", eid).rc == 0:
+            c.fail("begin accepted on a begun effect")
+        t.run("effect", "mark", eid, "sent")
+        if t.run("effect", "begin", eid).rc == 0 or t.state(eid) != "sent":
+            c.fail("begin accepted after sent")
+    no_quarantine(c, t)
     audit(c, t)
 
 
-@attack("effect-kill-before-claim")
-def a_kill_snap(c):
+@attack("effect-kill-during-begin")
+def a_kill_begin(c):
     t = Task(c)
-    C, F = ctr(c), c.path("flag")
-    snap = "if [ -e %s ]; then echo snap; else sleep 20; echo snap; fi" % shlex.quote(F)
-    eid, _ = t.plan("jira:K-1", run="echo x >> %s" % shlex.quote(C), extra=["--snapshot", snap])
-    p = t.popen("effect", "apply", eid, "--target", "jira:K-1")
-    time.sleep(.7)
-    p.kill()
-    p.wait()
-    if cnt(C) or t.state(eid) != "planned":
-        c.fail("killed before claim: counter=%d state=%s (want 0, planned)" % (cnt(C), t.state(eid)))
-    open(F, "w").close()
-    r = t.run("effect", "apply", eid, "--target", "jira:K-1")
-    if r.rc or cnt(C) != 1:
-        c.fail("apply after pre-claim kill: rc=%d counter=%d" % (r.rc, cnt(C)))
-
-
-@attack("effect-kill-during-run")
-def a_kill_run(c):
-    t = Task(c)
-    C = ctr(c)
-    open(t.p("outbox", "a.md"), "w").write("a\n")
-    open(t.p("outbox", "b.md"), "w").write("b\n")
-    eid, _ = t.plan("slack:#k", run="echo x >> %s; sleep 3" % shlex.quote(C), body="outbox/a.md")
-    p = t.popen("effect", "apply", eid, "--target", "slack:#k")
-    wait_for(lambda: cnt(C) == 1, 10)
-    p.kill()
-    p.wait()
-    st = t.state(eid)
-    if st != "unknown":
-        c.fail("apply killed mid-run: state is %s (want unknown)" % st)
-    time.sleep(3.3)
-    if t.run("effect", "apply", eid, "--target", "slack:#k").rc == 0 or cnt(C) != 1:
-        c.fail("applying an unknown effect ran the sender again (counter=%d)" % cnt(C))
-    e2, _ = t.plan("slack:#k", run="echo x >> %s; sleep 3" % shlex.quote(C), body="outbox/a.md")
-    if e2 != eid:
-        c.fail("repeat plan of same key gave %s, want %s" % (e2, eid))
-    if t.plan("slack:#k", run="echo y >> %s" % shlex.quote(C), body="outbox/b.md")[1].rc == 0:
-        c.fail("reworded plan accepted on a target with an unknown effect")
-    if t.run("status", "done").rc == 0:
-        c.fail("status done accepted with an unknown effect")
-    if t.run("effect", "mark", eid, "not-sent").rc:
-        c.fail("cannot mark an unknown effect not-sent")
-    open(t.p("outbox", "a.md"), "w").write("a\n")
-    r = t.run("effect", "apply", eid, "--target", "slack:#k")
-    if r.rc or cnt(C) != 2:
-        c.fail("deliberate second attempt: rc=%d counter=%d (want 2)" % (r.rc, cnt(C)))
-    audit(c, t)
-
-
-@attack("effect-kill-after-run")
-def a_kill_verify(c):
-    t = Task(c)
-    C, F = ctr(c), c.path("flag")
-    eid, _ = t.plan("slack:#v", run="echo x >> %s" % shlex.quote(C), extra=["--verify", "if [ -e %s ]; then true; else sleep 20; fi" % shlex.quote(F)])
-    p = t.popen("effect", "apply", eid, "--target", "slack:#v")
-    wait_for(lambda: cnt(C) == 1, 10)
-    time.sleep(.2)
-    p.kill()
-    p.wait()
-    if t.state(eid) != "unknown":
-        c.fail("killed after run, before outcome row: state %s (want unknown)" % t.state(eid))
-    if t.run("effect", "apply", eid, "--target", "slack:#v").rc == 0 or cnt(C) != 1:
-        c.fail("second send after kill between run and outcome")
-    open(F, "w").close()
-    if not escape(t, eid):
-        c.fail("no legal way out of effect state")
-
-
-@attack("effect-kill-random")
-def a_kill_rand(c):
-    t = Task(c)
-    for i in range(7 if c.quick else 45):
-        C = ctr(c)
-        tgt = "slack:#x%d" % i
-        eid, _ = t.plan(tgt, run="echo x >> %s" % shlex.quote(C))
-        p = t.popen("effect", "apply", eid, "--target", tgt)
-        time.sleep(c.rng.uniform(0, .15))
+    for i in range(6 if c.quick else 20):
+        eid, _ = t.plan("jira:K-%d" % i, how="echo x")
+        p = t.popen("effect", "begin", eid)
+        time.sleep(random.random() * 0.15)
         p.kill()
         p.wait()
-        time.sleep(.25)
-        n, st = cnt(C), t.state(eid)
-        if n > 1:
-            c.fail("sender ran %d times for one attempt" % n)
-        if n >= 1 and st == "planned":
-            c.fail("sender ran (counter=%d) but effect %s is planned: a second apply would resend" % (n, eid))
-        if st == "planned":
-            t.run("effect", "apply", eid, "--target", tgt)
-            if cnt(C) != 1:
-                c.fail("after pre-claim kill, re-apply produced counter=%d" % cnt(C))
-        elif not escape(t, eid):
-            c.fail("effect %s stuck in %s with no legal way out" % (eid, st))
+        st = t.state(eid)
+        if st not in ("planned", "begun"):
+            c.fail("begin killed: state is %s (want planned or begun)" % st)
+        if st == "begun" and t.run("effect", "begin", eid).rc == 0:
+            c.fail("begin accepted on an effect left begun by a crash")
+        if not escape(c, t, eid):
+            c.fail("effect %s stuck in %s with no legal way out" % (eid, t.state(eid)))
+    no_quarantine(c, t)
     audit(c, t)
 
 
-@attack("effect-exit-nonzero")
-def a_nz(c):
+@attack("effect-crash-gap")
+def a_gap(c):
     t = Task(c)
-    C = ctr(c)
-    open(t.p("outbox", "a.md"), "w").write("a\n")
-    eid, _ = t.plan("slack:#nz", run="echo x >> %s; exit 3" % shlex.quote(C), body="outbox/a.md")
-    r = t.run("effect", "apply", eid, "--target", "slack:#nz")
-    if r.rc != 1 or t.state(eid) != "unknown" or cnt(C) != 1:
-        c.fail("non-zero sender: rc=%d state=%s counter=%d (want 1, unknown, 1)" % (r.rc, t.state(eid), cnt(C)))
-    t.run("effect", "apply", eid, "--target", "slack:#nz")
-    if cnt(C) != 1:
-        c.fail("unknown effect was retried")
-    e2, r2 = t.plan("slack:#nz", run="echo x >> %s; exit 3" % shlex.quote(C), body="outbox/a.md")
-    if e2 != eid or r2.rc:
-        c.fail("repeat plan after unknown: %r rc=%d" % (e2, r2.rc))
-    if t.plan("slack:#nz", body="outbox/a.md")[1].rc == 0:
-        c.fail("manual plan accepted on target with unknown effect, no --again")
-    e3, r3 = t.plan("slack:#nz", run="echo x >> %s; exit 3" % shlex.quote(C), body="outbox/a.md", extra=["--again"])
-    if not e3 or e3 == eid:
+    e, _ = t.plan("g:1", how="echo x")
+    key = re.search(r"^key: (\w+)", t.run("effect", "show", e).out, re.M).group(1)
+    open(t.p(".awt", "claims", key + ".1"), "w").close()  # crash between the claim file and the begun row
+    if t.state(e) != "begun":
+        c.fail("claim file with no begun row should read begun, got %s" % t.state(e))
+    if t.run("effect", "begin", e).rc == 0 or t.run("effect", "mark", e, "dropped").rc == 0:
+        c.fail("begin or drop accepted after a claim-file crash")
+    if t.run("status", "done").rc == 0:
+        c.fail("status done accepted with a begun effect")
+    if t.run("effect", "mark", e, "not-sent", "--why", "checked").rc or t.state(e) != "planned":
+        c.fail("no legal way out after claim-file crash")
+    if t.run("effect", "begin", e).rc or t.state(e) != "begun":
+        c.fail("attempt 2 cannot begin after not-sent")
+    if not os.path.exists(t.p(".awt", "claims", key + ".2")):
+        c.fail("attempt 2 claim file missing")
+
+
+@attack("effect-begun-never-expires")
+def a_begun_old(c):
+    t = Task(c)
+    e, _ = t.plan("old:1", how="echo x")
+    t.run("effect", "begin", e)
+    t.forge("effect", id=e, step="claimed", attempt=1, pid=2 ** 22 + 77, timeout=1, ts=iso(-86400 * 30))  # a legacy claimed row, a month old
+    if t.state(e) != "begun":
+        c.fail("a month-old begun effect reads %s; only the sender can know, so it stays begun" % t.state(e))
+    if t.run("status", "done").rc == 0:
+        c.fail("status done accepted with a begun effect")
+    if e not in t.run("resume").out:
+        c.fail("begun effect missing from the brief")
+    if not escape(c, t, e):
+        c.fail("no legal way out of a long-begun effect")
+
+
+@attack("effect-unknown-never-retried")
+def a_unknown(c):
+    t = Task(c)
+    open(t.p("outbox", "o.md"), "w").write("o\n")
+    e, _ = t.plan("slack:#nz", how="echo x")
+    t.run("effect", "begin", e)
+    if t.run("effect", "mark", e, "unknown").rc != 2:
+        c.fail("mark unknown without --why: want exit 2")
+    if t.run("effect", "mark", e, "unknown", "--why", "timed out").rc or t.state(e) != "unknown":
+        c.fail("cannot mark a begun effect unknown")
+    if e not in t.run("resume").out:
+        c.fail("unknown effect missing from the brief")
+    if t.run("effect", "begin", e).rc == 0:
+        c.fail("unknown effect was begun again")
+    if t.run("effect", "plan", "--target", "slack:#nz", "--body", "outbox/o.md").rc == 0:
+        c.fail("plan accepted on a target with an unknown effect, no --again")
+    if t.run("status", "done").rc == 0:
+        c.fail("status done accepted with an unknown effect")
+    if t.run("effect", "mark", e, "dropped").rc == 0:
+        c.fail("unknown effect dropped (acknowledged without a person checking)")
+    e3, r = t.plan("slack:#nz", body="outbox/o.md", extra=["--again"])
+    if not e3 or e3 == e:
         c.fail("--again did not create a new effect")
-    else:
-        t.run("effect", "apply", e3, "--target", "slack:#nz")
-        if cnt(C) != 2:
-            c.fail("--again: counter %d (want 2)" % cnt(C))
-    for e in (eid, e3):
-        if e and not escape(t, e):
-            c.fail("stuck: %s" % e)
+    if t.run("effect", "mark", e, "not-sent", "--why", "checked").rc or t.state(e) != "planned":
+        c.fail("cannot mark an unknown effect not-sent")
     audit(c, t)
-
-
-@attack("effect-timeout")
-def a_to(c):
-    t = Task(c)
-    C = ctr(c)
-    eid, _ = t.plan("slack:#to", run="echo x >> %s; sleep 3; echo y >> %s" % ((shlex.quote(C),) * 2))
-    r = t.run("effect", "apply", eid, "--target", "slack:#to", "--timeout", "1")
-    if r.dt > 15:
-        c.fail("--timeout 1 took %.1fs" % r.dt)
-    if t.state(eid) != "unknown" or r.rc != 1:
-        c.fail("timeout: rc=%d state=%s (want 1, unknown)" % (r.rc, t.state(eid)))
-    time.sleep(3.5)
-    if cnt(C) != 1:
-        c.fail("timed-out sender kept running (counter=%d, want 1)" % cnt(C))
-    r = t.run("effect", "apply", eid, "--target", "slack:#to", "--timeout", "0")
-    if cnt(C) != 1:
-        c.fail("unknown effect re-run with --timeout 0")
-
-
-@attack("effect-snapshot-timeout")
-def a_snap_to(c):
-    t = Task(c)
-    C = ctr(c)
-    eid, _ = t.plan("slack:#st", run="echo x >> %s" % shlex.quote(C), extra=["--snapshot", "sleep 30; echo s"])
-    r = t.run("effect", "apply", eid, "--target", "slack:#st", "--timeout", "1")
-    if r.dt > 15:
-        c.fail("snapshot ignored --timeout (%.0fs)" % r.dt)
-    if cnt(C) or t.state(eid) not in ("planned",):
-        c.fail("snapshot timeout consumed the effect: counter=%d state=%s" % (cnt(C), t.state(eid)))
-
-
-@attack("effect-snapshot-empty-verify-fail")
-def a_snap_empty(c):
-    t = Task(c)
-    C = ctr(c)
-    eid, _ = t.plan("slack:#se", run="echo x >> %s" % shlex.quote(C), extra=["--snapshot", "true"])
-    r = t.run("effect", "apply", eid, "--target", "slack:#se")
-    if r.rc != 1 or cnt(C) or t.state(eid) != "planned" or os.listdir(t.p(".awt", "claims")):
-        c.fail("empty snapshot: rc=%d counter=%d state=%s claims=%s" % (r.rc, cnt(C), t.state(eid), os.listdir(t.p(".awt", "claims"))))
-    e2, _ = t.plan("slack:#vf", run="echo x >> %s" % shlex.quote(C), extra=["--verify", "false"])
-    r = t.run("effect", "apply", e2, "--target", "slack:#vf")
-    if r.rc != 1 or t.state(e2) != "unknown" or cnt(C) != 1:
-        c.fail("failing verify: rc=%d state=%s counter=%d" % (r.rc, t.state(e2), cnt(C)))
-    if t.plan("slack:#ow", run="true", extra=["--class", "overwrite"])[1].rc != 1:
-        c.fail("overwrite without --snapshot accepted")
 
 
 @attack("effect-plan-repeat-race")
@@ -599,132 +515,114 @@ def a_plan_rep(c):
     if len(ids) != 1 or t.effrows() != 1:
         c.fail("5 sequential identical plans made %d effects" % t.effrows())
     with cf.ThreadPoolExecutor(16) as ex:
-        res = list(ex.map(lambda _: t.plan("slack:#pr2", run="echo hi", body="outbox/a.md")[0], range(16)))
+        res = list(ex.map(lambda _: t.plan("slack:#pr2", how="echo hi", body="outbox/a.md")[0], range(16)))
     n = t.effrows() - 1
     if n != 1 or len(set(res)) != 1:
         c.fail("16 concurrent identical plans created %d effects (%d distinct ids); same key must write nothing" % (n, len(set(res))))
     audit(c, t)
 
 
-@attack("effect-mark-inflight")
-def a_inflight(c):
+@attack("effect-mark-race")
+def a_mark_race(c):
     t = Task(c)
-    C = ctr(c)
-    eid, _ = t.plan("slack:#mf", run="echo x >> %s; sleep 2" % shlex.quote(C))
-    p = t.popen("effect", "apply", eid, "--target", "slack:#mf")
-    wait_for(lambda: cnt(C) == 1, 10)
-    for to in ("sent", "not-sent", "dropped"):
-        if t.run("effect", "mark", eid, to).rc == 0:
-            c.fail("mark %s accepted while the sender is in flight" % to)
-    t.ctx.finish(p, ["apply"])
-    if t.state(eid) != "sent" or cnt(C) != 1:
-        c.fail("after in-flight marks: state=%s counter=%d" % (t.state(eid), cnt(C)))
+    e, _ = t.plan("slack:#mr", how="echo x")
+    t.run("effect", "begin", e)
+    tos = ["sent", "not-sent", "unknown", "dropped", "sent", "not-sent", "unknown", "sent"] * 2
+    with cf.ThreadPoolExecutor(16) as ex:
+        list(ex.map(lambda to: t.run("effect", "mark", e, to, "--why", "race"), tos))
+    if t.state(e) not in ("sent", "planned", "unknown"):
+        c.fail("state after concurrent marks: %s" % t.state(e))
+    no_quarantine(c, t)  # marks are serialised: none may be written illegally
+    audit(c, t)
 
 
-@attack("effect-drop-during-snapshot")
-def a_drop_snap(c):
+@attack("effect-begin-vs-drop")
+def a_begin_drop(c):
     t = Task(c)
-    C = ctr(c)
-    eid, _ = t.plan("slack:#ds", run="echo x >> %s" % shlex.quote(C), extra=["--snapshot", "sleep 2; echo snap"])
-    p = t.popen("effect", "apply", eid, "--target", "slack:#ds")
-    time.sleep(.8)
-    r = t.run("effect", "mark", eid, "dropped")
-    t.ctx.finish(p, ["apply"])
-    if r.rc == 0 and cnt(C):
-        c.fail("effect %s was marked dropped (acknowledged) while apply was snapshotting, then apply SENT it anyway (counter=%d). state now: %s" % (eid, cnt(C), t.state(eid)))
+    for i in range(4 if c.quick else 10):
+        e, _ = t.plan("slack:#bd%d" % i, how="echo x")
+        with cf.ThreadPoolExecutor(2) as ex:
+            fb = ex.submit(t.run, "effect", "begin", e)
+            fd = ex.submit(t.run, "effect", "mark", e, "dropped")
+            b, d = fb.result(), fd.result()
+        if b.rc == 0 and d.rc == 0:
+            c.fail("effect %s was both begun and dropped" % e)
+        if t.state(e) != ("begun" if b.rc == 0 else "dropped"):
+            c.fail("begin rc=%d drop rc=%d but state is %s" % (b.rc, d.rc, t.state(e)))
+    no_quarantine(c, t)
 
 
 @attack("effect-legality")
 def a_legal(c):
     t = Task(c)
     C = ctr(c)
-    for n in "ab":
-        open(t.p("outbox", n + ".md"), "w").write(n + "\n")
-    e, _ = t.plan("t:run", run="echo x >> %s" % shlex.quote(C))
-    for to in ("sent", "not-sent"):
-        if t.run("effect", "mark", e, to).rc == 0:
-            c.fail("mark %s accepted from planned on a run effect" % to)
-    if t.run("effect", "apply", e, "--target", "t:other").rc == 0 or cnt(C):
-        c.fail("apply with the wrong --target ran")
-    if t.run("effect", "apply", "e-00000000", "--target", "x").rc != 4:
-        c.fail("apply unknown id: want exit 4")
-    if t.run("effect", "show", "e-00000000").rc != 4:
-        c.fail("show unknown id: want exit 4")
-    if t.run("effect", "plan", "--target", "x").rc != 2:
-        c.fail("plan with neither --body nor --run: want exit 2")
-    if t.run("effect", "plan", "--target", "x", "--body", "outbox").rc == 0:
-        c.fail("plan --body directory accepted")
-    if t.run("effect", "plan", "--target", "x" * 201, "--run", "true").rc == 0:
-        c.fail("201-char target accepted")
-    if t.run("effect", "plan", "--target", "x", "--run", "true", "--after", "e-00000000").rc != 4:
-        c.fail("plan --after unknown id: want exit 4")
-    m, _ = t.plan("t:man", body="outbox/a.md")
-    ra = t.run("effect", "apply", m, "--target", "t:man")
-    if ra.rc == 0 or "outbox/a.md" not in (ra.out + ra.err) or "mark" not in (ra.out + ra.err):
-        c.fail("apply on a manual effect must refuse and print body path + mark command")
-    # body changed after plan
-    b, _ = t.plan("t:body", run="echo x >> %s" % shlex.quote(C), body="outbox/b.md")
-    open(t.p("outbox", "b.md"), "w").write("changed\n")
-    if t.run("effect", "apply", b, "--target", "t:body").rc == 0 or cnt(C):
-        c.fail("apply ran after body changed")
-    # after
-    a2, _ = t.plan("t:after", run="echo x >> %s" % shlex.quote(C), extra=["--after", m])
-    if t.run("effect", "apply", a2, "--target", "t:after").rc == 0 or cnt(C):
-        c.fail("apply ran while --after effect is not sent")
+    for a, rc in ((["effect", "show", "e-00000000"], 4), (["effect", "begin", "e-00000000"], 4), (["effect", "mark", "e-00000000", "sent"], 4),
+                  (["effect", "plan", "--target", "x" * 201], 1), (["effect", "plan", "--target", "x", "--body", "outbox"], 1),
+                  (["effect", "plan", "--target", "x", "--after", "e-00000000"], 4), (["effect", "plan", "--target", "x", "--how", "y" * 401], 1)):
+        r = t.run(*a)
+        if r.rc != rc and not (rc == 1 and r.rc == 2):
+            c.fail("awt %s: want exit %d, got %d" % (" ".join(a[:3]), rc, r.rc))
+    # removed verbs and flags: exit 2 and a fix naming plan, begin and mark; nothing runs, nothing is written
+    m, _ = t.plan("t:man")
+    for a in (["effect", "apply", m, "--target", "t:man"], ["effect", "plan", "--target", "t:r", "--run", "touch CANARY2"],
+              ["effect", "plan", "--target", "t:r", "--snapshot", "x"], ["effect", "plan", "--target", "t:r", "--verify", "x"],
+              ["effect", "plan", "--target", "t:r", "--class", "overwrite"], ["effect", "apply", m, "--timeout", "3"]):
+        r = t.run(*a)
+        if r.rc != 2 or not all(w in r.err for w in ("fix:", "plan", "begin", "mark")):
+            c.fail("removed %s: want exit 2 and a fix naming plan/begin/mark, got %d %r" % (a[:2] + a[-2:-1], r.rc, r.err[:100]))
+    if t.effrows() != 1 or os.path.exists(t.p(".awt", "runs")) or os.path.exists(t.p(".awt", "blobs")):
+        c.fail("removed flags wrote rows or runs/blobs")
+    # marks from planned: only sent (a person) and dropped
+    for to in ("not-sent", "unknown"):
+        if t.run("effect", "mark", m, to, "--why", "w").rc == 0:
+            c.fail("mark %s accepted from planned" % to)
+    # begin: body change and unsent prerequisites refuse
+    open(t.p("outbox", "b.md"), "w").write("v1\n")
+    b, _ = t.plan("t:body", body="outbox/b.md")
+    open(t.p("outbox", "b.md"), "w").write("v2\n")
+    if t.run("effect", "begin", b).rc == 0:
+        c.fail("begin accepted after the body changed")
+    a2, _ = t.plan("t:after", extra=["--after", m])
+    if t.run("effect", "begin", a2).rc == 0:
+        c.fail("begin accepted while the --after effect is not sent")
     if t.run("status", "done").rc == 0:
         c.fail("status done accepted with planned effects")
     if t.run("effect", "mark", m, "sent", "--ref", "http://x").rc:
-        c.fail("manual mark sent refused")
-    if t.run("effect", "apply", a2, "--target", "t:after").rc or cnt(C) != 1:
-        c.fail("apply after prerequisite sent failed")
-    for to in ("sent", "dropped", "not-sent"):
-        if t.run("effect", "mark", m, to).rc == 0:
-            c.fail("mark %s accepted from sent" % to)
-    d, _ = t.plan("t:drop", body="outbox/a.md", extra=["--why", "again"])
+        c.fail("a person cannot mark a planned effect sent")
+    if t.run("effect", "begin", a2).rc:
+        c.fail("begin refused after the prerequisite was sent")
+    for to in ("sent", "not-sent", "unknown", "dropped"):
+        if t.run("effect", "mark", m, to, "--why", "w").rc == 0:
+            c.fail("mark %s accepted on a terminal effect" % to)
+    t.run("effect", "mark", b, "dropped")
+    d, _ = t.plan("t:d")
     t.run("effect", "mark", d, "dropped")
-    r = t.plan("t:drop", body="outbox/a.md")[1]
-    if r.rc != 1 or "--again" not in r.err:
-        c.fail("re-plan of dropped effect: want refusal with --again fix, got rc=%d %s" % (r.rc, r.err[:80]))
-    for e2 in (e, b):
-        t.run("effect", "mark", e2, "dropped")
-    if t.run("status", "done").rc != 0:
+    r = t.run("effect", "plan", "--target", "t:d")
+    if r.rc == 0 or "--again" not in r.err:
+        c.fail("re-plan of a dropped effect: want refusal with --again fix, got rc=%d %s" % (r.rc, r.err[:80]))
+    t.run("effect", "mark", a2, "sent")
+    if t.run("status", "done").rc:
         c.fail("status done refused after all effects resolved: %s" % t.run("status", "done").err[:120])
 
 
-@attack("effect-crash-gap-conflict-stuck")
-def a_gap(c):
+@attack("effect-never-executes")
+def a_never_executes(c):
+    """--how is text. Nothing awt does for an effect starts a process, so a command in --how, --why or a body never runs."""
     t = Task(c)
-    C = ctr(c)
-    # crash between claim file and claimed row
-    e, _ = t.plan("g:1", run="echo x >> %s" % shlex.quote(C))
-    key = re.search(r"^key: (\w+)", t.run("effect", "show", e).out, re.M).group(1)
-    open(t.p(".awt", "claims", key + ".1"), "w").close()
-    if t.state(e) != "unknown":
-        c.fail("claim file with no claimed row should read unknown, got %s" % t.state(e))
-    if t.run("effect", "apply", e, "--target", "g:1").rc == 0 or cnt(C):
-        c.fail("apply ran after crash between claim and claimed row")
-    if not escape(t, e):
-        c.fail("no legal way out after claim-file crash")
-    # conflict
-    e, _ = t.plan("g:2", run="echo x >> %s" % shlex.quote(C))
-    for _ in range(2):
-        t.forge("effect", id=e, step="claimed", attempt=1, pid=2 ** 22 + 77)
-    if t.state(e) != "conflict" or "conflict" not in t.run("resume").out:
-        c.fail("two claimed rows for one attempt: state=%s (brief must show conflict)" % t.state(e))
-    if not escape(t, e):
-        c.fail("no legal way out of conflict")
-    # recycled pid: claimed by a pid that is alive but is not awt
-    e, _ = t.plan("g:3", run="echo x >> %s" % shlex.quote(C))
-    sl = subprocess.Popen(["sleep", "600"])
-    try:
-        # a claim older than its timeout plus margin is no longer in flight, even though the pid is alive
-        t.forge("effect", id=e, step="claimed", attempt=1, pid=sl.pid, ts=iso(-3600), timeout=5)
-        ok = escape(t, e)
-        if not ok:
-            c.fail("effect %s is 'claimed' by a dead apply whose pid was reused by another live process: mark, apply and status done are all refused forever (no legal way out)" % e)
-    finally:
-        sl.kill()
-        sl.wait()
+    cmd = "touch CANARY2; echo $(touch CANARY3)"
+    open(t.p("outbox", "x.md"), "w").write(cmd + "\n")
+    e, _ = t.plan("run:1", how=cmd, body="outbox/x.md", extra=["--why", cmd])
+    for a in (["effect", "begin", e], ["effect", "show", e], ["effect", "mark", e, "unknown", "--why", cmd], ["effect", "mark", e, "sent", "--ref", cmd],
+              ["resume"], ["list", "effects"], ["doctor"]):
+        t.run(*a)
+    for n in ("CANARY2", "CANARY3"):
+        if os.path.exists(t.p(n)):
+            c.fail("%s exists: an effect text was executed" % n)
+    src = open(AWT).read()
+    for m in re.finditer(r"^def (eff_\w+)\(.*?(?=^def |\Z)", src, re.M | re.S):
+        if re.search(r"subprocess|os\.system|os\.exec|os\.spawn|os\.popen", m.group(0)):
+            c.fail("%s mentions a process-starting call" % m.group(1))
+
 
 
 # ---------------------------------------------------------------- log damage
@@ -736,7 +634,7 @@ def seed(t):
     open(t.p("outbox", "seed.md"), "w").write("seed\n")
     C = ctr(t.ctx)
     m, _ = t.plan("manual:t", body="outbox/seed.md")
-    r, _ = t.plan("slack:#run", run="echo x >> %s" % shlex.quote(C))
+    r, _ = t.plan("slack:#run", how="echo x")
     t.run("capture", "--from", "slack", "--title", "seed cap", stdin=b"captured text\n")
     ids += [m, r]
     t.id("note", "SACRIFICE row last")
@@ -779,17 +677,17 @@ def dmg_dup(t): t.append(rd(t))
 
 
 def dmg_forged(t):
-    for st, extra in (("sent", {}), ("claimed", {}), ("planned", {"attempt": 9}), ("dropped", {})):
+    for st, extra in (("sent", {}), ("begun", {}), ("claimed", {}), ("planned", {"attempt": 9}), ("dropped", {})):  # an id that was never planned
         t.forge("effect", id="e-ffffffff", step=st, **extra)
     for ln in rd(t).split(b"\n"):
         try:
             r = json.loads(ln)
         except Exception:
             continue
-        if r.get("type") == "effect" and r.get("run"):
-            for st, n in (("sent", 1), ("unknown", 1), ("planned", 5), ("claimed", 3), ("sent", 2)):
+        if r.get("type") == "effect" and r.get("how"):  # all illegal from planned attempt 1
+            for st, n in (("unknown", 1), ("planned", 5), ("planned", 1), ("claimed", 3), ("begun", 2), ("sent", 2)):
                 t.forge("effect", id=r["id"], step=st, attempt=n)
-            t.forge("effect", id=r["id"], step="planned", attempt=1, target="other", key="zz", run="echo evil")
+            t.forge("effect", id=r["id"], step="planned", attempt=1, target="other", key="zz", how="echo evil")
 
 
 def dmg_skew(t):
@@ -797,7 +695,7 @@ def dmg_skew(t):
     for ln in rd(t).split(b"\n"):
         try:
             r = json.loads(ln)
-            if r.get("type") == "effect" and r.get("run"):
+            if r.get("type") == "effect" and r.get("how"):
                 r["ts"] = iso(3600)
             ln = json.dumps(r, ensure_ascii=False).encode()
         except Exception:
@@ -812,8 +710,8 @@ def dmg_skew(t):
 
 def dmg_types(t):
     base = dict(v=1, ts=iso(), host=HOST, by="x")
-    rows = [dict(base, type="effect", id="e-11111111", step="planned", target=["a"], key="k1", run="true"),
-            dict(base, type="effect", id="e-22222222", step="planned", target=5, key="k2", body=["x"], run=7),
+    rows = [dict(base, type="effect", id="e-11111111", step="planned", target=["a"], key="k1", how="true"),
+            dict(base, type="effect", id="e-22222222", step="planned", target=5, key="k2", body=["x"], how=7),
             dict(base, type="effect", id="e-33333333", step="planned", target="t", key=9, after=5, attempt=True),
             dict(base, type="decision", id="d-11111111", choice="c", why="w", tags=[1, {"a": 1}, None]),
             dict(base, type="decision", id="d-22222222", choice="c", why="w", tags="rule", supersedes=["x"]),
@@ -857,23 +755,15 @@ for _n, _f, _keep, _strict in (("trunc-mid-row", dmg_trunc, True, True), ("parti
                 c.fail("write refused after '%s'" % name)
             elif n not in t.run("list", "notes").out:
                 c.fail("write after '%s' acknowledged but not visible (torn tail not healed?)" % name)
-            if keep and name not in ("forged-illegal-effects", "clock-skew"):
-                r = t.run("effect", "apply", reff, "--target", "slack:#run")
-                if r.rc or cnt(C) != 1 or t.state(reff) != "sent":
-                    c.fail("effect apply after '%s': rc=%d counter=%d state=%s: %s" % (name, r.rc, cnt(C), t.state(reff), r.err.strip()[:100]))
-            if name == "clock-skew":
-                r = t.run("effect", "apply", reff, "--target", "slack:#run")
-                if r.rc == 0 and t.state(reff) != "sent":
-                    c.fail("apply acknowledged 'sent' but state reads %s: planned row has a future ts, so claimed/sent rows sort before it and are quarantined" % t.state(reff))
-                if cnt(C) > 1:
-                    c.fail("counter %d" % cnt(C))
+            if keep and name != "forged-illegal-effects":
+                r = t.run("effect", "begin", reff)
+                if r.rc or t.state(reff) != "begun":
+                    c.fail("effect begin after '%s': rc=%d state=%s: %s" % (name, r.rc, t.state(reff), r.err.strip()[:100]))
             if name == "forged-illegal-effects":
                 if t.state(reff) != "planned":
                     c.fail("forged illegal transitions changed state of a real effect to %s" % t.state(reff))
-                else:
-                    t.run("effect", "apply", reff, "--target", "slack:#run")
-                    if cnt(C) != 1:
-                        c.fail("apply after forged rows: counter=%d" % cnt(C))
+                elif t.run("effect", "begin", reff).rc:  # (the claim file then makes the forged rows' replay order-blind, as in the crash-gap rule)
+                    c.fail("begin refused after forged rows")
     _mk(_n, _f, _keep, _strict)
 
 
@@ -933,24 +823,22 @@ def a_ro(c):
     open(t.p("docs", "b.md"), "w").write("b\n")
     open(t.p("outbox", "o.md"), "w").write("o\n")
     C = ctr(c)
-    e, _ = t.plan("ro:1", run="echo x >> %s" % shlex.quote(C))
+    e, _ = t.plan("ro:1", how="echo x")
     t.run("note", "pre")
     os.chmod(t.ev, 0o444)
-    ds = [t.dir] + [t.p(d) for d in ("context", "docs", "outbox", "misc", ".awt", ".awt/claims", ".awt/blobs", ".awt/runs")]
+    ds = [t.dir] + [t.p(d) for d in ("context", "docs", "outbox", "misc", ".awt", ".awt/claims")]
     for d in ds:
         os.chmod(d, 0o555)
     try:
         cases = [["note", "x"], ["ask", "x"], ["state", "--now", "a", "--next", "b"], ["decide", "c", "--why", "w"], ["ref", "http://x", "--title", "t"],
                  ["capture", "--from", "s", "--title", "t"], ["supersede", "docs/a.md", "docs/b.md"], ["status", "paused"],
-                 ["effect", "plan", "--target", "ro:2", "--body", "outbox/o.md"], ["effect", "apply", e, "--target", "ro:1"], ["init", "--goal", "g2", "--done", "d2"]]
+                 ["effect", "plan", "--target", "ro:2", "--body", "outbox/o.md"], ["effect", "begin", e], ["init", "--goal", "g2", "--done", "d2"]]
         for a in cases:
             r = t.run(*a, stdin=b"body" if a[0] == "capture" else None)
             if r.rc != 3:
                 c.fail("read-only: awt %s exited %d (want 3): %s" % (" ".join(a[:3]), r.rc, (r.err or r.out).strip()[:100]))
             elif "awt" not in r.err or "run" not in r.err:
                 c.fail("exit 3 did not print the exact command to rerun: %r" % r.err[:100])
-        if cnt(C):
-            c.fail("sender ran although nothing could be recorded (counter=%d)" % cnt(C))
         for a in (["resume"], ["list"], ["find", "x"], ["resume", "--hook"]):
             if t.run(*a).rc:
                 c.fail("read-only: %s failed" % a[0])
@@ -964,12 +852,11 @@ def a_ro(c):
 def a_missing(c):
     t = Task(c)
     C = ctr(c)
-    for d in ("claims", "blobs", "runs"):
-        shutil.rmtree(t.p(".awt", d))
-    e, _ = t.plan("md:1", run="echo x >> %s" % shlex.quote(C), extra=["--snapshot", "echo s"])
-    r = t.run("effect", "apply", e, "--target", "md:1")
-    if r.rc or cnt(C) != 1:
-        c.fail("apply with missing .awt/claims: rc=%d counter=%d" % (r.rc, cnt(C)))
+    shutil.rmtree(t.p(".awt", "claims"))
+    e, _ = t.plan("md:1", how="echo x")
+    r = t.run("effect", "begin", e)
+    if r.rc or t.state(e) != "begun":
+        c.fail("begin with missing .awt/claims: rc=%d state=%s" % (r.rc, t.state(e)))
     os.unlink(t.ev)
     t.sane("no events file")
     shutil.rmtree(t.p(".awt"))
@@ -1124,7 +1011,7 @@ def mk_locale(name, env_over):
             put(t, nm, "# héllo 日本語\n".encode())
         env = c.env(**env_over)
         for a_ in (["note", "héllo 日本語 😀"], ["state", "--now", "日本語 ✓", "--next", "é"], ["decide", "ünï", "--why", "😀"], ["list"], ["find", "日本語"], ["resume"], ["resume", "--hook"],
-                   ["ref", "https://x.com/é", "--title", "ü"], ["effect", "plan", "--target", "slack:#é", "--run", "true"]):
+                   ["ref", "https://x.com/é", "--title", "ü"], ["effect", "plan", "--target", "slack:#é", "--how", "true"]):
             r = t.run(*a_, env=env)
             if r.rc and a_[0] != "find":
                 c.fail("locale %s: awt %s exited %d: %s" % (name, a_[0], r.rc, r.err.strip()[:120]))
@@ -1302,7 +1189,7 @@ def a_secrets(c):
     for k, v in SEC.items():
         for a in (["note", "x " + v], ["ask", v], ["decide", "c", "--why", v], ["decide", "c", "--why", "w", "--tag", v], ["state", "--now", v, "--next", "n"],
                   ["state", "--now", "n", "--next", "n", "--scope", v], ["ref", "http://x/" + v, "--title", "t"], ["ref", "http://x", "--title", v, "--why", v],
-                  ["effect", "plan", "--target", v, "--run", "true"], ["effect", "plan", "--target", "t", "--run", v], ["effect", "plan", "--target", "t", "--run", "true", "--verify", v],
+                  ["effect", "plan", "--target", v, "--how", "true"], ["effect", "plan", "--target", "t", "--how", v], ["effect", "plan", "--target", "t", "--why", v],
                   ["--by", v, "note", "hello"], ["capture", "--from", v, "--title", "t"], ["capture", "--from", "s", "--title", v]):
             r = t.run(*a, stdin=b"body\n", env=c.env(AWT_BY=v) if a[0] == "effect" else None)
             if r.rc == 0:
@@ -1475,7 +1362,7 @@ def a_par(c):
             elif v == 1: x = t.run("ask", tag)
             elif v == 2: x = t.run("decide", tag, "--why", "w")
             elif v == 3: x = t.run("state", "--now", tag, "--next", "n", "--scope", "s%d-%d" % (k, i))
-            elif v == 4: x = t.run("effect", "plan", "--target", tag, "--run", "true")
+            elif v == 4: x = t.run("effect", "plan", "--target", tag, "--how", "true")
             else:
                 x = t.run("capture", "--from", "p", "--title", tag, stdin=(tag + " body\n").encode())
                 if x.rc == 0 and "captured" in x.out:

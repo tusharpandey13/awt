@@ -49,6 +49,22 @@ Every test and every chaos run ends by checking the ones that apply.
 | I7 | Re-running any idempotent operation (`init --key`, `migrate-paseo`) writes no row and changes no file in the tree, apart from rewriting `legacy/paseo-migration.md` |
 | I8 | Existing standalone tests produce byte-identical output to before the change |
 
+## Declared effects (`test_awt.py` TestEffects, TestLegacyEffects; `test_gaps.py` DoctorAskRule; chaos `effect-*`)
+
+awt never executes commands (SPEC, Effects). Tests run the real verbs and check exit codes, rows and files.
+
+- E1 Flow: `plan` (with `--body`, `--how`), `begin` (prints body, `--how`, the `mark` command; creates `.awt/claims/<key>.1`), `mark sent --ref`. Terminal states refuse every mark and `begin`. A repeated plan with the same key writes nothing.
+- E2 A person can `mark sent` straight from `planned`. From `planned` only `sent` and `dropped` are legal; `not-sent` and `unknown` are refused. `dropped` re-plan needs `--again`.
+- E3 `begin` wins once: 6 to 24 concurrent begins give one exit 0 and the rest exit 1, one `begun` row (chaos `effect-race-begin`). Begin racing `mark dropped` never does both (`effect-begin-vs-drop`). Concurrent marks leave no quarantined row (`effect-mark-race`).
+- E4 `not-sent` (needs `--why`, else exit 2) returns to `planned` with `attempt+1`; the next `begin` creates `<key>.2`. `unknown` needs `--why`, resolves only to `sent` or `not-sent`, is not retried, and blocks a plan on the same target without `--again`.
+- E5 `--after` ids must exist (exit 4) and be `sent` before `begin`. A changed body refuses `begin` with fix `plan again`.
+- E6 Removed: `effect apply` and `--run`, `--snapshot`, `--verify`, `--class`, `--timeout` (also `--flag=value`) exit 2 with a `fix:` naming plan, begin and mark, write no row, and create no `.awt/runs/` or `.awt/blobs/`.
+- E7 `status done` is refused while an effect is `planned` or `begun`, and passes once marked. `resume` lists `begun` and `unknown` effects.
+- E8 Crash semantics: a claim file with no `begun` row reads `begun`, refuses `begin` and `dropped`, and leaves `not-sent` and `sent` (`effect-crash-gap`). A `begin` killed at a random moment leaves `planned` or `begun`, never anything else, and a legal way out exists (`effect-kill-during-begin`). A month-old `begun` is still `begun` (`effect-begun-never-expires`). An `unknown` effect is never begun again (`effect-unknown-never-retried`).
+- E9 Never executes: a command in `--how`, `--why`, a body or `--ref` is never run (`effect-never-executes`, canary files); no function reachable from an `eff_*` verb names `subprocess`, `os.system`, `os.exec*`, `os.spawn*` or `os.popen` (`test_no_code_path_runs_a_subprocess_for_an_effect`).
+- E10 Old trees (`TestLegacyEffects`): `claimed` reads `begun`; `unknown` stays; `show` prints `run` as `how`, `legacy class|snapshot|verify:` and `legacy file:` lines for `.awt/runs/<id>.*` and `.awt/blobs/*`; `list effects --json` has `how`; a planned `run` effect begins and marks like any other; reads and marks never rewrite earlier bytes of `events.jsonl` and never delete `runs/` or `blobs/`.
+- E11 `init` writes no `ask` rule and no outbox/effect paragraph. `doctor` warns (exit 0) for an old `ask` rule, one line per matching settings line with its number and text, and never edits the file. A fresh `init` has nothing to warn about.
+
 ## Node tree (`test_tree.py`)
 
 Names are scenario ids.

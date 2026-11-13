@@ -73,14 +73,16 @@ awt state --now "Jitter patch in review" --next "Load test once CI is green"
 
 **Task finished:** `awt status done`. It is refused while questions or effects are open, and it lists them.
 
-**Sending anything outward** (Slack, PR comments, Jira, email): draft it in `outbox/`, then plan it. Never send without a person's approval.
+**Sending anything outward** (Slack, PR comments, Jira, email): you send with your own tools; the tool never runs the command. Where a blind retry would be costly, declare the send first. Draft it in `outbox/`, then:
 
 ```sh
-awt effect plan --target "slack:#eng" --body outbox/release-note.md
+awt effect plan --target "slack:#eng" --body outbox/release-note.md --how "slack-cli post ..."
+awt effect begin e-3c91d0aa        # claims it
+# send it with your own tools
 awt effect mark e-3c91d0aa sent --ref https://example.slack.com/archives/C1/p1
 ```
 
-A person sends a manual effect and marks it `sent`. A scripted effect (`--run`) is applied with `awt effect apply`, which prompts a person for approval. If an effect is `unknown`, it may already have gone out: run `awt effect show <id>`, tell a person, and wait. Never resend it.
+`--how` is only text. A failed send: `mark ... not-sent --why "..."`. Unsure: `mark ... unknown --why "..."`. A `begun` effect blocks `status done` until it is marked. If an effect is `unknown`, it may already have gone out: run `awt effect show <id>`, tell a person, and wait. Never resend it.
 
 **Committing:** `awt save "message"` commits the task directory locally and never pushes. Run it only when a person asks.
 

@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, signal, socket, subprocess, time
+import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, socket, subprocess, time
 
 VERSION = "0.2.0"
 HOST = socket.gethostname()
@@ -14,13 +14,13 @@ TOTAL = 4400
 BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200, lineage=300, children=500,
               task_goal=400, task_state=600, task_questions=300, task_effects=250, task_decisions=250)
 
-K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, timeout=300, margin=30, newer=8, walk=20000)
+K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, newer=8, walk=20000)
 CAPS = {
     "task.goal": 250, "task.done_means": 250, "state.scope": 40, "state.now": 700, "state.next": 300,
     "note.text": 280, "decision.choice": 300, "decision.why": 300, "decision.tags": 40, "question.text": 400,
     "answer.text": 400, "ref.target": 1000, "ref.title": 120, "ref.why": 200, "ref.kind": 40, "ref.branch": 200,
     "capture.from": 40, "capture.title": 120, "capture.ref": 1000, "doc.why": 200, "effect.target": 200,
-    "effect.why": 200, "effect.reason": 200, "effect.ref": 1000, "effect.run": 1000, "effect.snapshot": 1000,
+    "effect.why": 200, "effect.reason": 200, "effect.ref": 1000, "effect.how": 400, "effect.run": 1000, "effect.snapshot": 1000,
     "effect.verify": 1000, "node.name": 60, "node.key": 200, "ref.key": 200,
 }
 REQ = {
@@ -34,13 +34,13 @@ LEGAL = {"root": ("workspace",), "workspace": ("task",), "task": ("task", "agent
 PLURAL = {"workspace": "workspaces", "task": "tasks", "agent": "agents"}
 NODE_DIRS = {"root": (), "workspace": ("context", "docs", "misc"), "task": ("context", "docs", "outbox", "misc", "scratch"), "agent": ("scratch",)}
 ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
-        "effect.step": ("planned", "claimed", "sent", "unknown", "dropped")}
+        "effect.step": ("planned", "begun", "claimed", "sent", "unknown", "dropped")}
 LIMIT = "tree exceeds depth %d / %d nodes; deeper nodes are not covered" % (K["depth"], K["nodes"])
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
 LISTS = SECTIONS + ["nodes", "tree"]
 SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
            "legacy", "context", "docs", "outbox", "misc"}
-IGNORE = ["scratch/", ".awt/claims/", ".awt/blobs/", ".awt/runs/"]
+IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/"]  # runs/: relay worker logs
 SECRETS = [(n, re.compile(p)) for n, p in [
     ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
     ("github-pat", r"github_pat_[A-Za-z0-9_]{20,}"), ("slack-token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
@@ -67,14 +67,6 @@ Everything about this task lives here. Keep records with `./awt`. Never hand-edi
 | A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
 | Anything else | `misc/`. Throwaway: `scratch/`. |
 
-**Anything leaving this machine** (message, comment, PR, ticket, published doc) goes through the outbox. Never send it directly.
-
-1. Write the draft in `outbox/`.
-2. `./awt effect plan --target "slack:#eng" --body outbox/x.md`. Add `--run '<cmd>'` only if a command can send it.
-3. Stop and show the person. They send it or approve `./awt effect apply`. Then `./awt effect mark <id> sent`.
-
-State `unknown` means it may have been sent. Never resend or use `--again`. Ask a person.
-
 **Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace. Check before deciding or asking; `decide` and `ask` list related records too, so read them.
 **Stuck or refused:** read `fix:`, then `./awt help agents`.
 **Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
@@ -86,7 +78,6 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 - `./awt resume`: where things stand
 - `./awt list`, `./awt find <term>`: everything known about this task
 - `context/` inbound material, `docs/` working docs, `outbox/` drafts going out, `misc/` the rest, `scratch/` throwaway
-- `./awt effect mark <id> sent` after you send something from `outbox/`
 '''
 TREE_BLOCK = (AGENTS_BLOCK.replace("./awt", "awt")
               .replace("Everything about this task lives here. Keep records with `awt`. Never hand-edit `.awt/`.", "Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Keep records with `awt`, from any directory.")
@@ -104,9 +95,6 @@ SETTINGS = '''{
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt resume --hook" } ] }
     ]
-  },
-  "permissions": {
-    "ask": [ "Bash(./awt effect apply *)", "Bash(awt effect apply *)" ]
   }
 }
 '''
@@ -130,7 +118,8 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 | Slack/chat you can only see pasted | `./awt capture --from slack --title "t" notes.txt` |
 | Same content on stdin | `./awt capture --from slack --title "t" -` |
 | Doc replaced by a better one | `./awt supersede docs/old.md docs/new.md --why "r"` |
-| Sent message may have failed | `./awt effect show <id>`, then ask a person |
+| About to send something that must not go out twice | `./awt effect plan`, `begin`, send it yourself, `mark` (below) |
+| Effect stuck `begun` or `unknown` | `./awt effect show <id>`, then ask a person |
 | Check workspace health | `./awt doctor` |
 | Commit the task dir (person asked) | `./awt save "message"` |
 | Task finished | `./awt status done` |
@@ -148,26 +137,22 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 ./awt supersede docs/old.md docs/new.md [--why "T"]
 ./awt status active|paused|done
 ./awt find "term"
-./awt effect plan --target T (--body FILE | --run CMD) [--class additive|overwrite] [--snapshot CMD] [--verify CMD] [--after ID]... [--again] [--why T]
+./awt effect plan --target T [--body FILE] [--how TEXT] [--after ID]... [--again] [--why T]
+./awt effect begin ID
+./awt effect mark ID sent [--ref URL] | not-sent --why T | unknown --why T | dropped
 ./awt effect show ID
-./awt effect apply ID --target T [--timeout SECONDS]
-./awt effect mark ID sent|not-sent|dropped [--ref URL] [--why T]
 ```
 
-Example, manual Slack message (normal case):
+The effect ledger is optional. It records a send so it is not made twice. The tool never runs the command: you send with your own tools, and your host's permission system sees the real command.
 
 ```
-./awt effect plan --target "slack:#eng" --body outbox/release-note.md
+./awt effect plan --target "slack:#eng" --body outbox/release-note.md --how 'slack-cli post "#eng" < outbox/release-note.md'
+./awt effect begin e-3c91d0aa        # claims it; print the body path and the mark command
+(send it with your own tools)
 ./awt effect mark e-3c91d0aa sent --ref https://example.slack.com/archives/C1/p1
 ```
 
-Example, scripted send with check:
-
-```
-./awt effect plan --target "jira:TKT-1" --body outbox/c.md --run 'jira-cli comment TKT-1 "$(cat "$AWT_BODY")"' --verify 'jira-cli show TKT-1 | grep -q done'
-```
-
-`apply` is gated by a permission prompt for a person. Do not run it without approval. Each `plan` prints the exact next command: copy it.
+States: `planned` -> `begun` -> `sent`. A failed send: `mark not-sent --why T` (back to `planned`, next attempt). Not sure what happened: `mark unknown --why T`. `--how` is the intended command as text; it is never run. Each `plan` prints the exact next command: copy it.
 
 ## Refusals
 
@@ -181,16 +166,15 @@ Every refusal prints `error:` and `fix:`. Read the `fix:` first.
 | Secret match (names a pattern) | A field holds a credential. Nothing written. No bypass exists. | Remove the secret, refer to it by name or location. If you cannot tell where it is, STOP and ask a person. |
 | Unknown id (exit 4) | Wrong id for `answer`, `--supersedes`, `--after`, `effect`. | `./awt list <section>` and copy the id. |
 | Already answered / already superseded | Duplicate action. | Use the current id the `fix:` names. |
+| Removed flag or `effect apply` (exit 2) | The tool no longer runs commands. | Send it yourself; use `plan`, `begin`, `mark`. |
 | Path escapes the root | `--body` or `supersede` path resolves outside the task dir. | Copy the file into `outbox/` or `docs/` and retry. |
-| `apply`: target mismatch | `--target` differs from the plan. | Re-run with the exact target from `effect show`. Never edit the plan to match. |
-| `apply`: body changed | Body file edited after planning. | Re-plan. Show the person the new body: they approved the old one. |
-| `apply`: manual effect | No `--run`. A person sends. | Show the body path, wait, then `effect mark <id> sent`. |
-| `apply`: `--after` not sent | A prerequisite is not `sent`. | Resolve that effect first. |
+| `begin`: not planned | The effect is `begun`, `unknown`, `sent` or `dropped`. | `effect show <id>`. Never send it again. |
+| `begin`: someone else is sending | Another process holds the claim. | Wait; check `effect show`. |
+| `begin`: body changed | Body file edited after planning. | Re-plan. Show the person the new body. |
+| `begin`: `--after` not sent | A prerequisite is not `sent`. | Resolve that effect first. |
 | `plan`: open `unknown` on target | An earlier send on this target may have happened. | STOP and ask a person. Do not add `--again`. |
 | `plan`: same key, dropped | Person dropped this exact send. | Only if a person wants it again: `--again`. |
-| `overwrite` without `--snapshot` | No way back. | Add `--snapshot CMD`, or ask whether the action should be `additive`. |
-| `status done` refused | Lists open questions and effects (`planned`, `claimed`, `unknown`). | Resolve each. For questions, a person must answer. For `unknown`, STOP and ask. Never mark `sent` or `dropped` to get past it. |
-| `mark`: effect is `claimed`, pid alive | A send is running now. | Wait. |
+| `status done` refused | Lists open questions and effects (`planned`, `begun`, `unknown`). | Resolve each. For questions, a person must answer. For `unknown`, STOP and ask. Never mark `sent` or `dropped` to get past it. |
 | Exit 3 | No write permission. | Give the printed command to a person. |
 | Exit 4, no `.awt/` | Not in a task. | `cd` to the task dir or pass `--dir`. Do not run `init` unless told. |
 
@@ -198,14 +182,13 @@ Every refusal prints `error:` and `fix:`. Read the `fix:` first.
 
 | State | You may | You must not |
 |---|---|---|
-| `planned` | Show the person; wait for approval; `mark dropped` if the person cancels | Send it yourself |
-| `claimed` | Wait | `mark` anything |
+| `planned` | `begin` it, then send; `mark dropped` if it is cancelled | Send without `begin` when a person asked for the ledger |
+| `begun` | Send (once), then `mark sent`, `not-sent --why` or `unknown --why` | Begin again; leave it unmarked |
 | `sent` | Proceed; cite `--ref` if known | Plan the same send again |
 | `unknown` | Run `effect show <id>`, report to a person, wait for them | Resend. Plan on that target. Mark it yourself. Run `status done`. |
 | `dropped` | Move on | Revive without a person asking |
-| `conflict` | Report to a person | Mark it |
 
-`unknown` means the message may already be out. Resending can duplicate it. Only a person who has checked the real target may run `mark <id> sent` or `mark <id> not-sent`. `not-sent` makes it `planned` again for another attempt; the person decides that, not you.
+`begun` with no mark stays `begun`: it cannot know whether the send happened, so it never retries and never times out. `status done` is refused until it is marked. `unknown` means the message may already be out. Only a person who has checked the real target may mark an `unknown` effect `sent` or `not-sent`. `not-sent` makes it `planned` again for another attempt.
 
 `--again` is not a retry. It creates a new, separate send that bypasses the duplicate check. A failed or `unknown` send is never retried with `--again`. Use it only when a person wants a deliberate second identical message.
 
@@ -215,8 +198,8 @@ Worker, with a brief:
 - Skip `./awt resume`. Read the brief.
 - Write output to `docs/<brief>.out.md`. Never name a file starting with REPORT, SUMMARY, FINDINGS or ANALYSIS: Claude Code refuses those for subagents.
 - Use `note`, `decide`, `ref`, `capture`, `ask`: parallel writes are safe.
-- Do not run `state`, `status`, `effect apply` or `effect mark`. Do not write a handoff.
-- Plan effects only if the brief says so. Never send.
+- Do not run `state` or `status`. Do not write a handoff.
+- Use `effect` only if the brief says so, and send only when it says so.
 
 Orchestrator:
 - Owns `state` and `status`. Run `./awt state` once after collecting worker output, with `--next` naming the next step.
@@ -224,14 +207,13 @@ Orchestrator:
 
 ## Big tasks: relay
 
-If `./relay` exists and the work splits into parts, do not run them all in one session. Write a plan file (`./relay help` shows the format) with small units, a cheap model for reading, and a `check` command wherever a test can decide. Show the person the plan and `./relay run <plan>`, then stop. Afterwards `./awt resume` shows the result. Workers cannot send anything.
+If `./relay` exists and the work splits into parts, do not run them all in one session. Write a plan file (`./relay help` shows the format) with small units, a cheap model for reading, and a `check` command wherever a test can decide. Show the person the plan and `./relay run <plan>`, then stop. Afterwards `./awt resume` shows the result. Workers plan and mark, and send only when their unit says so.
 
 ## Wrong moves
 
 - Editing or deleting anything under `.awt/`. Use verbs. A bad row is quarantined, not fatal.
 - Copying a page or thread you can link: use `ref`. Use `capture` only when no link works.
 - Writing a second handoff such as `docs/HANDOFF.md`. `state` is the handoff.
-- Sending directly (curl, `gh`, `slack` CLI, API call) instead of through `effect`.
 - Putting long text in `--now`, `--why`, `note`. Write `docs/`, reference the path.
 - Using `--again` or a fresh `plan` to get around an `unknown` effect.
 - Re-asking or re-researching without `./awt find` first.'''
@@ -243,7 +225,7 @@ USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
   supersede OLD NEW           status active|paused|done
-  effect plan|show|apply|mark doctor                   save MESSAGE
+  effect plan|begin|mark|show doctor                   save MESSAGE
 exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
 agent reference: awt help agents"""
 
@@ -436,7 +418,7 @@ def load_at(path):
 
 
 def attention(D):
-    return [e for e in D["eff"].values() if e["state"] in ("planned", "claimed", "unknown", "conflict")]
+    return [e for e in D["eff"].values() if e["state"] in ("planned", "begun", "unknown")]
 
 
 def summarize(path, base, depth=None):
@@ -530,57 +512,33 @@ def claim_path(e):
     return P(".awt", "claims", "%s.%s" % (e["key"], e["attempt"]))
 
 
-def alive(e):
-    pid = e.get("pid")
-    if e.get("chost") != HOST or not isinstance(pid, int) or not 0 < pid < 2 ** 31:
-        return False
-    if time.time() > e["cts"] + e["to"] + K["margin"]:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
 def fold_effect(D, r):
+    """Effect state machine (SPEC 6.2). `claimed` is the old name of `begun`. A claim file with no `begun` row (a crash between the two) reads as begun."""
     i, s, n = r["id"], r["step"], r.get("attempt", 1)
+    s = "begun" if s == "claimed" else s
     e = D["eff"].get(i)
     if e is None:
         if s != "planned" or not r.get("target") or not r.get("key"):
             return False
-        e = D["eff"][i] = dict(r, attempt=n, hist=[], claims=0, manual=not r.get("run"))
+        e = D["eff"][i] = dict(r, attempt=n, hist=[])
     else:
-        cur, crashed = e["step"], e["step"] == "planned" and os.path.exists(claim_path(e))
+        cur = derive(e)
         if s == "planned":
-            ok = n == e["attempt"] + 1 and (cur in ("unknown", "claimed") or crashed)
+            ok = n == e["attempt"] + 1 and cur in ("begun", "unknown")
         else:
             ok = n == e["attempt"] and (
-                (s == "claimed" and cur in ("planned", "claimed") and not e["manual"])
-                or (s == "sent" and (cur == "unknown" or cur == "claimed" or (cur == "planned" and (e["manual"] or crashed))))
-                or (s == "unknown" and cur == "claimed") or (s == "dropped" and cur == "planned"))
+                (s == "begun" and cur in ("planned", "begun")) or (s == "sent" and cur in ("planned", "begun", "unknown"))
+                or (s == "unknown" and cur == "begun") or (s == "dropped" and cur == "planned"))
         if not ok:
             return False
         e["attempt"] = n
-        if s == "planned":
-            e["claims"] = 0
     e["step"] = s
-    if s == "claimed":
-        e["claims"] += 1
-        e["pid"], e["chost"], e["cts"], e["to"] = r.get("pid"), r.get("host"), epoch(r["ts"]), r.get("timeout", K["timeout"])
     e["hist"].append(r)
     return True
 
 
 def derive(e):
-    s = e["step"]
-    if s == "claimed":
-        return "conflict" if e["claims"] > 1 else "claimed" if alive(e) else "unknown"
-    if s == "planned" and os.path.exists(claim_path(e)):
-        return "unknown"
-    return s
+    return "begun" if e["step"] == "planned" and os.path.exists(claim_path(e)) else e["step"]
 
 
 def load():
@@ -752,11 +710,9 @@ def fit(head, lines, key, sect, suffix=""):
 
 
 def eff_next(e):
-    q = shlex.quote
     if e["state"] == "planned":
-        return ("./awt effect apply %s --target %s" % (e["id"], q(e["target"]))) if e.get("run") else \
-            ("send %s by hand, then ./awt effect mark %s sent" % (e.get("body", "it"), e["id"]))
-    return "ask a person, then ./awt effect mark %s sent|not-sent  (see ./awt effect show %s)" % (e["id"], e["id"])
+        return "./awt effect begin %s, send it, then ./awt effect mark %s sent" % (e["id"], e["id"])
+    return "check the target, then ./awt effect mark %s sent|not-sent  (see ./awt effect show %s)" % (e["id"], e["id"])
 
 
 def size(n):
@@ -940,7 +896,7 @@ def ref_view(r):
 
 JSON_KEYS = dict(
     refs="ts by target title kind why access path branch key", decisions="ts by id choice why tags supersedes superseded_by",
-    questions="ts by id text answer", effects="ts by id target why body run state attempt", notes="ts by id text", state="ts by scope now next")
+    questions="ts by id text answer", effects="ts by id target why body how state attempt", notes="ts by id text", state="ts by scope now next")
 
 
 def shaped(name, rows):
@@ -962,7 +918,7 @@ def listing_json(name, D, all_):
     if name == "questions":
         return shaped(name, [dict(q, answer=D["ans"][i]["text"] if i in D["ans"] else None) for i, q in D["q"].items() if all_ or i not in D["ans"]])
     if name == "effects":
-        return shaped(name, [e for e in D["eff"].values() if all_ or e["state"] not in ("sent", "dropped")])
+        return shaped(name, [dict(e, how=e.get("how") or e.get("run")) for e in D["eff"].values() if all_ or e["state"] not in ("sent", "dropped")])
     if name == "notes":
         return shaped(name, D["notes"])
     return shaped("state", D["hist"] if all_ else D["states"].values())
@@ -1036,7 +992,7 @@ def build_node(path, kind, name, key, goal, done):
     global ROOT
     old, ROOT = ROOT, path
     try:
-        for d in NODE_DIRS[kind] + (".awt/claims", ".awt/blobs", ".awt/runs"):
+        for d in NODE_DIRS[kind] + (".awt/claims",):
             os.makedirs(P(d), exist_ok=True)
         os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
         emit("node", kind=kind, name=name, key=key)
@@ -1167,7 +1123,7 @@ def cmd_init(a):
             has_rows = False
         if has_rows:
             die("%s already has records and no node row" % ROOT, "a root needs a directory without .awt records; use an empty one")
-    for d in (("workspaces",) if tree else ("context", "docs", "outbox", "misc", "scratch")) + (".awt/claims", ".awt/blobs", ".awt/runs"):
+    for d in (("workspaces",) if tree else ("context", "docs", "outbox", "misc", "scratch")) + (".awt/claims",):
         os.makedirs(P(d), exist_ok=True)
     os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
     made = []
@@ -1679,17 +1635,27 @@ def cmd_status(a):
         if len(bl) > 20:
             bl = bl[:20] + ["+%d more (list nodes, list questions, list effects show the rest)" % (len(bl) - 20)]
         if bl:
-            die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first")
+            die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first (a begun effect: ./awt effect mark ID sent|not-sent|unknown)")
     emit("status", status=a.value)
     out("status " + a.value)
 
 
 # ---------- effects ----------
-def eff_plan(a):
+def lock():
     fcntl.flock(os.open(P(".awt", "events.jsonl"), os.O_RDONLY | os.O_CREAT, 0o644), fcntl.LOCK_EX)  # held to exit: check-then-write must not interleave
+
+
+def body_changed(e):
+    try:
+        with open(P(e["body"]), "rb") as g:
+            return sha(g.read()) != e.get("body_sha")
+    except OSError:
+        return True
+
+
+def eff_plan(a):
+    lock()
     D = load()
-    if not a.body and not a.run:
-        die("need --body or --run", "add --body outbox/x.md and/or --run CMD", 2)
     body = bsha = None
     if a.body:
         p = inside(a.body)
@@ -1698,12 +1664,10 @@ def eff_plan(a):
         body = rel(p)
         with open(p, "rb") as g:
             bsha = sha(g.read())
-    if a.cls == "overwrite" and not a.snapshot:
-        die("overwrite effects need --snapshot", "add --snapshot 'CMD that prints the current content'")
     for x in a.after or []:
         get_eff(D, x)
     nonce = os.urandom(8).hex() if a.again else ""
-    key = sha(json.dumps([a.target, a.run or "", bsha or "", a.cls, nonce]).encode())
+    key = sha(json.dumps([a.target, bsha or "", nonce]).encode())
     for e in D["eff"].values():
         if e["key"] == key:
             if e["state"] == "dropped":
@@ -1711,25 +1675,60 @@ def eff_plan(a):
             return out("%s %s (already planned, nothing written)" % (e["id"], e["state"]))
     if not a.again:
         for e in D["eff"].values():
-            if e["target"] == a.target and e["state"] in ("unknown", "conflict"):
-                die("%s on %s is %s; it may already have been sent" % (e["id"], a.target, e["state"]),
+            if e["target"] == a.target and e["state"] == "unknown":
+                die("%s on %s is unknown; it may already have been sent" % (e["id"], a.target),
                     "check with a person, ./awt effect mark %s sent|not-sent, or plan with --again" % e["id"])
     i = new_id("e")
-    emit("effect", id=i, step="planned", attempt=1, target=a.target, key=key, body=body, body_sha=bsha, run=a.run,
-         **{"class": a.cls}, snapshot=a.snapshot, verify=a.verify, after=a.after, why=a.why)
-    nxt = "./awt effect apply %s --target %s" % (i, shlex.quote(a.target)) if a.run else \
-        "send %s by hand, then ./awt effect mark %s sent" % (body, i)
-    out(c("%s planned; next: %s" % (i, nxt)))
+    emit("effect", id=i, step="planned", attempt=1, target=a.target, key=key, body=body, body_sha=bsha, how=a.how, after=a.after, why=a.why)
+    out(c("%s planned; next: ./awt effect begin %s, send it yourself, then ./awt effect mark %s sent" % (i, i, i)))
+
+
+def eff_begin(a):
+    lock()
+    D = load()
+    e = get_eff(D, a.id)
+    if e["state"] != "planned":
+        die("%s is %s, not planned" % (a.id, e["state"]), "only a planned effect can begin; see ./awt effect show %s" % a.id)
+    for x in e.get("after") or []:
+        if D["eff"].get(x, {}).get("state") != "sent":
+            die("prerequisite %s is not sent" % x, "send %s first" % x)
+    if e.get("body") and body_changed(e):
+        die("body changed since planning", "plan again: ./awt effect plan --target %s --body %s ..." % (shlex.quote(e["target"]), e["body"]))
+    os.makedirs(P(".awt", "claims"), exist_ok=True)
+    try:
+        os.close(os.open(claim_path(e), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+    except FileExistsError:
+        die("someone else is sending %s" % a.id, "check ./awt effect show " + a.id)
+    emit("effect", id=a.id, step="begun", attempt=e["attempt"])
+    out("%s begun (attempt %d)" % (a.id, e["attempt"]))
+    if e.get("body"):
+        out("body: " + e["body"])
+    if e.get("how") or e.get("run"):
+        out("how: " + (e.get("how") or e["run"]))
+    out("send it yourself, then ./awt effect mark %s sent [--ref URL] | not-sent --why T | unknown --why T" % a.id)
 
 
 def eff_show(a):
     e = get_eff(load(), a.id)
+    old = ("class", "snapshot", "verify")
     for k, v in e.items():
-        if k not in ("hist", "claims", "chost", "manual"):
+        if k not in ("hist", "run", "how") + old:
             out("%s: %s" % (k, v))
+    if e.get("how") or e.get("run"):
+        out("how: %s" % (e.get("how") or e["run"]))
+    for k in old:
+        if k in e:
+            out("legacy %s: %s" % (k, e[k]))
     out("history:")
     for r in e["hist"]:
         out("  %s %s attempt=%s %s" % (r["ts"], r["step"], r.get("attempt", 1), r.get("reason") or r.get("ref") or r.get("why") or ""))
+    for sub in ("runs", "blobs"):
+        try:
+            names = sorted(n for n in os.listdir(P(".awt", sub)) if sub == "blobs" or n.startswith(a.id + "."))
+        except OSError:
+            continue
+        for n in names[:20]:
+            out("legacy file: .awt/%s/%s" % (sub, n))
     if e.get("body"):
         out("body path: " + e["body"])
         try:
@@ -1739,93 +1738,19 @@ def eff_show(a):
             out("(body unreadable)")
 
 
-def sh(cmd, env, logf, timeout):
-    p = subprocess.Popen(["sh", "-c", cmd], cwd=ROOT, env=env, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
-    try:
-        return p.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        p.wait()
-        return "timeout"
-
-
-def eff_apply(a):
-    if a.timeout < 1:
-        die("--timeout must be at least 1", "give a number of seconds, 1 or more", 2)
-    D = load()
-    e = get_eff(D, a.id)
-    if e["state"] != "planned":
-        die("%s is %s, not planned" % (a.id, e["state"]), "never resend an unknown effect; ask a person, then ./awt effect mark %s sent|not-sent" % a.id)
-    if not e.get("run"):
-        die("%s is manual; no command to run (body: %s)" % (a.id, e.get("body")), "send it by hand, then ./awt effect mark %s sent" % a.id)
-    if a.target != e["target"]:
-        die("--target does not match the planned target", "use --target " + shlex.quote(e["target"]))
-    for x in e.get("after") or []:
-        if D["eff"].get(x, {}).get("state") != "sent":
-            die("prerequisite %s is not sent" % x, "send %s first" % x)
-    bpath = ""
-    if e.get("body"):
-        bpath = P(e["body"])
-        try:
-            with open(bpath, "rb") as g:
-                ok = sha(g.read()) == e.get("body_sha")
-        except OSError:
-            ok = False
-        if not ok:
-            die("body changed since planning", "plan again: ./awt effect plan --target %s --body %s ..." % (shlex.quote(e["target"]), e["body"]))
-    env = dict(os.environ, AWT_BODY=bpath, AWT_TARGET=e["target"])
-    for d in ("blobs", "runs", "claims"):
-        os.makedirs(P(".awt", d), exist_ok=True)
-    if e.get("snapshot"):
-        try:
-            r = subprocess.run(["sh", "-c", e["snapshot"]], cwd=ROOT, env=env, capture_output=True, timeout=a.timeout)
-        except subprocess.TimeoutExpired:
-            die("snapshot timed out after %ss; nothing was consumed" % a.timeout, "fix the --snapshot command and plan again")
-        if r.returncode or not r.stdout:
-            die("snapshot failed or printed nothing; nothing was consumed", "fix the --snapshot command and plan again")
-        with open(P(".awt", "blobs", sha(r.stdout)), "wb") as g:
-            g.write(r.stdout)
-    e2 = load()["eff"][a.id]
-    if (e2["step"], e2["attempt"]) != ("planned", e["attempt"]):
-        die("%s changed while it was being prepared (now %s)" % (a.id, e2["step"]), "check ./awt effect show " + a.id)
-    try:
-        os.close(os.open(claim_path(e), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
-    except FileExistsError:
-        die("someone else is sending %s" % a.id, "check ./awt effect show " + a.id)
-    emit("effect", id=a.id, step="claimed", attempt=e["attempt"], pid=os.getpid(), timeout=a.timeout * (2 if e.get("verify") else 1))
-    log = P(".awt", "runs", "%s.%s.log" % (a.id, e["attempt"]))
-    with open(log, "wb") as lg:
-        rc = sh(e["run"], env, lg, a.timeout)
-        reason = None
-        if rc == "timeout":
-            reason = "timeout after %ss" % a.timeout
-        elif rc != 0:
-            reason = "exit code %s" % rc
-        elif e.get("verify"):
-            vr = sh(e["verify"], env, lg, a.timeout)
-            if vr != 0:
-                reason = "verify failed (%s)" % vr
-    if reason:
-        emit("effect", id=a.id, step="unknown", attempt=e["attempt"], reason=reason)
-        die("%s is unknown: %s (log %s)" % (a.id, reason, rel(log)), "it may have been sent; ask a person, then ./awt effect mark %s sent|not-sent" % a.id)
-    emit("effect", id=a.id, step="sent", attempt=e["attempt"], via="apply")
-    out("%s sent (log %s)" % (a.id, rel(log)))
-
-
 def eff_mark(a):
+    lock()
     e = get_eff(load(), a.id)
     st, n = e["state"], e["attempt"]
-    if st == "claimed":
-        die("%s is being sent by a live process" % a.id, "wait for it to finish")
-    legal = {"planned": ["sent"] if e["manual"] else [], "unknown": ["sent", "not-sent"], "conflict": ["sent", "not-sent"]}
-    if a.to == "dropped" and st == "planned":
-        pass
-    elif a.to not in legal.get(st, []):
-        die("cannot mark %s %s from %s" % (a.id, a.to, st), "legal marks from %s: %s" % (st, ", ".join(legal.get(st, []) + (["dropped"] if st == "planned" else [])) or "none (terminal)"))
+    legal = {"planned": ["sent", "dropped"], "begun": ["sent", "not-sent", "unknown"], "unknown": ["sent", "not-sent"]}.get(st, [])
+    if a.to not in legal:
+        die("cannot mark %s %s from %s" % (a.id, a.to, st), "legal marks from %s: %s" % (st, ", ".join(legal) or "none (terminal)"))
+    if a.to in ("not-sent", "unknown") and not a.why:
+        die("mark %s needs --why" % a.to, "say what you know, e.g. --why 'the command timed out'", 2)
     if a.to == "not-sent":
         emit("effect", id=a.id, step="planned", attempt=n + 1, why=a.why)
     else:
-        emit("effect", id=a.id, step=a.to, attempt=n, ref=a.ref, why=a.why, via="mark")
+        emit("effect", id=a.id, step=a.to, attempt=n, ref=a.ref, why=a.why)
     out("%s %s" % (a.id, a.to))
 
 
@@ -1962,10 +1887,10 @@ def cmd_doctor(a):
         try:
             with open(P(".claude", "settings.json"), encoding="utf-8") as g:
                 st = g.read()
-            good = "awt resume --hook" in st and "awt effect apply" in st
+            good = "awt resume --hook" in st
         except OSError:
             good = False
-        line("ok" if good else "warn", "settings has the awt hook and ask rule" if good else ".claude/settings.json lacks the awt hook or ask rule")
+        line("ok" if good else "warn", "settings has the awt hook" if good else ".claude/settings.json lacks the awt hook")
         x = os.access(P("awt"), os.X_OK)
         line("ok" if x else "warn", "awt is executable" if x else "awt is not executable here (chmod +x awt)")
     if intree or children(ROOT):
@@ -1981,8 +1906,15 @@ def cmd_doctor(a):
     except Exception:
         rem = []
     line("warn" if rem else "ok", "git remote %s: task data would be pushed if committed; check it is private" % rem[0] if rem else "no git remote")
-    bad = [e["id"] for e in D["eff"].values() if e["state"] in ("unknown", "conflict")]
-    line("warn" if bad else "ok", "open unknown/conflict effects: " + " ".join(bad) if bad else "no unknown effects")
+    try:
+        with open(P(".claude", "settings.json"), encoding="utf-8", errors="replace") as g:
+            old = ["line %d: %s" % (n, x.strip()) for n, x in enumerate(g.read().splitlines(), 1) if "awt effect apply" in x]
+    except OSError:
+        old = []
+    for x in old:
+        line("warn", "obsolete ask rule for 'effect apply' in .claude/settings.json; remove %s (awt does not edit it)" % x)
+    bad = [e["id"] for e in D["eff"].values() if e["state"] in ("begun", "unknown")]
+    line("warn" if bad else "ok", "open begun/unknown effects: " + " ".join(bad) if bad else "no begun or unknown effects")
     sys.exit(1 if "fail" in res else 0)
 
 
@@ -2060,11 +1992,10 @@ def build():
     V(sp, "save", [("message", T)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
-    V(es, "plan", opt=[(("--target",), dict(required=True)), (("--body",), T), (("--run",), T), (("--class",), dict(dest="cls", choices=["additive", "overwrite"], default="additive")),
-                       (("--snapshot",), T), (("--verify",), T), (("--after",), dict(action="append")), (("--again",), F), (("--why",), T)])
+    V(es, "plan", opt=[(("--target",), dict(required=True)), (("--body",), T), (("--how",), T), (("--after",), dict(action="append")), (("--again",), F), (("--why",), T)])
+    V(es, "begin", [("id", T)])
     V(es, "show", [("id", T)])
-    V(es, "apply", [("id", T)], [(("--target",), dict(required=True)), (("--timeout",), dict(type=int, default=K["timeout"]))])
-    V(es, "mark", [("id", T), ("to", dict(choices=["sent", "not-sent", "dropped"]))], [(("--ref",), T), (("--why",), T)])
+    V(es, "mark", [("id", T), ("to", dict(choices=["sent", "not-sent", "unknown", "dropped"]))], [(("--ref",), T), (("--why",), T)])
     return p
 
 
@@ -2097,6 +2028,11 @@ def main(argv):
         return out(AGENT_REF)
     if not rest or rest[0] in ("help", "--help", "-h"):
         return out(USAGE)
+    if rest[:1] == ["effect"]:
+        gone = rest[1:2] == ["apply"] or any(x.split("=")[0] in ("--run", "--snapshot", "--verify", "--class", "--timeout") for x in rest[1:])
+        if gone:
+            die("effect apply, --run, --snapshot, --verify, --class and --timeout were removed: awt never runs commands",
+                "send it yourself; ./awt effect plan --target T [--body FILE] [--how TEXT], ./awt effect begin ID, then ./awt effect mark ID sent", 2)
     a = build().parse_args(rest)
     a.dir = d
     if a.verb is None or (a.verb == "effect" and not a.eop):

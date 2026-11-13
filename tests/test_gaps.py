@@ -1,4 +1,4 @@
-"""Spec rows the first audit found untested: doctor levels, I8, effect claim expiry, migrate-paseo exit codes, small invariants."""
+"""Spec rows the first audit found untested: doctor levels, I8, migrate-paseo exit codes, small invariants."""
 import datetime, json, os, re, shutil, socket, stat, subprocess, sys, unittest
 
 import test_awt
@@ -54,10 +54,11 @@ class Doctor(Base):
         os.unlink(self.p(".claude", "settings.json"))
         subprocess.run(["git", "init", "-q", self.root], check=True, env=self.env)
         subprocess.run(["git", "-C", self.root, "remote", "add", "origin", "https://example.invalid/x.git"], check=True, env=self.env)
-        e = self.ok("effect", "plan", "--target", "slack:#eng", "--run", "exit 3").stdout.split()[0]
-        self.bad("effect", "apply", e, "--target", "slack:#eng")
+        e = self.ok("effect", "plan", "--target", "slack:#eng").stdout.split()[0]
+        self.ok("effect", "begin", e)
+        self.ok("effect", "mark", e, "unknown", "--why", "timed out")
         r = self.ok("doctor")  # exit 0: warnings only
-        for text in ("CLAUDE.md", "settings", "awt is not executable", "git remote", "unknown/conflict effects"):
+        for text in ("CLAUDE.md", "settings", "awt is not executable", "git remote", "begun/unknown effects"):
             self.assertEqual(line_with(r.stdout, text), "warn", (text, r.stdout))
         self.assertNotIn("fail", levels(r.stdout))
 
@@ -73,6 +74,35 @@ class Doctor(Base):
         r = self.ok("doctor")
         self.assertEqual(line_with(r.stdout, "awt is executable"), "ok")
         self.assertEqual(line_with(r.stdout, "settings has"), "ok")
+
+
+class DoctorAskRule(Base):
+    OLD = '''{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt resume --hook" } ] }
+    ]
+  },
+  "permissions": {
+    "ask": [ "Bash(./awt effect apply *)", "Bash(awt effect apply *)" ]
+  }
+}
+'''
+
+    def test_old_ask_rule_warns_with_the_exact_line_and_is_never_edited(self):
+        self.init()
+        self.write(".claude/settings.json", self.OLD)
+        r = self.ok("doctor")  # warning only: exit 0
+        warn = [l for l in r.stdout.splitlines() if "ask rule" in l]
+        self.assertEqual(len(warn), 1, r.stdout)
+        self.assertTrue(warn[0].startswith("warn"))
+        self.assertIn('line 8: "ask": [ "Bash(./awt effect apply *)", "Bash(awt effect apply *)" ]', warn[0])
+        self.assertEqual(slurp(self.p(".claude", "settings.json")), self.OLD)
+        self.assertEqual(line_with(r.stdout, "settings has"), "ok")
+
+    def test_fresh_init_has_no_ask_rule_to_warn_about(self):
+        self.init()
+        self.assertNotIn("ask rule", self.ok("doctor").stdout)
 
 
 class PreTreeBrief(Base):
@@ -96,8 +126,7 @@ class PreTreeBrief(Base):
         run(old, "note", "parsekit fixtures live in fixtures/")
         run(old, "ref", "https://example.invalid/pr/1", "--title", "the pr")
         self.write("docs/plan.md", "# plan\n")
-        self.write("outbox/m.md", "hi\n")
-        run(old, "effect", "plan", "--target", "slack:#eng", "--body", "outbox/m.md")
+        self.write("outbox/m.md", "hi\n")  # no effect row: its next-step line changed in phase 0 (declared effects)
         # ages are shown in coarse units: push every row ten days back so a clock tick cannot change them
         past = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         p = self.p(".awt", "events.jsonl")
@@ -107,26 +136,6 @@ class PreTreeBrief(Base):
             f.write(txt)
         for args in (("resume",), ("resume", "--hook"), ("resume", "--scope", "main")):
             self.assertEqual(run(AWT, *args), run(old, *args), args)
-
-
-class ClaimExpiry(Base):
-    def claim(self, e, age, timeout):
-        row = dict(v=1, ts=(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=age)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                   host=socket.gethostname(), by="t", type="effect", id=e, step="claimed", attempt=1, pid=os.getpid(), timeout=timeout)
-        with open(self.p(".awt", "events.jsonl"), "ab") as g:
-            g.write((json.dumps(row) + "\n").encode())
-
-    def state(self, e):
-        return [l.split(":", 1)[1].strip() for l in self.ok("effect", "show", e).stdout.splitlines() if l.startswith("state:")][0]
-
-    def test_claim_lapses_after_timeout_plus_30s(self):  # live pid, so only the clock can expire it
-        self.init()
-        inside = self.ok("effect", "plan", "--target", "a", "--run", "true").stdout.split()[0]
-        self.claim(inside, age=100 + 20, timeout=100)
-        self.assertEqual(self.state(inside), "claimed")
-        outside = self.ok("effect", "plan", "--target", "b", "--run", "true").stdout.split()[0]
-        self.claim(outside, age=100 + 40, timeout=100)
-        self.assertEqual(self.state(outside), "unknown")
 
 
 class SmallInvariants(Base):
@@ -206,11 +215,6 @@ class SmallInvariants(Base):
         self.assertEqual(slurp(self.p("docs", "_superseded", "old.md")), "taken\n")
         self.assertEqual(slurp(self.p("docs", "_superseded", "old-2.md")), "old.md\n")
 
-    def test_effect_apply_timeout_zero_is_usage_error(self):
-        self.init()
-        e = self.ok("effect", "plan", "--target", "t", "--run", "true").stdout.split()[0]
-        self.bad("effect", "apply", e, "--target", "t", "--timeout", "0", code=2)
-
     def test_init_warns_about_claude_md(self):
         parent = os.path.join(self.tmp, "p")
         os.makedirs(os.path.join(parent, "task"))
@@ -233,9 +237,9 @@ class SmallInvariants(Base):
 
 
 class Relay(unittest.TestCase):
-    def test_relay_never_applies_effects_or_bypasses_permissions(self):
+    def test_relay_never_runs_effects_or_bypasses_permissions(self):
         src = slurp(os.path.join(REPO, "relay"))
-        self.assertEqual(src.count("effect apply"), 1, "only the help text may name it")
+        self.assertNotIn("effect apply", src)
         self.assertNotIn('"effect"', src)
         for flag in ("dangerously-skip-permissions", "bypassPermissions", "acceptEdits"):
             self.assertNotIn(flag, src)
