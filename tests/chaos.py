@@ -1920,17 +1920,20 @@ def a_tree_recall_2000(c):
         with open(os.path.join(d, "events.jsonl"), "w") as g:
             g.write("".join(json.dumps(r) + "\n" for r in rows))
         os.makedirs(os.path.join(t, "agents", "a%04d" % i, "scratch"))
-    for env in (None, c.env(AWT_RELATED="3")):
-        r = c.raw([sys.executable, "-I", AWT, "--dir", t, "find", "--like", "tokenizer unicode w7", "--limit", "5"], cwd=c.base, env=env, args=["find"], allow=(0,))
-        if r.dt > 2.0:
-            c.fail("find --like took %.1f s on 2,000 nodes (> 2 s)" % r.dt)
-        if len(r.out.splitlines()) != 5:
-            c.fail("find --like gave an unexpected answer: " + r.out[:120])
-    r = c.raw([sys.executable, "-I", AWT, "--dir", t, "decide", "tokenizer unicode", "--why", "parsekit tokenizer"], cwd=c.base, args=["decide"], allow=(0,))
-    if r.dt > 4.5:
-        c.fail("decide with related lookup took %.1f s on 2,000 nodes" % r.dt)
-    if not r.out.startswith("d-"):
-        c.fail("decide printed no id: " + r.out[:80])
+    r = c.raw([sys.executable, "-I", AWT, "--dir", t, "find", "--like", "tokenizer unicode w7", "--limit", "5"], cwd=c.base, args=["find"], allow=(0,))
+    if r.dt > 2.0:
+        c.fail("find --like took %.1f s on 2,000 nodes (> 2 s)" % r.dt)
+    if len(r.out.splitlines()) != 5:
+        c.fail("find --like gave an unexpected answer: " + r.out[:120])
+    for env, want in ((None, 3), (c.env(AWT_RELATED="5"), 5)):  # decide reads AWT_RELATED; find ignores it
+        r = c.raw([sys.executable, "-I", AWT, "--dir", t, "decide", "tokenizer unicode", "--why", "parsekit tokenizer"], cwd=c.base, env=env, args=["decide"], allow=(0,))
+        if r.dt > 4.5:
+            c.fail("decide with related lookup took %.1f s on 2,000 nodes" % r.dt)
+        if not r.out.startswith("d-"):
+            c.fail("decide printed no id: " + r.out[:80])
+        rel = [l for l in r.out.splitlines() if l.startswith("related:")]
+        if len(rel) != want and not any("lookup stopped" in l for l in rel):
+            c.fail("decide printed %d related lines, wanted %d: %s" % (len(rel), want, r.out[:200]))
 
 
 @attack("tree-budget-fuzz")

@@ -119,7 +119,7 @@ async function within<T>(cfg: AwtConfig, signal: AbortSignal | undefined, log: L
 export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): () => void {
   const cfg = readConfig(env);
   const tree = new Tree(cfg, log);
-  if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, changes or on; showing receipts`);
+  if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, off, changes or on; showing receipts`);
   const turnStart = new Map<string, number>();
   /** Agents whose last open.before gave them an AWT_DIR. Only these are nudged. */
   const withDir = new Set<string>();
@@ -254,10 +254,10 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       if (parentId) {
         const parent = await tree.find(`paseo:agent/${parentId}`);
         if (!parent) {
-          await awt(cfg, node, ["note", `started by agent ${parentId}; it has no node, so this node is under the task`], agent.id);
+          await awt(cfg, node, ["note", `started by agent ${parentId}; it has no node, so this node is under the task`], "paseo-plugin");
         } else if (!node.startsWith(parent + "/")) {
-          await awt(cfg, node, ["note", `started by agent ${parentId}; its node is ${parent}`], agent.id);
-          await awt(cfg, node, ["ref", parent, "--title", "parent agent", "--kind", "node"], agent.id);
+          await awt(cfg, node, ["note", `started by agent ${parentId}; its node is ${parent}`], "paseo-plugin");
+          await awt(cfg, node, ["ref", parent, "--title", "parent agent", "--kind", "node"], "paseo-plugin");
         }
       }
     });

@@ -101,13 +101,14 @@ After every turn of an agent that has a node (subagents included), the plugin ap
   - `node`: the agent node's name;
   - `counts`: per type (decision, question, answer, note, ref, state, effect, capture);
   - `ids`: at most 5 ids;
-  - `auto`: true when the only state written was the stand-in handoff;
+  - `auto`: true when the stand-in handoff was written this turn (the agent may also have written its own handoffs);
   - `empty`: true when nothing was stored.
 - **The renderer** is a client contribution (`addTimelineRenderer`) that shows one muted line:
   - `awt · 1 decision d-9e01b2c3 · 1 note · handoff`
   - `awt · handoff [auto]`
+  - `awt · 1 handoff · handoff [auto]` (the stand-in is always shown apart from the agent's own handoffs)
   - `awt · nothing stored this turn`
-- **Setting:** `AWT_RECEIPT` defaults to on. `0` turns receipts off, and `changes` shows them only when something was stored.
+- **Setting:** `AWT_RECEIPT` defaults to on. `0` or `off` turns receipts off, and `changes` shows them only when something was stored.
 - **Not seen by the model.** Plugin timeline items are UI-only and are not sent to the provider. The gated tier-2 test confirms this. If it turns out to be false, receipts default to off and this spec is revised.
 - **Errors:** an append failure is logged and does nothing else. The plugin never fails a turn.
 
@@ -123,7 +124,7 @@ After every turn of an agent that has a node (subagents included), the plugin ap
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
 | `AWT_RELATED` | agent env (the plugin forwards the daemon's value) | `3` | Related records after `decide` / `ask`. `0` turns them off |
-| `AWT_RECEIPT` | daemon env | on | `0` off, `changes` only when something was stored |
+| `AWT_RECEIPT` | daemon env | on | `0` or `off` off, `changes` only when something was stored |
 
 Flags: `find --like TEXT [--limit N]`, `decide|ask --related N`, `list --since ISO8601 [--down] --json`.
 
@@ -140,13 +141,13 @@ Core (`tests/test_recall.py`):
 - **T-R1g:** 2,000-node tree with a time bound: under 2 s on CI hardware, as a chaos case.
 - **T-R2a:** `decide` lists at most 3 related records by default and never the new row itself.
 - **T-R2b:** `--related 0` and `AWT_RELATED=0` print only the id line.
-- **T-R2c:** `--related 25` gives exit 2. `AWT_RELATED=abc` warns and uses 3.
+- **T-R2c:** `--related 25` gives exit 2. `AWT_RELATED=abc` warns and uses 3; `AWT_RELATED=` (empty) is unset, no warning.
 - **T-R2d:** `ask` shows the answer of an already-answered question elsewhere.
-- **T-R2e:** a corrupt events file in another node still lets the write succeed with exit 0.
+- **T-R2e:** a corrupt events file in another node still lets the write succeed with exit 0, and so does a fault injected inside the recall path (test hook).
 - **T-R2f:** the 2 s budget is exceeded (simulated): the write stands and the stop line is printed.
 - **T-R3a:** the `AGENTS.md` template contains the `find --like` line.
 - **T-R3b:** the plugin block is at most 700 chars and contains `find --like`.
-- **T-R4a:** `list --since` returns exactly the rows at or after the timestamp, with the fixed key set, and `node` with `--down`.
+- **T-R4a:** `list --since` returns exactly the rows at or after the timestamp, with the fixed key set, and `node` with `--down`. `Z` (any case), `+HH:MM` and `+HHMM` offsets are accepted; naive times, bare dates and `""` are exit 2 with a fix.
 - **T-R5a:** the `init` `SessionStart` hook has no matcher, so it covers `compact`.
 
 Plugin (`paseo-plugin/test/`):

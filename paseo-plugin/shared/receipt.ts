@@ -50,7 +50,10 @@ export function receiptLine(data: Receipt): string {
     const n = data.counts[type] ?? 0;
     if (!n) continue;
     if (type === "state") {
-      parts.push(`${n > 1 ? `${n} handoffs` : "handoff"}${data.auto ? " [auto]" : ""}`);
+      // The stand-in handoff is the plugin's, not the agent's: show it apart from handoffs the agent wrote.
+      const own = data.auto ? n - 1 : n;
+      if (own > 0) parts.push(data.auto ? `${own} handoff${own > 1 ? "s" : ""}` : n > 1 ? `${n} handoffs` : "handoff");
+      if (data.auto) parts.push("handoff [auto]");
       continue;
     }
     const id = n === 1 && (type === "decision" || type === "question") ? data.ids.find((i) => i.startsWith(type[0] + "-")) : undefined;

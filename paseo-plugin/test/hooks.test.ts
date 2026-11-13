@@ -96,6 +96,22 @@ test("P4 a subagent opened before its parent is known gets a parent ref and a no
   assert.ok(r.rows(child.env.AWT_DIR, "ref").some((x) => x.kind === "node" && x.target === parent.env.AWT_DIR));
 });
 
+test("P4 the parent note and ref are the plugin's rows, not the subagent's", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_p"));
+  const child = await r.call("agent.open.before", openReq("agt_c"));
+  await r.call("agent.create.after", { agent: agentPayload("agt_c", { parentAgentId: "agt_p" }) });
+  for (const type of ["note", "ref"]) {
+    const rows = r.rows(child.env.AWT_DIR, type);
+    assert.ok(rows.length > 0, type);
+    assert.ok(rows.every((x) => x.by === "paseo-plugin"), type + " " + JSON.stringify(rows));
+  }
+  const ghost = mk({}, WS);
+  await ghost.call("agent.create.after", { agent: agentPayload("agt_c", { parentAgentId: "agt_ghost" }) });
+  const kid = ghost.nodes().find((x) => x.key === "paseo:agent/agt_c")!;
+  assert.ok(ghost.rows(ghost.root + "/" + kid.path, "note").every((x) => x.by === "paseo-plugin"));
+});
+
 test("P4 a subagent whose parent has no node lands under the task and a note names the missing parent", async () => {
   const r = mk({}, WS);
   await r.call("agent.create.after", { agent: agentPayload("agt_c", { parentAgentId: "agt_ghost" }) });

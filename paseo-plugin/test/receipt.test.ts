@@ -78,7 +78,7 @@ test("P16 a turn that wrote nothing says so; AWT_RECEIPT=changes and =0 append n
   assert.deepEqual(on.appended[0].item.data, { node: on.appended[0].item.data.node, counts: {}, ids: [], auto: false, empty: true });
   assert.equal(receiptLine(on.appended[0].item.data), "awt · nothing stored this turn");
 
-  for (const mode of ["changes", "0"]) {
+  for (const mode of ["changes", "0", "off"]) {
     const r = mk({ AWT_RECEIPT: mode }, WS);
     const open = await r.call("agent.open.before", openReq("agt_1"));
     await begin(r, "agt_1", "t1");
@@ -148,10 +148,20 @@ test("P19 AWT_RELATED in the daemon env reaches the agent env", async () => {
   const open = await r.call("agent.open.before", openReq("agt_1"));
   assert.equal(open.env.AWT_RELATED, "5");
   assert.equal(open.env.KEEP, "1");
-  const plain = mk({ AWT_RELATED: "" }, WS);
-  delete process.env.AWT_RELATED;
-  const none = await plain.call("agent.open.before", openReq("agt_1"));
-  assert.equal("AWT_RELATED" in none.env, false);
+  for (const unset of [undefined, ""]) {
+    const plain = mk({ AWT_RELATED: unset }, WS); // undefined removes the key from the rig's env; the global process.env is left alone
+    const none = await plain.call("agent.open.before", openReq("agt_1"));
+    assert.equal("AWT_RELATED" in none.env, false, JSON.stringify(unset));
+  }
+});
+
+test("P20 the auto handoff renders apart from handoffs the agent wrote", () => {
+  const base = { node: "chat-1", counts: { state: 2 }, ids: [], auto: true, empty: false };
+  assert.equal(receiptLine(base), "awt · 1 handoff · handoff [auto]");
+  assert.equal(receiptLine({ ...base, counts: { state: 3 } }), "awt · 2 handoffs · handoff [auto]");
+  assert.equal(receiptLine({ ...base, counts: { state: 1 } }), "awt · handoff [auto]");
+  assert.equal(receiptLine({ ...base, counts: { state: 1 }, auto: false }), "awt · handoff");
+  assert.equal(receiptLine({ ...base, counts: { state: 2 }, auto: false }), "awt · 2 handoffs");
 });
 
 test("P20 the renderer schema rejects an unknown version or bad data without throwing", () => {

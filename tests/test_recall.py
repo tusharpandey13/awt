@@ -58,7 +58,8 @@ class Like(RecallBase):
         elsewhere = os.path.join(self.tmp, "elsewhere")
         os.mkdir(elsewhere)
         outside = self.awt("find", "--like", "gateway timeout seconds", root=agent, cwd=elsewhere)
-        self.assertIn("%s @%s:" % (nid, main), outside.stdout)
+        self.assertIn("%s @workspaces/billing/tasks/main:" % nid, outside.stdout)  # relative to the tree top, not absolute
+        self.assertNotIn(self.tmp, outside.stdout)
         top = self.awt("find", "--like", "gateway timeout seconds", root=agent, cwd=root)
         self.assertIn("%s @workspaces/billing/tasks/main:" % nid, top.stdout)
 
@@ -126,6 +127,28 @@ class Like(RecallBase):
         self.ok("note", "the gateway enforces a hard limit", root=main)
         self.assertEqual(len(self.like("gateway.", root=root)), 1)
         self.assertEqual(len(self.like("limit_ gateway/", root=root)), 1)
+
+
+    def test_current_node_has_no_prefix_even_from_outside_the_tree(self):  # T-R1c
+        root, pk, retry, agent, main = self.world()
+        mine = self.ok("note", "gateway timeout is thirty seconds", root=agent).stdout.split()[0]
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.mkdir(elsewhere)
+        for args in (("find", "--like", "gateway timeout seconds"),):
+            out = self.awt(*args, root=agent, cwd=elsewhere).stdout
+            self.assertIn("%s: gateway" % mine, out)
+            self.assertNotIn("@", out)
+        far = self.ok("decide", "retry gateway timeout", "--why", "gateway timeout seconds matter", root=agent, cwd=elsewhere)
+        self.assertIn("related: %s: gateway" % mine, far.stdout)
+        self.assertNotIn(self.tmp, far.stdout)
+
+    def test_find_term_tree_keeps_its_absolute_prefix_outside_the_tree(self):  # T-R1c
+        root, pk, retry, agent, main = self.world()
+        self.ok("note", "zebracorn marker", root=main)
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.mkdir(elsewhere)
+        out = self.awt("find", "--tree", "zebracorn", root=agent, cwd=elsewhere).stdout
+        self.assertIn("@" + main, out)
 
 
 class RelatedOnWrite(RecallBase):
@@ -197,6 +220,32 @@ class RelatedOnWrite(RecallBase):
         self.assertRegex(r.stdout.splitlines()[0], r"^d-[0-9a-f]{8} decided$")
         self.assertNotIn("Traceback", r.stderr)
         self.assertEqual(len(self.rows_of(agent, "decision")), 1)
+
+    def test_a_fault_inside_the_recall_path_keeps_the_write(self):  # T-R2e
+        root, pk, retry, agent, main = self.world()
+        self.seed(main)
+        fault = dict(self.env, AWT_TEST_RECALL_FAULT="1")
+        ctl = self.ok("note", "control", root=agent)  # the hook is inert elsewhere
+        # the same lookup raises under the hook (find --like has no guard), so the guard in decide/ask is what is tested
+        self.assertNotEqual(self.awt("find", "--like", "retry jitter", root=agent, env=fault).returncode, 0)
+        for cmd, args in (("decide", ("retry with jitter", "--why", "retry jitter")), ("ask", ("retry jitter question",))):
+            r = self.awt(cmd, *args, root=agent, env=fault)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(len(r.stdout.splitlines()), 1, r.stdout)  # the id line only
+            self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(len(self.rows_of(agent, "decision")), 1)
+        self.assertEqual(len(self.rows_of(agent, "question")), 1)
+
+    def test_empty_related_is_unset_and_a_bad_budget_means_two_seconds(self):  # T-R2c
+        root, pk, retry, agent, main = self.world()
+        self.seed(main)
+        e = self.ok("decide", "retry with jitter", "--why", "retry jitter", root=agent, env=dict(self.env, AWT_RELATED=""))
+        self.assertEqual(e.stderr, "")
+        self.assertEqual(len(self.related(e.stdout)), 3)
+        for bad in ("abc", "-5", "nan", "inf", ""):
+            r = self.ok("ask", "retry jitter question", root=agent, env=dict(self.env, AWT_RELATED_MS=bad))
+            self.assertEqual(len(self.related(r.stdout)), 3, (bad, r.stdout))
+            self.assertNotIn("lookup stopped", r.stdout)
 
     def test_budget_exceeded_keeps_the_write(self):  # T-R2f
         root, pk, retry, agent, main = self.world()
@@ -272,6 +321,26 @@ class Since(RecallBase):
         self.assertEqual(len(self.since(last, root=retry)), 1)
         self.assertEqual(self.since("2999-01-01T00:00:00Z", root=retry), [])
         self.assertGreater(len(self.since("2000-01-01T00:00:00Z", root=retry)), 4)  # every type, node and task rows too
+
+    def test_offsets_and_z_in_any_case_mean_the_same_instant(self):  # T-R4a
+        root, pk, retry, agent, main = self.world()
+        self.ok("note", "one", root=retry)
+        want = self.since("2000-01-01T00:00:00Z", root=retry)
+        for ts in ("2000-01-01T00:00:00z", "2000-01-01T05:30:00+05:30", "2000-01-01T05:30:00+0530", "1999-12-31T19:00:00-05:00",
+                   "1999-12-31T19:00:00-0500", "2000-01-01T00:00:00.5Z", "2000-01-01T00:00:00+00:00"):
+            self.assertEqual(self.since(ts, root=retry), want, ts)
+        self.assertEqual(self.since("2999-01-01T05:30:00+05:30", root=retry), [])
+        # the offset is applied: both of these are instants an hour ahead of now, after the note
+        late = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+        self.assertEqual(self.since(late.strftime("%Y-%m-%dT%H:%M:%S+00:00"), root=retry), [])
+        self.assertEqual(self.since((late + datetime.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%S+05:00"), root=retry), [])
+
+    def test_naive_bare_and_empty_times_are_usage_errors_with_a_fix(self):  # T-R4a
+        root, pk, retry, agent, main = self.world()
+        for bad in ("2000-01-01T00:00:00", "2000-01-01", "2000-01-01 00:00:00", "", "  ", "2000-01-01T00:00:00+5", "2000-01-01T00:00:00+25:99"):
+            r = self.bad("list", "--since", bad, "--json", root=retry, code=2)
+            self.assertIn("fix:", r.stderr, repr(bad))
+        self.assertIn("empty", self.bad("list", "--since", "", "--json", root=retry, code=2).stderr)
 
     def test_usage_errors(self):  # T-R4a
         root, pk, retry, agent, main = self.world()

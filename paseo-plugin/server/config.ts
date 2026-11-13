@@ -9,7 +9,7 @@ export interface AwtConfig {
   nudge: boolean;
   /** At the end of a turn with no handoff, record the agent's last message as state in scope `auto`. On unless AWT_AUTO_HANDOFF=0. */
   autoHandoff: boolean;
-  /** After each turn, a timeline row shows what awt stored: `on` (default), `changes` (only when something was stored) or `off` (AWT_RECEIPT=0). */
+  /** After each turn, a timeline row shows what awt stored: `on` (default), `changes` (only when something was stored) or `off` (AWT_RECEIPT=0 or off). */
   receipt: "on" | "changes" | "off";
   /** AWT_RELATED of the daemon, passed on to agents as it is (awt validates it). Empty or unset: not passed. */
   related: string | null;
@@ -28,9 +28,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): AwtConfig {
     timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 5000,
     nudge: env.AWT_NUDGE === "1",
     autoHandoff: env.AWT_AUTO_HANDOFF !== "0",
-    receipt: env.AWT_RECEIPT === "0" ? "off" : env.AWT_RECEIPT === "changes" ? "changes" : "on",
+    receipt: env.AWT_RECEIPT === "0" || env.AWT_RECEIPT === "off" ? "off" : env.AWT_RECEIPT === "changes" ? "changes" : "on",
     related: env.AWT_RELATED || null,
-    receiptBad: !["", "0", "1", "on", "changes", undefined].includes(env.AWT_RECEIPT),
+    receiptBad: !["", "0", "off", "1", "on", "changes", undefined].includes(env.AWT_RECEIPT),
     env,
   };
 }
