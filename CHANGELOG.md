@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- `store.db` (SQLite, stdlib only) at `$AWT_STORE/store.db`: derived tables `projects`, `nodes`, `sessions`, `turns`, `messages`, `tool_calls`, `records`, `effects`, `ingest_sources`, `schema_meta`, `canonical` (the raw JSON) and the FTS5 table `fts_text`, built from the canonical JSONL and the node logs. `awt ingest` rebuilds it when its inputs changed; `awt ingest --rebuild` deletes it and rebuilds it from local files only (byte-identical for identical inputs). `docs/schema.md`, `docs/adr/0004-fts5-over-custom-scoring.md`.
+- `find --sessions TERM`: adds message and tool-call hits from `store.db` ranked by FTS5 bm25; with no store, records only plus a one-line note.
+- `doctor` fails when the Python's sqlite3 has no FTS5.
 - `ingest [--source claude|all] [--hook]`: copies Claude Code transcripts (`~/.claude/projects`, override `AWT_CLAUDE_PROJECTS`) into a canonical raw JSONL store at `${AWT_STORE:-~/.local/share/awt-store}` (mode 700/600). One row per source line with the record verbatim, a `secret_flags` count, and no redaction or size cap. Incremental by (path, inode, offset), idempotent, crash safe and safe under concurrent runs. `--hook` is silent and exits 0. `init` adds it to the `SessionEnd` hook in `.claude/settings.json`. Design: `docs/adr/0003-canonical-raw-jsonl.md`.
 - `doctor` checks the store (mode, sync folder, git work tree), ingest freshness (warns when never run or over 7 days) and the oldest Claude transcript against `cleanupPeriodDays`.
 - `doctor --staged`: secret scan of staged blobs, for a git pre-commit hook.
@@ -20,6 +23,7 @@
 - `effect apply` and the `--run`, `--snapshot`, `--verify`, `--class` and `--timeout` flags (exit 2 with a `fix:` naming plan, begin and mark). `effect` no longer writes `.awt/runs/` or `.awt/blobs/` (`relay` still writes worker logs to `.awt/runs/`). Design: `docs/adr/0002-awt-never-executes.md`.
 
 ### Changed
+- `find --like` and the `related:` lines rank with FTS5 bm25 over an in-memory index of the walked records instead of `log(1 + N/df)`; interface, output and the 2-word match rule are unchanged, and no store is needed.
 - `migrate-paseo` puts new workspaces under project nodes (`projects/<slug>/workspaces/<name>`), not directly under the root, and its output counts projects created and workspaces moved.
 - Effects are a declared ledger: `effect plan --target T [--body FILE] [--how TEXT] [--after ID]... [--again] [--why T]`, `effect begin ID` (claims it once), `effect mark ID sent [--ref URL] | not-sent --why T | unknown --why T | dropped`, `effect show ID`. awt never executes commands; `--how` is text. A person can `mark sent` straight from `planned`. A `begun` effect never times out and blocks `status done`. `resume` shows `begun` and `unknown` effects.
 - `init` no longer writes the `ask` rule for `effect apply` into `.claude/settings.json`, and the task `AGENTS.md` block no longer carries the outbox/plan/apply paragraph. `doctor` warns, naming the exact lines to remove, when an old settings file still has the rule; it never edits it.

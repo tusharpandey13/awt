@@ -129,7 +129,7 @@ Names are scenario ids.
 
 Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across nodes, Paseo plugin).
 
-- T-R1a `find --like` ranks a rare shared word above a common one; ties go to the newest row.
+- T-R1a `find --like` ranks a rare shared word above a common one (FTS5 bm25, in memory, no store needed); ties go to the newest row.
 - T-R1b Superseded decisions and `auto` states never match.
 - T-R1c Hits from a sibling workspace carry the right node prefix from an agent node and from a cwd outside the tree.
 - T-R1d `rule` decisions get the x1.5 boost.
@@ -168,6 +168,24 @@ Fictional `parsekit` transcripts written by hand into a temp `AWT_CLAUDE_PROJECT
 - N11 `save` exits 2 naming `git commit` and `awt doctor --staged`; the parser has `ingest`, no `save`, at most 16 verbs. `init` writes a `SessionEnd` hook running `ingest --source claude --hook`.
 - N12 `doctor`: never-run and stale ingest warn; fresh is ok; store mode, loose file mode, git work tree and sync folder warn; oldest transcript age against `cleanupPeriodDays` (default 30, read from the settings file); doctor never creates the store.
 - N13 `doctor --staged`: clean index ok; a staged secret exits 1 naming file and pattern but not the secret; the staged blob counts, not the working copy; runs from a hook with no `--dir`; outside a repo exits 1 with a `fix:`.
+
+## Store (`test_store.py`)
+
+Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing reads real data.
+
+- S1 `ingest` builds `store.db` (mode 600) with every table and `schema_meta`; sessions, turns (a `tool_result` record is not a boundary), messages, tool calls (args, result excerpt and sha256, error flag, times) are exactly the fixture's.
+- S2 `canonical.raw` equals each source record; a token-shaped string is not redacted; a 300,000-character message is whole in `messages.text` and `canonical.raw`, while FTS finds its start and not its tail (the cap is only in the index).
+- S3 `fts_text` finds message text and tool-call arguments with the right `kind`.
+- S4 Records, effects (one row per effect folded from its steps), nodes and projects come from the node logs; record ids are unique.
+- S5 A session joins a node only on an exact `cwd`, with `join_confidence = 'cwd'`; otherwise null.
+- S6 Unparsed canonical rows count in `ingest_sources.errors`; no canonical files still builds an empty db.
+- S7 `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone; a from-scratch rebuild equals the incrementally built file.
+- S8 A garbage `store.db` is replaced by `--rebuild` and by a normal `ingest`; no temp files remain.
+- S9 A normal `ingest` with nothing new leaves `store.db` untouched (mtime); a new node record or new canonical rows update it.
+- S10 `--rebuild` prints a `rebuilt store.db` line and no provider line; with `--hook` it is silent.
+- S11 `find TERM` stays literal and never lists messages; `find --sessions TERM` adds `message:` and `tool_call:` hits; with no usable store it prints the one-line note and keeps the record hits; `--sessions` without a TERM or with `--like` is exit 2.
+- S12 `find --like` output is identical with and without a store.
+- S13 `doctor` is ok with FTS5 and exits 1 with `fail ... FTS5` when `AWT_TEST_NO_FTS5` simulates its absence; `ingest --rebuild` then exits 1 with a `fix:`.
 
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
 

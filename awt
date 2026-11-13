@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, socket, stat, subprocess, time
+import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, sqlite3, stat, subprocess, time, urllib.parse
 
 VERSION = "0.2.0"
 HOST = socket.gethostname()
@@ -1296,6 +1296,8 @@ def scope_nodes(tree, up, down, deadline=None):
 
 def cmd_find(a):
     if a.like is not None:
+        if a.sessions:
+            die("--sessions cannot be combined with --like", 'awt find --sessions "term"', 2)
         return find_like(a)
     if a.term is None:
         die("find needs a TERM or --like TEXT", 'awt find "term"', 2)
@@ -1313,6 +1315,12 @@ def cmd_find(a):
         out("+%d more" % (len(hits) - K["hits"]))
     if over:
         out("+ " + LIMIT)
+    if a.sessions:
+        found = session_hits(a.term, K["hits"])
+        for h in found or []:
+            out(h)
+        if found is None:
+            out("note: no store.db yet (run awt ingest); sessions not searched")
 
 
 STOPWORDS = set("""a about after all also an and any are as at be been but by can could did do does for from had has have he her his how i if in into
@@ -1330,13 +1338,35 @@ def words(text):
     return seen
 
 
+def fts_ok():
+    """Whether the running sqlite3 has FTS5 (AWT_TEST_NO_FTS5 is a test hook)."""
+    if os.environ.get("AWT_TEST_NO_FTS5"):
+        return False
+    try:
+        sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def bm25_scores(docs, ws):
+    """{index into docs: score, higher is better} for docs matching any word of ws. An in-memory FTS5 index over docs only, so the result depends on nothing but its inputs."""
+    if not ws or not docs:
+        return {}
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE VIRTUAL TABLE d USING fts5(t)")
+    db.executemany("INSERT INTO d(rowid, t) VALUES (?, ?)", enumerate(docs, 1))
+    q = " OR ".join('"%s"' % w for w in ws[:64])
+    return {i - 1: -s for i, s in db.execute("SELECT rowid, bm25(d) FROM d WHERE d MATCH ?", (q,))}
+
+
 def recall_rows(D, prefix, skip=None):
-    """Candidate records of one node for recall: (sort ts, words, line, rule?). Current decisions, questions, notes, refs, the main state."""
+    """Candidate records of one node for recall: (sort ts, words, line, rule?, indexed text). Current decisions, questions, notes, refs, the main state."""
     at = " @" + prefix if prefix else ""
     res = []
 
     def add(r, ident, text, line, rule=False):
-        res.append((r["ts"], set(words(ident + " " + text)), line, rule))
+        res.append((r["ts"], set(words(ident + " " + text)), line, rule, ident + " " + text))
     for d in D["cur_dec"]:
         if d["id"] != skip:
             tag = " [%s]" % ",".join(d["tags"]) if d.get("tags") else ""
@@ -1357,7 +1387,7 @@ def recall_rows(D, prefix, skip=None):
 
 
 def recall(text, limit, nodes, skip=None, deadline=None, width=200):
-    """(lines, stopped): the best-matching records across the --tree node set, ranked by rarity of the shared words. Unreadable nodes are skipped; show_related swallows anything else."""
+    """(lines, stopped): the best-matching records across the --tree node set, ranked by FTS5 bm25 (a rule decision counts 1.5x; ties go to the newest). Unreadable nodes are skipped; show_related swallows anything else."""
     q = words(text)
     if not q:
         return [], False
@@ -1373,17 +1403,11 @@ def recall(text, limit, nodes, skip=None, deadline=None, width=200):
             continue
     if os.environ.get("AWT_TEST_RECALL_FAULT"):  # a test hook: proves a failure here cannot undo a write
         raise RuntimeError("injected recall fault")
-    df = {}
-    for _, ws, _, _ in cands:
-        for w in ws:
-            df[w] = df.get(w, 0) + 1
+    sc = bm25_scores([c[4] for c in cands], q)
     need = 1 if len(q) <= 2 else 2
-    scored = []
-    for ts, ws, line, rule in cands:
-        shared = [w for w in q if w in ws]
-        if len(shared) >= need:
-            scored.append((sum(math.log(1 + len(cands) / df[w]) for w in shared) * (1.5 if rule else 1), ts, line))
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    scored = [(sc[i] * (1.5 if c[3] else 1), c[0], c[2]) for i, c in enumerate(cands) if i in sc and sum(w in c[1] for w in q) >= need]
+    scored.sort(key=lambda x: x[1], reverse=True)  # ties go to the newest
+    scored.sort(key=lambda x: x[0], reverse=True)
     return [cut(" ".join(l.split()), width) for _, _, l in scored[:limit]], stopped
 
 
@@ -1947,6 +1971,7 @@ def cmd_doctor(a):
         out("%s %s" % (level, msg))
 
     line("ok" if sys.version_info >= (3, 9) else "fail", "python %d.%d" % sys.version_info[:2])
+    line("ok" if fts_ok() else "fail", "sqlite %s has FTS5" % sqlite3.sqlite_version if fts_ok() else "sqlite %s has no FTS5; find --like and the store need it (use a Python built with it)" % sqlite3.sqlite_version)
     store_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
@@ -2244,7 +2269,9 @@ def cmd_ingest(a):
     try:
         store = store_dir()
         private_dir(store)
-        n, f = ingest_claude(store)
+        n, f = (None, None) if a.rebuild else ingest_claude(store)
+        private_dir(os.path.join(store, "ingest"))
+        built = sync_store(store, find_root(a.dir), a.rebuild)
     except BaseException as x:
         if isinstance(x, KeyboardInterrupt):
             raise
@@ -2254,7 +2281,259 @@ def cmd_ingest(a):
             raise
         die("ingest failed: %s: %s" % (type(x).__name__, x), "check that %s is writable (AWT_STORE overrides it) and run: awt ingest --source claude" % store_dir())
     if not a.hook:
-        out("ingested %d rows from %d claude files into %s" % (n, f, store))
+        if n is not None:
+            out("ingested %d rows from %d claude files into %s" % (n, f, store))
+        if built:
+            out("%s store.db: %d sessions, %d messages, %d records" % ("rebuilt" if a.rebuild else "updated", built["sessions"], built["messages"], built["records"]))
+
+
+# ---------- store.db ----------
+# Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 1, "1.37.0", 262144, 4096
+DDL = """
+CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
+CREATE TABLE nodes(node_id TEXT PRIMARY KEY, kind TEXT, name TEXT, path TEXT, parent_id TEXT, project_id TEXT, status TEXT, goal TEXT);
+CREATE TABLE sessions(session_id TEXT PRIMARY KEY, provider_name TEXT, conversation_id TEXT, node_id TEXT, join_confidence TEXT, cwd TEXT, request_model TEXT, started_at TEXT, ended_at TEXT, source TEXT, adapter INTEGER);
+CREATE TABLE turns(turn_id TEXT PRIMARY KEY, session_id TEXT, seq INTEGER, started_at TEXT, ended_at TEXT, outcome TEXT, paseo_turn INTEGER);
+CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGER, role TEXT, ts TEXT, text TEXT, parent_id TEXT, response_finish_reasons TEXT, PRIMARY KEY(session_id, message_id));
+CREATE TABLE tool_calls(tool_call_id TEXT, message_id TEXT, session_id TEXT, tool_name TEXT, args TEXT, result_excerpt TEXT, result_sha256 TEXT, is_error INTEGER, started_at TEXT, ended_at TEXT, PRIMARY KEY(session_id, tool_call_id));
+CREATE TABLE records(record_id TEXT PRIMARY KEY, node_id TEXT, type TEXT, ts TEXT, by TEXT, fields TEXT, session_id TEXT, origin TEXT);
+CREATE TABLE effects(effect_id TEXT PRIMARY KEY, node_id TEXT, target TEXT, key TEXT, state TEXT, attempt INTEGER, origin TEXT, rule TEXT, begun_by TEXT, begun_at TEXT, sent_ref TEXT, tool_call_id TEXT);
+CREATE TABLE ingest_sources(source TEXT, path TEXT, inode INTEGER, offset INTEGER, adapter INTEGER, last_run TEXT, errors INTEGER, PRIMARY KEY(source, path));
+CREATE TABLE canonical(src TEXT, session TEXT, seq INTEGER, file TEXT, raw TEXT, PRIMARY KEY(src, file, seq));
+CREATE VIRTUAL TABLE fts_text USING fts5(text, kind UNINDEXED, ref UNINDEXED);
+"""
+
+
+def store_inputs(store, root):
+    """[(kind, path, size)] sorted: the canonical files and node logs a build reads. Sizes only, so the list is a function of the inputs' content (the logs are append-only)."""
+    res = []
+    for dp, dns, fns in os.walk(os.path.join(store, "log")):
+        dns.sort()
+        res += [("canonical", os.path.join(dp, f), os.path.getsize(os.path.join(dp, f))) for f in sorted(fns) if f.endswith(".jsonl")]
+    for p in node_paths(root):
+        try:
+            res.append(("node", os.path.join(p, ".awt", "events.jsonl"), os.path.getsize(os.path.join(p, ".awt", "events.jsonl"))))
+        except OSError:
+            pass
+    return res
+
+
+def node_paths(root):
+    if not root:
+        return []
+    top = tree_top(root)
+    return [top] + [p for p, _ in descendants(top)[0]]
+
+
+def fingerprint(store, root):
+    top = os.path.realpath(tree_top(root)) if root else ""
+    return sha(json.dumps([(k, os.path.relpath(p, store if k == "canonical" else top), n) for k, p, n in store_inputs(store, root)]).encode())
+
+
+def store_fresh(store, root):
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.join(store, "store.db")), uri=True)
+        try:
+            m = dict(db.execute("SELECT key, value FROM schema_meta"))
+        finally:
+            db.close()
+        return m.get("schema_version") == str(SCHEMA_VERSION) and m.get("inputs") == fingerprint(store, root)
+    except sqlite3.Error:
+        return False
+
+
+def u(s):
+    """s as text SQLite can hold: lone surrogates (valid in JSON, not in UTF-8) become ?."""
+    return s.encode("utf-8", "replace").decode("utf-8") if isinstance(s, str) else s
+
+
+def blocks_of(content):
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def block_text(c):
+    if isinstance(c, str):
+        return c
+    return "\n".join(b["text"] for b in c if isinstance(b, dict) and isinstance(b.get("text"), str)) if isinstance(c, list) else ""
+
+
+def derive_claude(db, sid, rows, join):
+    """messages, turns, tool_calls and the session row of one canonical claude file. A turn starts at each user message that carries text (not only tool results)."""
+    def fts(text, kind, cur):
+        if text and cur.rowcount == 1:
+            db.execute("INSERT INTO fts_text(text, kind, ref) VALUES (?, ?, ?)", (text[:FTS_CAP], kind, cur.lastrowid))
+    conv = cwd_ = model = first = last = None
+    turns, calls, turn = [], {}, -1
+    for seq, r in rows:
+        if not isinstance(r, dict):
+            continue
+        ts = r.get("timestamp") if isinstance(r.get("timestamp"), str) else None
+        conv, cwd_ = conv or r.get("sessionId"), cwd_ or r.get("cwd")
+        first = first or ts
+        last = max(last, ts) if last and ts else last or ts
+        m = r.get("message")
+        if r.get("type") not in ("user", "assistant") or not isinstance(m, dict):
+            continue
+        bl = blocks_of(m.get("content"))
+        text = u("\n".join(b["text"] for b in bl if b.get("type") == "text" and isinstance(b.get("text"), str)))
+        if r["type"] == "user" and not r.get("isMeta") and any(b.get("type") == "text" for b in bl):
+            turn += 1
+            turns.append([sid + ":%d" % turn, turn, ts, ts])
+        if turns and ts:
+            turns[-1][3] = max(turns[-1][3] or ts, ts)
+        if r["type"] == "assistant":
+            model = model or m.get("model")
+        mid = r.get("uuid") or "%s#%d" % (sid, seq)
+        stop = m.get("stop_reason")
+        cur = db.execute("INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, m.get("role") or r["type"], ts,
+                         text, r.get("parentUuid"), json.dumps([stop]) if isinstance(stop, str) else None))
+        fts(text, "message", cur)
+        for b in bl:
+            if b.get("type") == "tool_use" and isinstance(b.get("id"), str):
+                args = u(json.dumps(b.get("input"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                cur = db.execute("INSERT OR IGNORE INTO tool_calls VALUES (?,?,?,?,?,NULL,NULL,NULL,?,NULL)", (b["id"], mid, sid, b.get("name"), args, ts))
+                calls[b["id"]] = cur.lastrowid if cur.rowcount == 1 else None
+                fts(args, "tool_call", cur)
+            elif b.get("type") == "tool_result" and calls.get(b.get("tool_use_id")):
+                t = u(block_text(b.get("content")))
+                db.execute("UPDATE tool_calls SET result_excerpt=?, result_sha256=?, is_error=?, ended_at=? WHERE rowid=?",
+                           (t[:EXCERPT], sha(t.encode("utf-8")), 1 if b.get("is_error") else 0, ts, calls[b["tool_use_id"]]))
+    db.executemany("INSERT INTO turns VALUES (?,?,?,?,?,NULL,0)", [(t[0], sid, t[1], t[2], t[3]) for t in turns])
+    node = join.get(cwd_) if cwd_ else None
+    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", (sid, "claude_code", conv or sid, node, "cwd" if node else None, cwd_, model, first, last, "claude", ADAPTER))
+
+
+def derive_nodes(db, root):
+    """nodes, projects, records and effects from the node logs of the whole tree; returns {realpath: node_id} for the session join (unique paths only)."""
+    seen, join, rids = set(), {}, set()
+    top = os.path.realpath(tree_top(root)) if root else None
+    paths = [os.path.realpath(p) for p in node_paths(root)]
+    ids = {}
+    for p in paths:
+        key = node_info(p)["key"]
+        i = key if key and key not in seen else "path:" + os.path.relpath(p, top)
+        seen.add(i)
+        ids[p] = i
+    pid = {}
+    db.execute("INSERT INTO projects(project_id, name) VALUES ('unassigned', 'unassigned')")
+    for p in paths:
+        info, D = node_info(p), load_at(p)
+        par = parent(p)
+        par = ids.get(os.path.realpath(par)) if par and p != top else None
+        proj = pid.get(par, "unassigned") if par else "unassigned"
+        i = ids[p]
+        if info["kind"] == "project":
+            proj = i
+            db.execute("INSERT INTO projects VALUES (?,?,?,?,NULL,'project',?,?,NULL)", (i, i, info["name"], info["key"], D["rows"][0]["ts"] if D["rows"] else None, D["rows"][-1]["ts"] if D["rows"] else None))
+        pid[i] = proj
+        db.execute("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)", (i, info["kind"], info["name"], os.path.relpath(p, top), par, proj, D["status"], (D["task"] or {}).get("goal")))
+        join[p] = i
+        for n, r in enumerate(D["rows"]):
+            rid = r.get("id") if r["type"] != "effect" else None
+            rid = rid if rid and rid not in rids else "%s#%d" % (i, n)
+            rids.add(rid)
+            origin = r["by"] if r.get("by") in ("person", "plugin") else "agent"
+            cur = db.execute("INSERT INTO records VALUES (?,?,?,?,?,?,NULL,?)", (rid, i, r["type"], r["ts"], r.get("by"), json.dumps(r, sort_keys=True), origin))
+            text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by"))
+            db.execute("INSERT INTO fts_text(text, kind, ref) VALUES (?, 'record', ?)", (u(text[:FTS_CAP]), cur.lastrowid))
+        for e in D["eff"].values():
+            hist = e["hist"]
+            begun = next((h for h in hist if h["step"] in ("begun", "claimed")), None)
+            sent = next((h for h in reversed(hist) if h["step"] == "sent" and h.get("ref")), None)
+            db.execute("INSERT OR IGNORE INTO effects VALUES (?,?,?,?,?,?,'declared',NULL,?,?,?,NULL)", (e["id"], i, e["target"], e["key"], e["state"], e["attempt"],
+                       begun and begun.get("by"), begun and begun["ts"], sent and sent["ref"]))
+    return {p: i for p, i in join.items() if list(join.values()).count(i) == 1}
+
+
+def build_store(store, root):
+    """Rebuild store.db from canonical JSONL and the node logs. Same inputs give the same file: rows are inserted in sorted path and line order, nothing in it is a clock or an id generated at build time."""
+    if not fts_ok():
+        die("this Python's sqlite3 has no FTS5 (sqlite %s)" % sqlite3.sqlite_version, "use a Python whose sqlite3 has FTS5 (python.org builds and Homebrew have it); awt doctor checks this")
+    final = os.path.join(store, "store.db")
+    tmp = "%s.%d.tmp" % (final, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+    db = sqlite3.connect(tmp, isolation_level=None)
+    try:
+        db.executescript("PRAGMA page_size=4096; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; BEGIN;" + DDL)
+        join = derive_nodes(db, root)
+        fp = fingerprint(store, root)
+        errors, files = {}, sorted(p for k, p, _ in store_inputs(store, root) if k == "canonical")
+        for p in files:
+            rows = []
+            with open(p, "rb") as g:
+                for ln in g:
+                    try:
+                        r = json.loads(ln)
+                        rows.append((r["src"], r["session"], int(r["seq"]), r["raw"]))
+                    except (ValueError, KeyError, TypeError):
+                        pass
+            relp = os.path.relpath(p, os.path.join(store, "log"))
+            db.executemany("INSERT OR IGNORE INTO canonical VALUES (?,?,?,?,?)", [(a, b, c, relp, json.dumps(d, separators=(",", ":"))) for a, b, c, d in rows])
+            errors[os.path.splitext(os.path.basename(p))[0]] = sum(1 for r in rows if isinstance(r[3], dict) and "_unparsed" in r[3])
+            if rows and rows[0][0] == "claude":
+                derive_claude(db, os.path.splitext(os.path.basename(p))[0], [(r[2], r[3]) for r in rows], join)
+        try:
+            with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
+                st = json.load(g)
+            for rp, e in sorted(st["files"].items()):
+                db.execute("INSERT INTO ingest_sources VALUES ('claude',?,?,?,?,?,?)", (rp, e.get("inode"), e.get("offset"), st.get("adapter"), st.get("last_run"),
+                           errors.get(os.path.splitext(os.path.basename(e.get("out") or ""))[0], 0)))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        db.executemany("INSERT INTO schema_meta VALUES (?,?)", [("schema_version", str(SCHEMA_VERSION)), ("semconv_version", SEMCONV), ("adapter", str(ADAPTER)), ("inputs", fp)])
+        db.execute("COMMIT")
+        n = {t: db.execute("SELECT count(*) FROM " + t).fetchone()[0] for t in ("sessions", "messages", "records")}
+    except BaseException:
+        db.close()
+        os.unlink(tmp)
+        raise
+    db.close()
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, final)
+    return n
+
+
+def sync_store(store, root, force):
+    """Normal ingest rebuilds store.db when it is missing, unreadable, of another schema, or its inputs changed (their sizes: a stat per file); else it leaves it alone. A full rebuild is the simplest correct update and the same code path as --rebuild."""
+    if force or not store_fresh(store, root):
+        lock = os.open(os.path.join(store, "ingest", "store.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if force or not store_fresh(store, root):
+                return build_store(store, root)
+        finally:
+            os.close(lock)
+
+
+def session_hits(term, limit):
+    """None when there is no usable store.db, else message and tool-call lines ranked by FTS5 bm25."""
+    path = os.path.join(store_dir(), "store.db")
+    if not os.path.isfile(path):
+        return None
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True)
+        try:
+            res = []
+            phrase = '"%s"' % term.replace('"', '""')
+            for kind, ref in db.execute("SELECT kind, ref FROM fts_text WHERE fts_text MATCH ? AND kind IN ('message', 'tool_call') ORDER BY bm25(fts_text), rowid LIMIT ?", (phrase, limit)):
+                if kind == "message":
+                    sid, mid, seq, role, text = db.execute("SELECT session_id, message_id, seq, role, text FROM messages WHERE rowid=?", (ref,)).fetchone()
+                    head = "message:%s#%d [%s]" % (sid, seq, role)
+                else:
+                    sid, tid, name, text = db.execute("SELECT session_id, tool_call_id, tool_name, args FROM tool_calls WHERE rowid=?", (ref,)).fetchone()
+                    head = "tool_call:%s:%s [%s]" % (sid, tid, name)
+                i = max(text.lower().find(term.lower()), 0)
+                res.append("%s: %s" % (head, text[max(0, i - 40):i + 80].replace("\n", " ")))
+            return res
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
 
 
 # ---------- main ----------
@@ -2278,7 +2557,7 @@ def build():
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
     V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
-    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int))])
+    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F)])
     V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])
     V(sp, "note", [("text", T)])
     V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append")), (("--related",), dict(type=int))])
@@ -2289,7 +2568,7 @@ def build():
     V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
     V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
     V(sp, "doctor", opt=[(("--staged",), F)])
-    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F)])
+    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
     V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing
