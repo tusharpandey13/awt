@@ -530,7 +530,7 @@ def a_mark_race(c):
     tos = ["sent", "not-sent", "unknown", "dropped", "sent", "not-sent", "unknown", "sent"] * 2
     with cf.ThreadPoolExecutor(16) as ex:
         list(ex.map(lambda to: t.run("effect", "mark", e, to, "--why", "race"), tos))
-    if t.state(e) not in ("sent", "planned", "unknown"):
+    if t.state(e) not in ("sent", "planned", "unknown", "dropped"):  # not-sent -> planned -> dropped is legal
         c.fail("state after concurrent marks: %s" % t.state(e))
     no_quarantine(c, t)  # marks are serialised: none may be written illegally
     audit(c, t)
