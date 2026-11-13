@@ -89,9 +89,9 @@ awt node logs ────────┘   (read-only)          (append-only)  
 | Paseo | The plugin pipes hook events into `awt ingest --source paseo` on stdin; `migrate-paseo` reads `~/.paseo/projects/projects.json` and `workspaces.json` | event id | Turn start, outcome, tool calls, permission requests and how they were answered, project/workspace/agent ids, parent. The only uniform L6/L7 source across providers, and the source of detected effects (section 6) |
 | awt records | `load()` per node over the tree walk | (node, line count) | Quarantined rows are counted, not ingested |
 | ccusage | `ccusage session --json` (pinned version) | session id | Priced cost for Claude Code, Codex, opencode, pi |
-| OTel (optional) | OTLP/JSON from a local file exporter | file offset | Enrichment only. Phase 6 |
+| OTel (optional) | OTLP/JSON from a local file exporter | file offset | Enrichment only. Phase 7 |
 
-Triggers, host-native first: Claude Code `SessionEnd` hook runs `awt ingest --source claude --hook`; the Paseo plugin runs it after `agent.turn.after` (detached, never awaited); otherwise the owner schedules it (launchd/cron). Every trigger is incremental and idempotent.
+Triggers, host-native first: Claude Code `SessionEnd` hook runs `awt ingest --source claude --hook` (and `PreToolUse`/`PostToolUse` for detected effects, section 6.1); the Paseo plugin runs it after `agent.turn.after` (detached, never awaited); otherwise the owner schedules it (launchd/cron). Every trigger is incremental and idempotent.
 
 **Joining a session to an agent node.** Paseo knows the agent id; the transcript knows the provider session id. The join is the provider's session id as recorded by Paseo for that agent, if Paseo exposes it; otherwise (cwd, first timestamp within 60 s). Which of the two is available is not yet verified (open question 4). An unjoined session is still ingested, with `node_id` null.
 
@@ -174,7 +174,7 @@ All access is to the same files; awt is never required to read them.
 | CLI | Owner, agent (optional) | `awt resume`, `awt find` (FTS5-ranked, records by default; `--sessions` adds messages and tool calls), `awt list`. Useful, never required for an agent |
 | Agent SQL | Agent (optional) | Read-only `sqlite3` with the agent's own tools, under host permissions. Optional `awt_find` plugin tool with the same output as `awt find` |
 | `awt ui` | Owner | Starts Datasette on `127.0.0.1` against `store.db` in immutable mode, with canned queries from `docs/recipes`. Exits with the terminal. Not a daemon |
-| Paseo screen (optional) | Owner in Paseo | A plugin screen showing per-agent sessions, turns, cost and records, reading through `awt … --json`. Phase 6 |
+| Paseo screen (optional) | Owner in Paseo | A plugin screen showing per-agent sessions, turns, cost and records, reading through `awt … --json`. Phase 7 |
 
 DuckDB UI is not the default UI: its local server fetches the frontend from `ui.duckdb.org` (fact 2 below). Queries stay local, but the code that can read the loaded data is fetched from a remote site on each use. Datasette serves its own assets from the installed package.
 
@@ -187,7 +187,7 @@ Verified 2026-11-13. The stdlib-only rule is lifted; each dependency below has i
 | Usage and cost | ccusage | MIT | **Buy** | Covers Claude Code, Codex, opencode, pi; keeps model prices current; we would otherwise maintain a price table |
 | Owner UI | Datasette | Apache-2.0 | **Buy**, on demand | Generic SQLite browser with facets, FTS and canned queries; local; nothing to build |
 | Search ranking | SQLite FTS5 (bm25) | public domain | **Buy** (built into Python's sqlite3 on common builds) | Replaces PR #11's hand-rolled `log(1+N/df)` scoring; `doctor` fails if FTS5 is missing |
-| Meaning search | sqlite-vec | MIT/Apache-2.0 | **Later, gated** | Only if measurement shows a gap (section 10, phase 7) |
+| Meaning search | sqlite-vec | MIT/Apache-2.0 | **Later, gated** | Only if measurement shows a gap (section 10, phase 9) |
 | Bulk analytics | DuckDB (owner's install) | MIT | **Use, not link** | Reads SQLite and writes Parquet; a recipe, not code |
 | Ingest, schema, redaction, effects ledger | awt | MIT | **Build** | Nothing existing normalizes three providers plus Paseo into an open local schema |
 | Tracing UI | Phoenix | ELv2 | Rejected | Not OSS |
@@ -251,26 +251,34 @@ Gained: agents need no effect concept at all for ordinary sends; the host's perm
 
 Rule 8 stays: **16 top-level verbs maximum**. v2 adds `ingest` and `ui` and removes `save` and `supersede`, so the count stays 16. `help`/`--help`/`--version` do not count, as today.
 
-| Verb | v2 | Note |
-|---|---|---|
-| `init` | Stays | Drops the `ask` rule from the settings template; adds a `SessionEnd` ingest hook to the template |
-| `resume` | Stays | Budgets unchanged. Section 4 shows `begun` and `unknown` effects |
-| `list` | Stays | Adds `--since ISO8601 --json` (from PR #11 R4) |
-| `find` | **Changes** | FTS5 bm25 ranking over records; `--like TEXT` keeps PR #11's interface and output, ranked by FTS5; `--sessions` adds messages and tool calls from the store. Literal search stays the default. Store absent: records-only, with a one-line note |
-| `state` | Stays | |
-| `note` | Stays | |
-| `decide` | Stays | Prints related records (PR #11 R2), via FTS5 |
-| `ask` | Stays | Same as `decide` |
-| `answer` | Stays | |
-| `ref` | Stays | |
-| `capture` | Stays | |
-| `status` | Stays | `done` also refused while an effect is `begun` |
-| `effect` | **Changes** | `plan | begin | mark | show`. `apply` removed (section 6) |
-| `doctor` | **Changes** | Drops the `ask` rule check; adds FTS5 present, store path checks, ingest freshness, Claude retention vs. ingest age, obsolete `ask` rule found (warn with the fix; never edits) |
-| `ingest` | **New** | `awt ingest [--source claude|opencode|pi|paseo|records|all] [--hook] [--rebuild]`. Incremental, idempotent; `--hook` is silent and exits 0 on any error, like `resume --hook` |
-| `ui` | **New** | Starts Datasette as in section 4. Not installed: prints the install command and exits 1 |
-| `save` | **Removed** | Host-native: the agent or person runs `git commit` with host permissions. Its secret check moves to `doctor --staged`, which a git pre-commit hook can call |
-| `supersede` | **Removed** | Host-native: `mv docs/old.md docs/_superseded/` and `awt note "docs/new.md replaces docs/old.md: why"`. Listing already hides `docs/_superseded/` |
+"Agent needs it?" applies the design principle (section 1): **yes** means an agent must know the verb to get value; **optional** means it helps an agent that knows it but nothing breaks without it; **no** means it is for people, harnesses or hooks.
+
+| Verb | v2 | Agent needs it? | Note |
+|---|---|---|---|
+| `init` | Changes | No (harness, person) | `--kind project` added. Drops the `ask` rule from the settings template; adds `SessionEnd`, `PreToolUse` and `PostToolUse` ingest hooks |
+| `resume` | Stays | No: delivered by `SessionStart` hook, `awt_resume` tool and `BRIEF.md` | Budgets unchanged. Effects section shows `begun` and `unknown`; inferred records get their own label |
+| `list` | Stays | No (person; plugin reads `--json`) | Adds `--since ISO8601 --json` (PR #11 R4) |
+| `find` | **Changes** | Optional (`grep` and SQL also work) | FTS5 bm25 ranking; `--like TEXT` keeps PR #11's interface and output; `--sessions` adds messages and tool calls. Literal search stays the default. No store: records only, with a one-line note |
+| `state` | Stays | Optional: the plugin's `auto` handoff covers a forgotten one | An agent-written handoff is still better than the last reply, so the prompt mentions it in one clause |
+| `note` | Stays | No (person; extraction) | Agents that record facts use it, but the prompt no longer asks |
+| `decide` | Stays | **Yes** (one of two) | The reason behind a choice is intent no adapter can see. Prints related records (PR #11 R2) via FTS5 |
+| `ask` | Stays | **Yes** (one of two) | A question for a person must be visible and block `status done`. Same related-record output |
+| `answer` | Stays | No (person) | |
+| `ref` | Stays | No (person; plugin writes the Paseo refs) | URLs in tool calls and messages are queryable in the store anyway |
+| `capture` | Stays | No (person) | For pasted text with no link |
+| `status` | Stays | No (person; plugin on archive) | `done` also refused while an effect is `begun` |
+| `effect` | **Changes** | Optional (declared path only) | `plan | begin | mark | show`; `apply` removed. Ordinary sends are detected (section 6.1) |
+| `doctor` | **Changes** | No (person) | Drops the `ask` rule check; adds FTS5 present, store path, ingest freshness, Claude retention vs. ingest age, obsolete `ask` rule (warn with fix; never edits), legacy workspace under root |
+| `ingest` | **New** | No (hooks, plugin, schedule) | `awt ingest [--source claude|opencode|pi|paseo|records|all] [--hook] [--rebuild]`. Incremental, idempotent; `--hook` is silent and exits 0 on any error, like `resume --hook`, and returns hook JSON for `PreToolUse` |
+| `ui` | **New** | No (person) | Starts Datasette as in section 4. Not installed: prints the install command, exits 1 |
+| `save` | **Removed** | No | Host-native: `git commit` under host permissions. Its secret check moves to `doctor --staged`, callable from a git pre-commit hook |
+| `supersede` | **Removed** | No | Host-native: `mv docs/old.md docs/_superseded/` plus a `note`. Listing already hides `docs/_superseded/` |
+
+Agent-facing surface after v2: two verbs (`decide`, `ask`), one optional handoff (`state`), one file (`BRIEF.md`). The plugin's prompt block becomes about 250 chars, for example:
+
+> [awt] Your task brief is $AWT_DIR/BRIEF.md (or the awt_resume tool). Sessions, tool calls and sends are recorded for you. Record a choice with `awt decide "..." --why "..."` and a question for a person with `awt ask "..."`. Before stopping, `awt state --now ... --next ...` helps the next agent.
+
+The task `AGENTS.md` template shrinks to the same content plus the subagent line.
 
 Other parts: the node tree stays; the Paseo plugin stays and gains the ingest pipe and, later, a screen; `relay` stays (its "workers never approve effects" becomes "workers plan and mark, and send only when their unit says so"); `migrate-wt` and `migrate-paseo` stay as one-offs. The "one file, stdlib only" rule becomes: core verbs stay stdlib Python 3.9+; `ui` and cost import call external tools that are optional.
 
@@ -278,7 +286,7 @@ Other parts: the node tree stays; the Paseo plugin stays and gains the ingest pi
 
 The gap: there are a spec, a guide and a README, but no concept or reference docs.
 
-- `docs/concepts.md`: the glossary (node, record, state, handoff, effect, ingest, canonical, derived, LOD), one or two sentences each, starting with the effect line above.
+- `docs/concepts.md`: the glossary (node, project, record, state, handoff, effect, detected and declared effect, inferred record, ingest, canonical, derived, LOD), one or two sentences each, starting with the effect line above.
 - Per-verb reference: one source file (`docs/verbs/*.md` or a table embedded in `awt`; decide at build) from which `awt help`, `awt <verb> --help`, the man page (`awt.1`) and the website reference are generated. `tests/test_docs.py` fails when they differ.
 - `docs/schema.md`: every table and column, its LOD, its OTel name if any, generated from the schema definition.
 - `docs/recipes/`: SQL for the analytics questions in section 11.
@@ -292,6 +300,13 @@ The gap: there are a spec, a guide and a README, but no concept or reference doc
 - `effect apply` and the removed flags exit 2 with a `fix:` that names the plan/begin/mark path.
 - `.claude/settings.json` with the old `ask` rule: `doctor` warns with the exact lines to remove. awt never edits it.
 
+**Project level.**
+- `migrate-paseo` reads `~/.paseo/projects/projects.json` (`projectId`, `displayName`, `customName`, `rootPath`, `archivedAt`) and creates one `project` node per project, keyed `paseo:project/<id>`, plus `unassigned`.
+- It then moves each existing workspace node under its project's `projects/<slug>/workspaces/` with one `rename` per node (same filesystem, so a subtree moves whole). The project comes from the workspace's existing `ref paseo:project/<id>`, else from `workspaces.json`. A workspace with neither goes under `unassigned`.
+- Moves are safe for links: keyed refs resolve by key under the tree root first (as today), and the plugin finds nodes by key and drops cached paths that are gone. Idempotent like the rest of `migrate-paseo`: a rerun finds every node by key and moves nothing.
+- One hazard: a running agent's `AWT_DIR` holds the old path until it is reopened. Run the migration with the Paseo daemon stopped, or accept that open agents write to a path that no longer exists (awt exits 4 with a fix; nothing is lost, nothing lands in the wrong node).
+- The plugin creates the project node at `workspace.create.after` from `workspace.projectId`, so new workspaces land in place.
+
 **First ingest is urgent.** Claude Code deletes transcripts after 30 days by default, so every day before phase 1 lands loses a day of history. Until then the owner can raise `cleanupPeriodDays` (for example to `3650`) in `~/.claude/settings.json`; that is the owner's setting to change (open question 1).
 
 **PR #11 (active recall).** Do not merge it as written; split it.
@@ -301,7 +316,7 @@ The gap: there are a spec, a guide and a README, but no concept or reference doc
 
 ## 9. Review rubric and process
 
-Every design change and every PR that adds a verb, flag, dependency, table or hook is scored 0-2 on each line. 0 on any line blocks; a total under 15 of 20 needs a written reason.
+Every design change and every PR that adds a verb, flag, dependency, table or hook is scored 0-2 on each line. 0 on any line blocks; a total under 17 of 22 needs a written reason.
 
 | Criterion | 2 | 1 | 0 |
 |---|---|---|---|
@@ -309,7 +324,8 @@ Every design change and every PR that adds a verb, flag, dependency, table or ho
 | Layer fit | In the layer that owns it (source, ingest, store, access) | Crosses one layer | Duplicates another layer |
 | Host-native first | Uses the host's mechanism (permissions, hooks, git) | Wraps it thinly | Reimplements it |
 | Buy before build | Uses a maintained OSS tool, or none exists (stated) | Builds with a reason | Builds what exists |
-| Agent ergonomics | One call, fixed output size, `fix:` on refusal | Two calls or variable output | Needs prompt text to work |
+| Agent abstraction cost | Agents need no new concept or verb; value arrives through hooks, files and normal tools | One optional verb or one prompt clause | Agents must learn a concept or call a verb for it to work |
+| Agent ergonomics (when an agent does call awt) | One call, fixed output size, `fix:` on refusal | Two calls or variable output | Needs prompt text to work |
 | Human visibility | Owner can see the result in the brief, `ui` or SQL | Only in logs | Invisible |
 | Failure semantics | Failure is visible, never silent, never retried blindly | Visible but unclear | Silent or retried |
 | Data quality | Provenance on every row (source, adapter, offset) | Partial | None |
@@ -322,7 +338,7 @@ Process:
 3. The author resolves every 0 and every score where the reviews differ by 2, in the ADR.
 4. The owner decides. Accepted ADRs are never edited, only superseded.
 
-First ADRs: 0001 data access is the job; 0002 awt never executes; 0003 canonical redacted raw JSONL; 0004 FTS5 over custom scoring; 0005 Datasette for `ui`; 0006 verb swap (`ingest`, `ui` for `save`, `supersede`).
+First ADRs: 0001 data access is the job; 0002 awt never executes; 0003 canonical redacted raw JSONL; 0004 FTS5 over custom scoring; 0005 Datasette for `ui`; 0006 verb swap (`ingest`, `ui` for `save`, `supersede`); 0007 zero abstraction cost for agents, detected effects; 0008 project level in the tree.
 
 ## 10. Phased plan
 
@@ -330,16 +346,18 @@ Smallest useful first. Each phase ships alone and leaves the tree working.
 
 | Phase | Delivers | Done when |
 |---|---|---|
-| 0 | Effects ledger (section 6) and the doc fixes (`ask` rule, plugin prompt). Removes code | Old trees read correctly; chaos suite green; no code path runs a subprocess for an effect |
-| 1 | `awt ingest --source claude` to canonical JSONL with redaction; `SessionEnd` hook; `doctor` retention check | A fictional parsekit transcript round-trips; a rerun writes nothing; secrets in fixtures are redacted |
-| 2 | `store.db` with `sessions`, `turns`, `messages`, `tool_calls`, `records`, `effects`, FTS5; `--rebuild`; `find` ranking, `--like`, `--sessions`; PR #11 R1/R2 | Rebuild is byte-stable; PR #11 tests pass on FTS5 |
-| 3 | Paseo pipe (turn outcomes, permissions, node join); opencode and pi adapters | One session per provider in fixtures lands in the same tables |
-| 4 | ccusage import into `usage`; `awt ui` with canned queries; `docs/schema.md`, `docs/recipes/` | Every question in section 11 marked phase 4 has a recipe that runs |
-| 5 | Docs: concepts, generated help and man page, per-verb reference | `test_docs.py` checks help, man page and reference agree |
-| 6 | Optional: Paseo screen, `awt_find` tool, OTel enrichment, Parquet recipe | Each optional, behind its own setting |
-| 7 | **TODO, gated:** meaning-based search (sqlite-vec) | See below |
+| 0 | Declared effects ledger (section 6.2) and removal of `apply`, the `ask` rule and the outbox paragraph of the prompt. Removes code | Old trees read correctly; chaos suite green; no code path runs a subprocess for an effect |
+| 1 | `awt ingest --source claude` to canonical JSONL with redaction; `SessionEnd` hook; `doctor` retention check. **Project level:** `project` kind, plugin creates project nodes, `migrate-paseo` reads `projects.json` and moves workspaces, `projects` table definition | A fictional parsekit transcript round-trips; a rerun writes nothing; secrets in fixtures are redacted; a fixture tree with two projects and an unassigned workspace migrates, and reruns move nothing |
+| 2 | `store.db` with `projects`, `nodes`, `sessions`, `turns`, `messages`, `tool_calls`, `records`, `effects`, FTS5; `--rebuild`; `find` ranking, `--like`, `--sessions`; PR #11 R1/R2; `BRIEF.md` per node; prompt block cut to ~250 chars | Rebuild is byte-stable; PR #11 tests pass on FTS5; an agent fixture with no awt prompt still gets its brief through the hook |
+| 3 | Detected effects (section 6.1): Claude Code `PreToolUse`/`PostToolUse` hooks, Paseo permission and timeline detection, outbound pattern list | Fixture sessions with `git push` and `gh pr comment` produce ledger rows with no agent call; a resend fixture gets `ask` from the hook |
+| 4 | Paseo pipe (turn outcomes, permissions, node join); opencode and pi adapters | One session per provider in fixtures lands in the same tables |
+| 5 | ccusage import into `usage`; `awt ui` with canned queries; `docs/schema.md`, `docs/recipes/` | Every question in section 11 has a recipe that runs on fixtures |
+| 6 | Docs: concepts, generated help and man page, per-verb reference | `test_docs.py` checks help, man page and reference agree |
+| 7 | Optional: Paseo screen, `awt_find` tool, OTel enrichment, Parquet recipe | Each optional, behind its own setting |
+| 8 | **TODO, gated:** inferred records (section 3.9) | Precision and recall measured on a labelled sample and accepted by the owner; owner approval before any paid or off-machine extraction |
+| 9 | **TODO, gated:** meaning-based search (sqlite-vec) | See below |
 
-**TODO before any meaning-based search (phase 7 gate).** Measure from past data whether it would be used and would help. Build sqlite-vec only if step 2 or 3 shows a meaningful gap.
+**TODO before any meaning-based search (phase 9 gate).** Measure from past data whether it would be used and would help. Build sqlite-vec only if step 2 or 3 shows a meaningful gap.
 1. **Usage:** how often agents run `find` / `find --like`, and whether they act on hits (a later tool call or record that cites a hit's id or path). Source: `tool_calls` joined to `records`.
 2. **Paraphrase misses:** cases in past history where an agent re-decided or re-asked something already recorded in different words, which keyword/FTS5 search did not surface. Source: `records` pairs by time and node, candidate pairs reviewed by a person or a local model.
 3. **Eval:** on a sampled set of past decisions and questions, compare the FTS5 hit rate with an embedding search hit rate.
@@ -349,31 +367,39 @@ Smallest useful first. Each phase ships alone and leaves the tree working.
 
 Each names the tables that answer it.
 
-**L0-L3 tree, workspace, task, agent**
+**L1 project**
+- Cost, sessions and agents per project per month. `projects`, `nodes`, `sessions`, `usage`
+- Which projects have open questions or `begun`/`unknown` effects anywhere below them? `projects`, `nodes`, `records`, `effects`
+- Projects with no activity in 30 days that are not archived. `projects`, `sessions`
+- How much work lands in `unassigned` (workspaces with no project)? `projects`, `nodes`
+
+**L0, L2-L4 tree, workspace, task, agent**
 - Which workspaces and tasks had the most agent sessions and cost this month? `nodes`, `sessions`, `usage`
 - Which tasks are `active` with no session in 14 days? `nodes`, `sessions`
 - How deep do subagent chains go, and how often does a subagent's `out.md` get used? `nodes`, `tool_calls`
 - How many agents ended without any handoff, or only with an `auto` one? `nodes`, `records`
 
-**L4 session**
+**L5 session**
 - Sessions per provider and model per week. `sessions`
 - Session length (turns, wall time) distribution by provider. `sessions`, `turns`
 - Which sessions are not joined to any node? `sessions` (`node_id` null)
 - How much history was at risk: sessions ingested within 3 days of the Claude retention cutoff. `sessions`, `ingest_sources`
 
-**L5 turn**
+**L6 turn**
 - Share of turns `failed` or `canceled`, by provider and model. `turns`, `sessions`
 - Turns between a user's prompt and the first record written. `turns`, `records`
 - Turns after which the person re-asked the same thing (rework). `messages`, `turns`
 
-**L6 message, tool call, permission**
+**L7 message, tool call, permission**
 - Most used tools, error rate per tool. `tool_calls`
 - Permission requests by tool and outcome; how many waited on a person, and for how long. `permissions`
-- Outbound-looking tool calls with no effect `begin`/`mark` around them. `tool_calls`, `effects`
-- How often agents run `find` / `find --like`, and whether a hit is used afterwards (phase 7 gate, step 1). `tool_calls`, `records`
-- Re-decisions and re-asked questions that repeat an earlier record in other words (phase 7 gate, step 2). `records`, `fts_text`
+- Outbound-looking tool calls with no effect row (detection misses). `tool_calls`, `effects`
+- Detected effects by `rule`; resends caught by `PreToolUse` vs. noticed after the fact. `effects`, `permissions`
+- Share of agents that use any awt verb at all; which verbs (tests the zero-abstraction principle). `tool_calls`, `records`
+- How often agents run `find` / `find --like`, and whether a hit is used afterwards (phase 9 gate, step 1). `tool_calls`, `records`
+- Re-decisions and re-asked questions that repeat an earlier record in other words (phase 9 gate, step 2). `records`, `fts_text`
 
-**L7 tokens, cost, latency**
+**L8 tokens, cost, latency**
 - Cost per task, per workspace, per provider and model, per day. `usage`, `sessions`, `nodes`
 - Cache read share of input tokens, by model; sessions with low cache share. `usage`
 - Time to first token and turn latency percentiles by model. `usage`, `turns`
@@ -384,6 +410,7 @@ Each names the tables that answer it.
 - Open questions by age; median time to answer. `records`
 - Effects by state; `begun` or `unknown` older than a day. `effects`
 - Records per session: which agents record and which do not. `records`, `sessions`
+- Records by `origin` (agent, person, plugin, inferred); inferred records later confirmed or contradicted. `records`
 
 ## 12. Open questions for the owner
 
@@ -396,8 +423,13 @@ Each names the tables that answer it.
 7. **Store location.** `~/.local/share/awt-store`, separate from the tree. Or inside `AWT_ROOT/.store` so one directory holds everything?
 8. **`effect begin` for people.** Require `begin` for a person sending by hand too (two commands), or allow `mark sent` straight from `planned` for a person, recorded as unclaimed?
 9. **PR #11 split.** Merge R3-R5 now and R1/R2 on FTS5 in phase 2, as recommended?
-10. **Paseo screen.** Worth building in phase 6, or is `awt ui` enough?
-11. **Phase 7.** Approve a budget for the embedding eval, or a local embedding model only?
+10. **Paseo screen.** Worth building in phase 7, or is `awt ui` enough?
+11. **Phase 9.** Approve a budget for the embedding eval, or a local embedding model only?
+12. **LOD numbering.** Adding project renumbers workspace to L2 and everything below by one. Keep that, or keep the earlier numbers and call project L0.5?
+13. **Detected effects and Claude Code resends.** Let the `PreToolUse` hook return `ask` on a detected resend (the host prompts you), or only record it?
+14. **Inferred records.** Worth building at all? If so, local model only, or hosted with approval per source?
+15. **`state` for agents.** Keep the one prompt clause asking for a handoff, or rely only on the `auto` handoff and drop it?
+16. **Project archive.** If Paseo has no project archive hook, is checking `archivedAt` on workspace archive and on `migrate-paseo` runs enough?
 
 ## Verified facts
 
