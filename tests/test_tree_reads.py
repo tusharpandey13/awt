@@ -241,7 +241,7 @@ class Doctor(test_tree.TreeBase):
         for node in (root, ws, task, agent, sub):
             r = self.awt("doctor", root=node, env=dict(self.env, PATH=os.path.dirname(test_awt.AWT) + os.pathsep + self.env["PATH"], AWT_DIR=node))
             self.assertNotIn("fail ", r.stdout, (node, r.stdout))
-            self.assertNotIn("warn ", r.stdout.replace("warn path is a sync", ""), (node, r.stdout))
+            self.assertNotIn("warn ", r.stdout.replace("warn path is a sync", "").replace("warn claude ingest has never run", ""), (node, r.stdout))
 
     def test_defects_are_reported(self):  # T40
         root, ws, task, agent, sub = self.chain()

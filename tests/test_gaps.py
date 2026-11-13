@@ -186,18 +186,6 @@ class SmallInvariants(Base):
         for hidden in ("scratch/", "bin.dat", "big.txt", "awt:"):
             self.assertNotIn(hidden, out)
 
-    def test_save_never_pushes_and_never_signs(self):
-        self.init()
-        remote = os.path.join(self.tmp, "remote.git")
-        subprocess.run(["git", "init", "-q", "--bare", remote], check=True, env=self.env)
-        subprocess.run(["git", "init", "-q", self.root], check=True, env=self.env)
-        subprocess.run(["git", "-C", self.root, "remote", "add", "origin", remote], check=True, env=self.env)
-        subprocess.run(["git", "-C", self.root, "config", "commit.gpgsign", "true"], check=True, env=self.env)
-        subprocess.run(["git", "-C", self.root, "config", "gpg.program", "/nonexistent-gpg"], check=True, env=self.env)
-        self.ok("save", "snapshot")
-        self.assertEqual(subprocess.run(["git", "-C", remote, "rev-list", "--all", "--count"], capture_output=True, text=True, env=self.env).stdout.strip(), "0")
-        self.assertIn("snapshot", subprocess.run(["git", "-C", self.root, "log", "--format=%s"], capture_output=True, text=True, env=self.env).stdout)
-
     def test_ref_kinds_jira_and_merge_requests(self):
         self.init()
         for target, kind in (("https://acme.atlassian.net/browse/PK-12", "jira"), ("https://git.example.invalid/g/p/-/merge_requests/7", "pr")):

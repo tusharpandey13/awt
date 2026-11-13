@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { awt, parseJson, type AwtResult } from "./awt.js";
 import type { AwtConfig } from "./config.js";
 
-export type Kind = "root" | "workspace" | "task" | "agent";
+export type Kind = "root" | "project" | "workspace" | "task" | "agent";
 
 export interface NodeRow {
   path: string;

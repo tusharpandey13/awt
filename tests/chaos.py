@@ -365,7 +365,7 @@ def a_fuzz(c):
         elif v == 14: a = [r.choice(["effect", "effect"]), r.choice(["begin", "apply"]), ID("e")] + opt("--timeout", r.choice(["1", "0", "abc"]))
         elif v == 15: a = ["effect", "mark", ID("e"), r.choice(["sent", "not-sent", "unknown", "dropped", A()])] + opt("--ref", A()) + opt("--why", A())
         elif v == 16: a = ["doctor"]
-        elif v == 17: a = ["save", A()]
+        elif v == 17: a = r.choice([["doctor", "--staged"], ["ingest", "--source", "claude"], ["ingest", "--hook"]])
         elif v == 18: a = ["resume"] + opt("--hook")
         elif v == 19: a = ["init", "--goal", A(), "--done", A()]
         elif v == 20: a = ["help", A()]
@@ -890,9 +890,9 @@ def a_nogit(c):
             if a[0] in ("resume", "list", "find", "note") and r.rc:
                 c.fail("%s: awt %s exited %d: %s" % (label, a[0], r.rc, r.err.strip()[:100]))
         if label != "HOME unset":
-            r = t.run("save", "m", env=env)
+            r = t.run("doctor", "--staged", env=env)
             if r.rc not in (1,) or "error:" not in r.err:
-                c.fail("%s: save should refuse cleanly (rc 1 + error:), got rc=%d %r" % (label, r.rc, r.err[:100]))
+                c.fail("%s: doctor --staged outside a repo should refuse cleanly (rc 1 + error:), got rc=%d %r" % (label, r.rc, r.err[:100]))
         b = t.run("resume", env=env).out
         if label != "HOME unset" and "git unavailable" not in b and "repo" not in b:
             c.fail("%s: brief shows no degraded git line for the repo ref" % label)
@@ -1015,7 +1015,6 @@ def mk_locale(name, env_over):
             r = t.run(*a_, env=env)
             if r.rc and a_[0] != "find":
                 c.fail("locale %s: awt %s exited %d: %s" % (name, a_[0], r.rc, r.err.strip()[:120]))
-        r = t.run("save", "ü", env=env)
     return a
 
 
@@ -1108,78 +1107,124 @@ def a_esc(c):
         c.fail("writes landed OUTSIDE the task root via a symlinked docs/_superseded or context/: %s" % [os.path.relpath(x, c.base) for x in new])
 
 
-# ---------------------------------------------------------------- save
-@attack("save")
+# ---------------------------------------------------------------- save removed, doctor --staged
+@attack("save-removed-and-staged-scan")
 def a_save(c):
-    par = c.path("par")
-    os.makedirs(par)
-    c.git(par, "init", "-q")
-    t = Task(c, "par/task")
+    t = Task(c, "repo")
     r = t.run("save", "m")
-    if r.rc != 1 or "git init" not in r.err:
-        c.fail("save inside another repo: want exit 1 + git init fix, got %d %r" % (r.rc, r.err[:80]))
-    if c.git(par, "rev-parse", "--verify", "-q", "HEAD").rc == 0 or c.git(par, "diff", "--cached", "--name-only").outb.strip():
-        c.fail("save touched the parent repo")
-    # no git
-    t2 = Task(c, "plain")
-    r = t2.run("save", "m")
-    if r.rc != 1 or "error:" not in r.err:
-        c.fail("save without a repo: rc=%d %r" % (r.rc, r.err[:80]))
-    # real repo
-    t3 = Task(c, "repo")
-    c.git(t3.dir, "init", "-q")
-    w = lambda p, s: (os.makedirs(os.path.dirname(t3.p(p)), exist_ok=True), open(t3.p(p), "wb").write(s))
+    if r.rc != 2 or "git commit" not in r.err or "doctor --staged" not in r.err:
+        c.fail("save should exit 2 naming git commit and doctor --staged, got %d %r" % (r.rc, r.err[:100]))
+    c.git(t.dir, "init", "-q")
+    w = lambda p, b: (os.makedirs(os.path.dirname(t.p(p)), exist_ok=True), open(t.p(p), "wb").write(b))
     w("misc/ok.txt", b"fine\n")
-    w("misc/aws.txt", ("key=" + SEC["aws"] + "\n").encode())
-    w("misc/gh.env", ("T=" + SEC["gh"] + "\n").encode())
     w("misc/we ird\nname.txt", ("x " + SEC["sk"] + "\n").encode())
     w("misc/-dash.txt", ("x " + SEC["pk"] + "\n").encode())
-    w("misc/big.txt", b"y" * 1_500_000 + SEC["slack"].encode())
-    w("misc/manual.txt", SEC["jwt"].encode())
-    w("scratch/s.txt", SEC["aws"].encode())
-    c.git(t3.dir, "add", "misc/manual.txt")
-    os.makedirs(t3.p("misc", "sub[1]"))
-    os.makedirs(t3.p("misc", "nested", "deep"))
-    for d in ("misc/sub[1]", "misc/nested/deep"):
-        c.git(t3.p(d), "init", "-q")
-        open(t3.p(d, "f.txt"), "w").write("nested content\n")
-        c.git(t3.p(d), "add", "f.txt")
-        c.git(t3.p(d), "commit", "-q", "-m", "n")
-    t3.run("note", "n")
-    r = t3.run("save", "first")
-    if r.rc != 0:
-        c.fail("save rc=%d %s" % (r.rc, r.err[:150]))
-    files = c.git(t3.dir, "ls-tree", "-r", "--name-only", "HEAD").out
-    full = c.git(t3.dir, "log", "-p", "--all", "--format=%B").out + files
+    w("misc/bin.dat", b"\0" + SEC["aws"].encode())
+    c.git(t.dir, "add", "-A")
+    r = t.run("doctor", "--staged")
+    if r.rc != 1 or "we ird" not in r.err and "name.txt" not in r.err:
+        c.fail("doctor --staged missed a staged secret: rc=%d %r" % (r.rc, r.err[:120]))
     for k, v in SEC.items():
-        if v in full:
-            c.fail("save committed a file containing a secret (%s)" % k)
-    for must in ("misc/ok.txt", ".awt/events.jsonl", "AGENTS.md"):
-        if must not in files:
-            c.fail("save did not commit %s" % must)
-    if "scratch" in files:
-        c.fail("scratch/ committed")
-    if "nested" in c.git(t3.dir, "ls-tree", "-r", "HEAD").out.replace("misc/nested", "").replace("name", "") and False:
-        pass
-    ls = c.git(t3.dir, "ls-tree", "-r", "HEAD").out
-    if "f.txt" in ls or "160000" in ls:
-        c.fail("nested git repos leaked into the commit (files or gitlink): %s" % [x for x in ls.splitlines() if "sub" in x or "nested" in x or "160000" in x][:3])
-    if "nested" not in r.err:
-        c.fail("nested repos not reported")
-    w("misc/ok.txt", b"fine\n" + SEC["gh"].encode())
-    t3.run("save", "second")
-    if SEC["gh"] in c.git(t3.dir, "show", "HEAD:misc/ok.txt").out:
-        c.fail("secret added to tracked file got committed")
-    r = t3.run("save", "third")
-    for msg in ("", "-m", "--amend", "x" * 100000, "a\nb", "日本語 😀"):
-        t3.run("note", "n2 " + str(len(msg)))
-        t3.run("save", msg)
-    t3.run("save", "last")
-    full = c.git(t3.dir, "log", "-p", "--all", "--format=%B").out
-    for k, v in SEC.items():
-        if v in full:
-            c.fail("secret in history after message fuzz (%s)" % k)
-    r = c.raw([t3.awt, "save", "noid"], cwd=t3.dir, args=["save", "noid"], env=c.env(GIT_AUTHOR_NAME=None, GIT_AUTHOR_EMAIL=None, GIT_COMMITTER_NAME=None, GIT_COMMITTER_EMAIL=None, HOME=c.path("emptyhome")))
+        if v in r.out or v in r.err:
+            c.fail("doctor --staged echoed a secret (%s)" % k)
+    if "bin.dat" in r.err:
+        c.fail("doctor --staged flagged a binary file")
+
+
+# ---------------------------------------------------------------- ingest
+def parsekit_lines(n, sid, start=0):
+    out = []
+    for i in range(start, start + n):
+        out.append((json.dumps({"type": "user" if i % 2 == 0 else "assistant", "uuid": "u-%d" % i, "sessionId": sid, "cwd": "/work/parsekit",
+                                "timestamp": "2026-10-03T09:%02d:%02d.000Z" % (i // 60 % 60, i % 60),
+                                "message": {"role": "user", "content": "parsekit line %d %s" % (i, "x" * 200)}}) + "\n").encode())
+    return out
+
+
+def ingest_env(c):
+    return c.env(AWT_STORE=c.path("store"), AWT_CLAUDE_PROJECTS=c.path("projects"), AWT_CLAUDE_SETTINGS=c.path("settings.json"))
+
+
+def canon_rows(c, sid):
+    rows, bad = [], 0
+    for dp, _, fns in os.walk(c.path("store", "log")):
+        for f in fns:
+            if f == sid + ".jsonl":
+                for ln in open(os.path.join(dp, f), "rb"):
+                    try:
+                        rows.append(json.loads(ln))
+                    except ValueError:
+                        bad += 1
+    return rows, bad
+
+
+@attack("ingest-torn-tail-and-restart")
+def a_ingest_torn(c):
+    t = Task(c)
+    sid = "aaaaaaaa-0000-4000-8000-000000000001"
+    src = c.path("projects", "-work-parsekit", sid + ".jsonl")
+    os.makedirs(os.path.dirname(src))
+    lines = parsekit_lines(40, sid)
+    with open(src, "wb") as g:
+        g.write(b"".join(lines[:30]) + lines[30][:50])  # source mid-write
+    env = ingest_env(c)
+    t.run("ingest", "--source", "claude", env=env)
+    rows, bad = canon_rows(c, sid)
+    if len(rows) != 30 or bad:
+        c.fail("torn source tail: want 30 rows and no bad lines, got %d / %d" % (len(rows), bad))
+    with open(src, "ab") as g:
+        g.write(lines[30][50:] + b"".join(lines[31:]))
+    # tear the canonical tail, as a killed writer would
+    out = next(os.path.join(dp, f) for dp, _, fns in os.walk(c.path("store", "log")) for f in fns if f == sid + ".jsonl")
+    with open(out, "ab") as g:
+        g.write(b'{"v":1,"src":"claude","seq":31,"raw":{"ty')
+    # kill the offsets state: the next run must not duplicate
+    os.unlink(c.path("store", "ingest", "claude.offsets.json"))
+    t.run("ingest", "--source", "claude", env=env)
+    t.run("ingest", "--source", "claude", env=env)
+    rows, bad = canon_rows(c, sid)
+    seqs = [r["seq"] for r in rows]
+    if seqs != list(range(40)):
+        c.fail("after tear + lost offsets the seqs are not 0..39: %s" % seqs[:50])
+    if bad != 1:
+        c.fail("expected exactly the one healed torn line, got %d" % bad)
+
+
+@attack("ingest-concurrent-and-killed")
+def a_ingest_concurrent(c):
+    t = Task(c)
+    env = ingest_env(c)
+    sids = ["bbbbbbbb-0000-4000-8000-%012d" % i for i in range(6)]
+    for sid in sids:
+        src = c.path("projects", "-work-parsekit", sid + ".jsonl")
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        with open(src, "wb") as g:
+            g.write(b"".join(parsekit_lines(1500, sid)))
+    procs = [t.popen("ingest", "--source", "claude", env=env) for _ in range(6)]
+    time.sleep(0.2)
+    for p in procs[:2]:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)  # crash mid-run
+        except OSError:
+            pass
+    for p in procs:
+        c.finish(p, ["ingest"], allow=(0, -9))
+    for sid in sids:  # a growing source while ingesting
+        with open(c.path("projects", "-work-parsekit", sid + ".jsonl"), "ab") as g:
+            g.write(b"".join(parsekit_lines(20, sid, 1500)))
+    procs = [t.popen("ingest", "--source", "claude", env=env) for _ in range(4)]
+    for p in procs:
+        c.finish(p, ["ingest"])
+    t.run("ingest", "--source", "claude", env=env)
+    for sid in sids:
+        rows, bad = canon_rows(c, sid)
+        seqs = [r["seq"] for r in rows]
+        if seqs != list(range(1520)):
+            c.fail("%s: seqs are not 0..1519 after concurrent and killed runs (%d rows, %d bad, first dup/gap near %s)" % (
+                sid[-3:], len(rows), bad, next((i for i, x in enumerate(seqs) if x != i), "?")))
+    st = os.stat(c.path("store"))
+    if st.st_mode & 0o077:
+        c.fail("store dir mode %o" % (st.st_mode & 0o777))
 
 
 # ---------------------------------------------------------------- secrets / promises
@@ -1421,7 +1466,7 @@ def tree_root(c):
 def tree_nodes(base):
     """Walk only the reserved child directories, the way awt defines a tree. Returns (nodes, leftovers)."""
     nodes, left = [], []
-    for plural in ("workspaces", "tasks", "agents"):
+    for plural in ("projects", "workspaces", "tasks", "agents"):
         d = os.path.join(base, plural)
         if not os.path.isdir(d):
             continue
@@ -1989,6 +2034,62 @@ def a_mig_kill(c):
         c.fail("run after kills failed: " + r.err[:120])
     if mig_hash(a_root) != mig_hash(b_root):
         c.fail("killed-and-resumed tree differs from an uninterrupted run")
+    tree_audit(c, b_root)
+
+
+@attack("migrate-kill-mid-move")
+def a_mig_kill_move(c):
+    """A pre-project tree (workspaces directly under the root) migrated while the process is killed over and over:
+    every workspace ends up under its project exactly once, nothing lost or duplicated, and the result equals an uninterrupted run."""
+    n = 8 if c.quick else 16
+    snap = dict(projects=[dict(id="prj_%d" % i, name="proj%d" % i, path="/tmp/p%d" % i) for i in range(3)],
+                workspaces=[dict(id="wks_%d" % i, projectId="prj_%d" % (i % 3) if i % 5 else None, project="proj%d" % (i % 3), name="w%d" % i, cwd="/tmp/c%d" % i, archived=False) for i in range(n)],
+                agents=[])
+    p = c.path("snap.json")
+    with open(p, "w") as g:
+        json.dump(snap, g)
+    legacy = c.path("legacy", "root")
+    os.makedirs(legacy)
+    tw(c, legacy, "init", "--kind", "root")
+    for w in snap["workspaces"]:
+        node = tnode(c, legacy, "workspace", "%s--%s" % (w["project"], w["name"]), key="paseo:workspace/" + w["id"])
+        if node and w["projectId"] and int(w["id"][4:]) % 2:
+            tw(c, node, "ref", "paseo:project/" + w["projectId"], "--title", "proj")  # half carry the ref, half rely on workspaces.json
+        if node:
+            tnode(c, node, "task", "imported", key="paseo:task/%s/imported" % w["id"])
+    a_root, b_root = c.path("a", "root"), c.path("b", "root")
+    shutil.copytree(legacy, a_root, symlinks=True)
+    shutil.copytree(legacy, b_root, symlinks=True)
+    run = lambda root: c.raw([sys.executable, MIG, root, "--from", p], cwd=c.base, args=None, allow=(0, 1), timeout=300)
+    if run(a_root).rc != 0:
+        c.fail("clean run failed")
+        return
+    for i in range(8 if c.quick else 24):
+        pr = subprocess.Popen([sys.executable, MIG, b_root, "--from", p], env=c.env(), cwd=c.base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(c.rng.random() * (0.8 if c.quick else 1.6))
+        try:
+            os.killpg(pr.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        pr.wait()
+        rows = [x for x in nodes_of(c, b_root) if x["key"] and x["key"].startswith("paseo:workspace/")]
+        keys = [x["key"] for x in rows]
+        if len(keys) != len(set(keys)) or len(keys) != n:
+            c.fail("after a kill, %d workspace keys (%d distinct) for %d workspaces" % (len(keys), len(set(keys)), n))
+            break
+    r = run(b_root)
+    if r.rc != 0:
+        c.fail("run after kills failed: " + r.err[:120])
+    if mig_hash(a_root) != mig_hash(b_root):
+        c.fail("killed-and-resumed tree differs from an uninterrupted run")
+    for root in (a_root, b_root):
+        left = [x["path"] for x in nodes_of(c, root) if x["kind"] == "workspace" and x["path"].startswith("workspaces/")]
+        if left:
+            c.fail("workspaces left in the legacy place: %s" % left[:3])
+    again = mig_hash(b_root)
+    run(b_root)
+    if mig_hash(b_root) != again:
+        c.fail("a rerun after the migration changed the tree")
     tree_audit(c, b_root)
 
 

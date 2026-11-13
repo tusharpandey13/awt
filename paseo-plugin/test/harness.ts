@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -12,6 +12,10 @@ type Handler = (payload: any, ctx: any) => Promise<any>;
 export interface Rig {
   tmp: string;
   root: string;
+  /** The temp file the plugin reads as Paseo's projects.json (AWT_PASEO_PROJECTS). Absent until `writeProjects`. */
+  projectsFile: string;
+  /** Writes projects.json rows in Paseo's shape (`projectId`, `displayName`, `customName`, `rootPath`, `archivedAt`). */
+  writeProjects(rows: Record<string, unknown>[]): void;
   logs: string[];
   sent: { id: string; text: string }[];
   /** What the fake daemon's timeline returns for an agent: its assistant messages, oldest first. */
@@ -33,7 +37,8 @@ export interface Rig {
 export function rig(extraEnv: Record<string, string | undefined> = {}, workspaces: Record<string, { name: string; directory: string; projectId: string }> = {}): Rig {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), "awtplug-")));
   const root = join(tmp, "root");
-  const env: Record<string, string | undefined> = { ...process.env, AWT_DIR: undefined, HOME: tmp, AWT_BIN: AWT, AWT_ROOT: root, AWT_TIMEOUT_MS: "60000", GIT_CONFIG_GLOBAL: "/dev/null", ...extraEnv };
+  const projectsFile = join(tmp, "projects.json");
+  const env: Record<string, string | undefined> = { ...process.env, AWT_DIR: undefined, HOME: tmp, AWT_BIN: AWT, AWT_ROOT: root, AWT_TIMEOUT_MS: "60000", AWT_PASEO_PROJECTS: projectsFile, GIT_CONFIG_GLOBAL: "/dev/null", ...extraEnv };
   for (const k of ["AWT_DIR", ...Object.keys(extraEnv)]) if (env[k] === undefined) delete env[k]; // undefined means truly unset
   const hooks = new Map<string, Handler>();
   const logs: string[] = [];
@@ -65,7 +70,7 @@ export function rig(extraEnv: Record<string, string | undefined> = {}, workspace
   const ctx = { paseo, signal: new AbortController().signal };
   const run = (dir: string, args: string[]) => execFileSync(AWT, ["--dir", dir, ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
-    tmp, root, logs, sent, said, answered, appended, failAppend, hooks,
+    tmp, root, projectsFile, writeProjects: (rows) => writeFileSync(projectsFile, JSON.stringify(rows)), logs, sent, said, answered, appended, failAppend, hooks,
     restart: () => (hooks.clear(), void start()),
     call: async (name, payload) => {
       const h = hooks.get(name);

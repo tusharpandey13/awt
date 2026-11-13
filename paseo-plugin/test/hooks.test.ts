@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, afterEach } from "node:test";
-import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentPayload, exists, openReq, rig, type Rig } from "./harness.js";
 import { AWT_BLOCK } from "../server/prompt.js";
@@ -20,8 +20,9 @@ test("P1 workspace.create.after builds workspace and main task with refs", async
   const n = r.nodes();
   const ws = n.find((x) => x.key === "paseo:workspace/wks_1")!;
   assert.equal(ws.kind, "workspace");
-  assert.equal(ws.path, "workspaces/parsekit-main");
+  assert.equal(ws.path, "projects/parsekit/workspaces/parsekit-main");
   assert.ok(n.find((x) => x.key === "paseo:task/wks_1/main"));
+  assert.deepEqual(n.find((x) => x.key === "paseo:project/prj_1"), { ...n.find((x) => x.key === "paseo:project/prj_1")!, path: "projects/parsekit", kind: "project", name: "parsekit", status: "active" });
   const targets = JSON.parse(r.awt(join(r.root, ws.path), "list", "refs", "--json")).map((x: any) => x.target).sort();
   assert.deepEqual(targets, ["/tmp/parsekit", "paseo:project/prj_1", "paseo:workspace/wks_1"]);
   await r.call("workspace.create.after", { workspace: { id: "wks_1", projectId: "prj_1", cwd: "/tmp/parsekit", name: "main", archivedAt: null } });
@@ -57,7 +58,7 @@ test("P4/P5 agent.open.before: env, tool, idempotent on resume", async () => {
   assert.equal(first.env.KEEP, "1");
   assert.equal(first.env.AWT_BY, "agt_1");
   assert.ok(exists(join(first.env.AWT_DIR, ".awt", "events.jsonl")));
-  assert.ok(first.env.AWT_DIR.startsWith(r.root + "/workspaces/parsekit-main/tasks/main/agents/"), first.env.AWT_DIR);
+  assert.ok(first.env.AWT_DIR.startsWith(r.root + "/projects/parsekit/workspaces/parsekit-main/tasks/main/agents/"), first.env.AWT_DIR);
   assert.deepEqual(first.tools.map((t: any) => t.name), ["awt_resume"]);
   assert.deepEqual(first.mcpServers, {});
   const again = await r.call("agent.open.before", openReq("agt_1", { reason: "resume", tools: first.tools }));
@@ -306,7 +307,9 @@ test("P10 history opens are left alone", async () => {
 test("an agent without a workspace goes to an unassigned workspace", async () => {
   const r = mk();
   const out = await r.call("agent.open.before", openReq("agt_1", { workspaceId: null, cwd: "/tmp/loose" }));
-  assert.match(out.env.AWT_DIR, /workspaces\/unassigned-loose\/tasks\/main\/agents\//);
+  assert.match(out.env.AWT_DIR, /projects\/unassigned\/workspaces\/unassigned-loose\/tasks\/main\/agents\//);
+  const p = r.nodes().find((x) => x.key === "paseo:project/unassigned")!;
+  assert.equal(p.kind, "project");
 });
 
 test("current-task pointer set with the CLI redirects new agents", async () => {
@@ -331,7 +334,7 @@ test("P13 the project display name labels the workspace", async () => {
   const r = mk({}, WS);
   await r.call("workspace.create.after", { workspace: { id: "wks_1", projectId: "prj_1", cwd: "/tmp/other", name: "main", archivedAt: null } });
   const ws = r.nodes().find((x) => x.key === "paseo:workspace/wks_1")!;
-  assert.equal(ws.path, "workspaces/parsekit-main");
+  assert.equal(ws.path, "projects/parsekit/workspaces/parsekit-main");
 });
 
 test("P14 a reply streamed as several items with one messageId is joined", async () => {
@@ -344,4 +347,152 @@ test("P14 a reply streamed as several items with one messageId is joined", async
   assert.equal(lastAssistantText(page), "Done: tests pass.");
   assert.equal(lastAssistantText({ entries: [{ item: { type: "assistant_message", text: "a" } }, { item: { type: "assistant_message", text: "  " } }] }), "a");
   assert.equal(lastAssistantText({ entries: [] }), null);
+});
+
+const WS_CREATE = (id = "wks_1", projectId: string | null = "prj_1", name = "main") => ({ workspace: { id, projectId, cwd: "/tmp/parsekit", name, archivedAt: null } });
+const ROW = (over: Record<string, unknown> = {}) => ({ projectId: "prj_1", projectKey: "/tmp/parsekit", displayName: "parsekit", customName: null, rootPath: "/tmp/parsekit", kind: "git", archivedAt: null, ...over });
+const keyed = (r: Rig, key: string) => r.nodes().find((x) => x.key === key)!;
+const projectsOf = (r: Rig) => r.nodes().filter((x) => x.kind === "project");
+
+test("PJ1 workspace.create.after creates the project node from projectId, with a ref to its root path", async () => {
+  const r = mk({}, WS);
+  await r.call("workspace.create.after", WS_CREATE());
+  const p = keyed(r, "paseo:project/prj_1");
+  assert.equal(p.kind, "project");
+  assert.equal(p.name, "parsekit");
+  assert.equal(p.path, "projects/parsekit");
+  const targets = JSON.parse(r.awt(join(r.root, p.path), "list", "refs", "--json")).map((x: any) => x.target).sort();
+  assert.deepEqual(targets, ["/tmp/parsekit", "paseo:project/prj_1"]);
+  const ws = keyed(r, "paseo:workspace/wks_1");
+  assert.ok(ws.path.startsWith(p.path + "/workspaces/"), ws.path);
+  assert.ok(keyed(r, "paseo:task/wks_1/main").path.startsWith(ws.path + "/tasks/"));
+});
+
+test("PJ2 two workspaces of one project share one project node; replays and concurrent creates add nothing", async () => {
+  const r = mk({}, WS);
+  await Promise.all([r.call("workspace.create.after", WS_CREATE("wks_1")), r.call("workspace.create.after", WS_CREATE("wks_2", "prj_1", "second")), r.call("workspace.create.after", WS_CREATE("wks_1"))]);
+  assert.equal(projectsOf(r).length, 1);
+  assert.equal(r.nodes().filter((x) => x.kind === "workspace").length, 2);
+  const before = r.nodes().length;
+  await r.call("workspace.create.after", WS_CREATE("wks_2", "prj_1", "second"));
+  assert.equal(r.nodes().length, before);
+  r.restart(); // a new plugin process: empty caches, same answer
+  await r.call("workspace.create.after", WS_CREATE("wks_1"));
+  assert.equal(r.nodes().length, before);
+});
+
+test("PJ3 the project name is customName, else displayName (projects.json beats the SDK listing)", async () => {
+  const r = mk({}, WS);
+  r.writeProjects([ROW({ customName: "Parser Kit" })]);
+  await r.call("workspace.create.after", WS_CREATE());
+  const p = keyed(r, "paseo:project/prj_1");
+  assert.equal(p.name, "Parser Kit");
+  assert.equal(p.path, "projects/parser-kit");
+  const r2 = mk({}, WS);
+  r2.writeProjects([ROW({ displayName: "from file" })]);
+  await r2.call("workspace.create.after", WS_CREATE());
+  assert.equal(keyed(r2, "paseo:project/prj_1").name, "from file");
+});
+
+test("PJ4 a workspace with no projectId goes under the project unassigned", async () => {
+  const r = mk();
+  await r.call("workspace.create.after", WS_CREATE("wks_9", null));
+  const p = keyed(r, "paseo:project/unassigned");
+  assert.equal(p.kind, "project");
+  assert.ok(keyed(r, "paseo:workspace/wks_9").path.startsWith("projects/unassigned/workspaces/"));
+  assert.deepEqual(JSON.parse(r.awt(join(r.root, p.path), "list", "refs", "--json")), []);
+});
+
+test("PJ5 an agent opened before its workspace exists still lands under the project", async () => {
+  const r = mk({}, WS);
+  const out = await r.call("agent.open.before", openReq("agt_1"));
+  assert.ok(out.env.AWT_DIR.startsWith(r.root + "/projects/parsekit/workspaces/parsekit-main/tasks/main/agents/"), out.env.AWT_DIR);
+});
+
+test("PJ6 archive: a workspace archive with projects.json archivedAt sets the project done", async () => {
+  const r = mk({}, WS);
+  r.writeProjects([ROW()]);
+  await r.call("workspace.create.after", WS_CREATE());
+  await r.call("workspace.archive.after", WS_CREATE());
+  assert.equal(keyed(r, "paseo:project/prj_1").status, "active", "project not archived in projects.json");
+  r.writeProjects([ROW({ archivedAt: "2026-11-01T00:00:00.000Z" })]);
+  await r.call("workspace.archive.after", WS_CREATE());
+  assert.equal(keyed(r, "paseo:workspace/wks_1").status, "paused", "the main task is still active, so the workspace pauses");
+  assert.equal(keyed(r, "paseo:project/prj_1").status, "paused", "work below is open: paused, as for a workspace");
+});
+
+test("PJ7 archive: project done when nothing below is open", async () => {
+  const r = mk({}, WS);
+  r.writeProjects([ROW({ archivedAt: "2026-11-01T00:00:00.000Z" })]);
+  await r.call("workspace.create.after", WS_CREATE());
+  const task = join(r.root, keyed(r, "paseo:task/wks_1/main").path);
+  r.awt(task, "status", "done");
+  await r.call("workspace.archive.after", WS_CREATE());
+  assert.equal(keyed(r, "paseo:workspace/wks_1").status, "done");
+  assert.equal(keyed(r, "paseo:project/prj_1").status, "done");
+});
+
+test("PJ8 archive is read only from projects.json: a missing, broken or hostile file changes nothing and throws nothing", async () => {
+  for (const content of [null, "{nope", "[1,null,\"x\",{\"projectId\":5,\"archivedAt\":\"x\"}]", "{\"projectId\":\"prj_1\"}", "[".repeat(50000)]) {
+    const r = mk({}, WS);
+    if (content !== null) writeFileSync(r.projectsFile, content);
+    await r.call("workspace.create.after", WS_CREATE());
+    await r.call("workspace.archive.after", WS_CREATE());
+    assert.equal(keyed(r, "paseo:project/prj_1").status, "active");
+    assert.equal(r.logs.filter((l) => /failed/.test(l)).length, 0, r.logs.join("\n"));
+  }
+});
+
+test("PJ9 a symlinked projects.json is ignored", async () => {
+  const r = mk({}, WS);
+  const real = join(r.tmp, "real.json");
+  writeFileSync(real, JSON.stringify([ROW({ archivedAt: "x" })]));
+  symlinkSync(real, r.projectsFile);
+  await r.call("workspace.create.after", WS_CREATE());
+  await r.call("workspace.archive.after", WS_CREATE());
+  assert.equal(keyed(r, "paseo:project/prj_1").status, "active");
+});
+
+test("PJ10 a node moved by migrate-paseo is found again by key: cached paths that are gone are dropped", async () => {
+  const r = mk({}, WS);
+  const first = await r.call("agent.open.before", openReq("agt_1"));
+  await r.call("agent.create.after", { agent: agentPayload("agt_1") });
+  const ws = keyed(r, "paseo:workspace/wks_1");
+  // what migrate-paseo does: one rename of the workspace, under a project it made
+  const prj = r.awt(r.root, "init", "--kind", "project", "--name", "moved", "--key", "paseo:project/other").split(/\s+/)[1];
+  mkdirSync(join(r.root, prj, "workspaces"), { recursive: true });
+  const to = join(r.root, prj, "workspaces", "parsekit-main");
+  renameSync(join(r.root, ws.path), to);
+  assert.ok(!exists(first.env.AWT_DIR));
+  const again = await r.call("agent.open.before", openReq("agt_1"));
+  assert.ok(again.env.AWT_DIR.startsWith(to + "/"), again.env.AWT_DIR);
+  assert.ok(exists(again.env.AWT_DIR));
+  const brief = await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t" });
+  assert.equal(brief, undefined);
+  await r.call("agent.archive.after", { agent: agentPayload("agt_1"), archivedAt: "x" });
+  assert.equal(keyed(r, "paseo:agent/agt_1").status, "done");
+  assert.equal(r.nodes().filter((x) => x.kind === "workspace").length, 1, "no duplicate workspace after the move");
+});
+
+test("PJ11 a workspace still directly under the root (legacy) is found and used; no copy is made", async () => {
+  const r = mk({}, WS);
+  r.awt(r.root, "init", "--kind", "root");
+  r.awt(r.root, "init", "--kind", "workspace", "--name", "parsekit--main", "--key", "paseo:workspace/wks_1");
+  const out = await r.call("agent.open.before", openReq("agt_1"));
+  assert.ok(out.env.AWT_DIR.startsWith(r.root + "/workspaces/parsekit-main/tasks/main/agents/"), out.env.AWT_DIR);
+  await r.call("workspace.create.after", WS_CREATE());
+  assert.equal(r.nodes().filter((x) => x.kind === "workspace").length, 1);
+});
+
+test("PJ12 hostile project names never escape the tree or reach disk as secrets", async () => {
+  const r = mk({}, WS);
+  const AKIA = "AK" + "IA" + "ABCDEFGHIJKLMNOP";
+  r.writeProjects([ROW({ customName: "../../etc " + AKIA, rootPath: "/tmp/x\n## injected" })]);
+  await r.call("workspace.create.after", WS_CREATE());
+  const p = keyed(r, "paseo:project/prj_1");
+  assert.ok(p, "the project exists under a fallback name");
+  assert.ok(!p.path.includes(".."));
+  for (const n of r.nodes()) for (const f of readdirSync(join(r.root, n.path), { recursive: true, encoding: "utf8" })) {
+    if (f.endsWith("events.jsonl")) assert.ok(!readFileSync(join(r.root, n.path, f), "utf8").includes(AKIA), f);
+  }
 });

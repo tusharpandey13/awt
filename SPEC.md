@@ -97,8 +97,8 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `supersede OLD NEW [--why T]` | Both must be under `docs/` and exist; moves OLD to `docs/_superseded/` with `rename`, with a numeric suffix on collision. Refuse OLD equal to NEW. |
 | `status active\|paused\|done` | `done` is refused while any question is unanswered or any effect is `planned`, `begun` or `unknown`; the refusal lists them. |
 | `effect plan\|begin\|mark\|show` | Below. |
-| `doctor` | Below. |
-| `save MESSAGE` | Below. |
+| `doctor [--staged]` | Below. |
+| `ingest [--source claude\|all] [--hook]` | Below. |
 
 `help` and `--help` print usage and do not count as verbs. `help agents` prints the embedded agent reference. `--version` prints the version.
 
@@ -169,13 +169,24 @@ Prints one `ok`, `warn` or `fail` line per check, and exits 1 on any `fail`. It 
 
 - `fail`: Python below 3.9; no task root; a real `O_APPEND` and `O_EXCL` probe in `.awt/` fails; `AGENTS.md` lacks the awt block; `./awt resume --hook` run as a subprocess prints no brief.
 - `warn`: quarantined rows, with their line numbers; the path contains `iCloud`, `Dropbox`, `OneDrive` or `Google Drive`, or is a network mount; `CLAUDE.md` in the directory or an ancestor; `.claude/settings.json` lacks the awt hook; `.claude/settings.json` still has the obsolete `ask` rule for `effect apply` (one warning per line, naming the line number and text to remove; awt never edits the file); `awt` is not executable; a git remote exists (task data would be pushed if committed, so check it is private); open `begun` or `unknown` effects.
+- Store checks (run even without a task root, never create anything): `ok` line with the store size and file count (ARCHITECTURE-v2 3.6); `warn` when the store directory is not mode 700 (awt only warns; it never changes the mode of a directory that already exists) or holds files that others can read, when it sits in a sync folder, network mount or git work tree that does not ignore it (`git check-ignore`), for each file whose last ingest failed (`ingest error for PATH: ...`, from `errors` in the offsets file), when `ingest` never ran or last ran over 7 days ago, and when the oldest Claude transcript is within 7 days of `cleanupPeriodDays` (from `${AWT_CLAUDE_SETTINGS:-~/.claude/settings.json}`, default 30) and ingest is more than a day old.
+- `doctor --staged`: needs only a git work tree (`--dir`, default the current directory), not a task. Scans the staged blobs (`git cat-file blob :path`, so no textconv filter applies; not the working copy) of added, copied, modified, renamed and type-changed text files under 2 MB for the secret scan; prints each match as `error:` with the file and pattern, never the secret, and exits 1. Meant for `.git/hooks/pre-commit`. `save` was removed: it exits 2 with a `fix:` naming `git commit` and `doctor --staged`.
 
-## save
+## ingest
 
-`save MESSAGE`: commit the task directory.
+`ingest [--source claude|all] [--hook]`: copy provider transcripts into the canonical store. Only `claude` exists; `all` means every source that exists. Design: `docs/adr/0003-canonical-raw-jsonl.md`; the wider plan is in ARCHITECTURE-v2 section 3.
 
-- Refuse when not a git repo, or when `git rev-parse --show-toplevel` is not the task root (the task sits inside some other repo). Fix: `git init` here. Never run `git init` itself. Never push.
-- `git add -A -- .`, excluding nested git repos, which are reported. Unstage and report any staged text file under 2 MB that matches the secret scan. Commit with `--no-gpg-sign`. Nothing staged: exit 0 and say so.
+- **Store:** `${AWT_STORE:-${XDG_DATA_HOME:-~/.local/share}/awt-store}`. The store directory and everything awt creates inside it: directories mode 700, files mode 600, whatever the umask. Missing parents of the store (for example `~/.local/share`) are created with the default mode; an existing store directory is never chmodded. Separate from the task tree on purpose: it holds full conversation text.
+- **Source:** `${AWT_CLAUDE_PROJECTS:-${CLAUDE_CONFIG_DIR:-~/.claude}/projects}` (settings for retention: `${AWT_CLAUDE_SETTINGS:-${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json}`), every `*.jsonl` below it, including `<session>/subagents/agent-<id>.jsonl` (session name `<session>.agent-<id>`). Read-only: awt never writes, renames or touches a transcript. Symlinks are not followed. A missing directory is not an error.
+- **Output:** `log/claude/<YYYY-MM>/<session>.jsonl` (the month of the file's first timestamped record), one row per non-blank source line:
+  `{"v":1,"src":"claude","adapter":1,"session":S,"seq":N,"ingested":ISO,"src_ref":"<path under projects>:<line>","secret_flags":K,"raw":<the provider record, verbatim>}`. `src_ref` line is the 0-based physical line in the source (blank lines count). `seq` is the 0-based ordinal of stored rows in that session file: dense, unique, stable, and not the line number. A line that is not JSON is kept as `raw: {"_unparsed": TEXT}`. A record holding a lone surrogate (not encodable as UTF-8) is written with `\u` escapes for that row only, so the file stays valid UTF-8 and valid JSON and the parsed `raw` is unchanged.
+- **No redaction and no size cap.** `raw` is never altered or cut. `secret_flags` counts matches of the secret scan inside `raw`; it only informs.
+- **Incremental by (path, inode, byte offset, hash of the 64 bytes before the offset)**, kept in `ingest/claude.offsets.json` under the store, written by rename after each file, all under `flock` on `ingest/claude.lock`. A source line without its newline is left for the next run unless it is already a complete JSON object.
+- **Idempotent and crash safe.** One `O_APPEND` write per row. A torn tail on a canonical file is closed with a newline before appending. If a run died after appending but before saving its offset, the next run skips rows whose `seq` is already present. A source whose inode changed, that is shorter than the saved offset, or whose bytes before the offset no longer match the saved hash (rewritten in place), is rescanned from the start and only rows not already stored are appended. Rerunning with nothing new writes no rows.
+- **One bad file does not stop the run.** Any error while ingesting a file is recorded as `errors[<path>]` in the offsets file (cleared when the file next succeeds), the other files are still ingested and `last_run` is saved. `doctor` warns for each recorded error; without `--hook` the summary line adds `; N files failed`.
+- **`--hook`:** prints nothing and exits 0 on any error. `init` puts it in the `SessionEnd` hook of `.claude/settings.json`.
+- Without `--hook`: prints `ingested N rows from M claude files into STORE`; a store that cannot be written exits 1 with a `fix:`.
+- awt never deletes store data and has no verb that does.
 
 ## Templates
 
@@ -226,6 +237,9 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/awt resume --hook" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/awt ingest --source claude --hook" } ] }
     ]
   }
 }
@@ -241,16 +255,17 @@ One directory per task stops working when a task has parts. Putting the parts in
 
 ### Nodes and kinds
 
-A **node** is a directory that contains `.awt/`. Child nodes live in reserved directories, created on demand: `workspaces/`, `tasks/`, `agents/`. The **parent** of a node is the directory two levels up when the node sits directly in a reserved directory of a node, and nothing otherwise. That is the only definition: lineage, inherited rules, Children, `list nodes`, `status done` blocking and I1 all use it. The hierarchy is the filesystem, so `mv` of a subtree keeps it intact and no parent pointer is stored (rule 3). A node elsewhere inside another node (for example `w/foo/`) has no parent; `doctor` warns.
+A **node** is a directory that contains `.awt/`. Child nodes live in reserved directories, created on demand: `projects/`, `workspaces/`, `tasks/`, `agents/`. The **parent** of a node is the directory two levels up when the node sits directly in a reserved directory of a node, and nothing otherwise. That is the only definition: lineage, inherited rules, Children, `list nodes`, `status done` blocking and I1 all use it. The hierarchy is the filesystem, so `mv` of a subtree keeps it intact and no parent pointer is stored (rule 3). A node elsewhere inside another node (for example `w/foo/`) has no parent; `doctor` warns.
 
 | Kind | Meaning | May contain |
 |---|---|---|
-| `root` | The top of a tree. Holds the contract (`AGENTS.md`) | `workspace` |
+| `root` | The top of a tree. Holds the contract (`AGENTS.md`) | `project`, `workspace` (legacy placement) |
+| `project` | Groups the workspaces of one repository or product: a Paseo project, or a person's own grouping. Optional. Holds shared `context/`, `docs/` and `rule` decisions | `workspace` |
 | `workspace` | A long-lived area of work: a repo, a project, a Paseo workspace. Holds shared `context/`, `docs/` and `rule` decisions | `task` |
 | `task` | One piece of work with a goal and a done-means. The existing layout | `task`, `agent` |
 | `agent` | One chat or subagent. Its own event log, `scratch/`, `out.md` | `agent` (subagents) |
 
-An `agent` directly under a `workspace` is refused. A chat that belongs to no task goes under a task named `main`. A node whose `.awt/` has no `node` row is a legacy node: its kind is `task`, or the kind its reserved directory implies, and no kind rules are enforced on it. Converting a standalone task: move it into a workspace's `tasks/`.
+The tree is root > project > workspace > task > agent. A `workspace` directly under the root stays readable as the legacy placement; `doctor` warns about it once the root also holds a project (a tree that never uses projects behaves as before, with no warning), and `migrate-paseo` moves it. A `project` in a `project`, `workspace` or deeper is refused. The `projects` table planned for `store.db` (one row per project node, grain L1) is defined in `docs/adr/0008-project-level.md`; nothing in awt reads or writes a database yet. An `agent` directly under a `workspace` is refused. A chat that belongs to no task goes under a task named `main`. A node whose `.awt/` has no `node` row is a legacy node: its kind is `task`, or the kind its reserved directory implies, and no kind rules are enforced on it. Converting a standalone task: move it into a workspace's `tasks/`.
 
 The **tree root** is the nearest ancestor of kind `root`, else the outermost ancestor, else the node itself. Tools that need a tree without being given one (the Paseo plugin) use `AWT_ROOT`, default `${XDG_DATA_HOME:-~/.local/share}/awt`. Keep it outside any repository that is pushed.
 
@@ -266,7 +281,7 @@ The `node` row is the first row of the log. A later `node` row is quarantined. O
 
 ### Creating nodes
 
-`init --kind root|workspace|task|agent [--name N] [--key K] [--goal T --done T]`
+`init --kind root|project|workspace|task|agent [--name N] [--key K] [--goal T --done T]`
 
 - Without `--kind`, `init` is unchanged. `--name` and `--key` need `--kind` (exit 2 otherwise).
 - `init` never converts: on a directory whose first row is a `node` row it refuses unless `--kind` equals that node's kind (re-running `--kind root` on a root is a no-op); plain `init` on a tree node is refused. `--kind root` is refused on a directory that has records but no `node` row (a root needs a directory without records).
@@ -274,7 +289,7 @@ The `node` row is the first row of the log. A later `node` row is quarantined. O
 - Any other kind: the parent is the resolved node. Refuse an illegal kind/parent pair (fix names the legal kinds). `--name` is required.
 - The child is built under `<parent>/<kinds>/.new-<random>/` with its `.awt/events.jsonl` complete, then moved into place with `rename`. A crash leaves only a `.new-*` directory, which no listing shows and `doctor` reports. A `rename` onto an existing non-empty directory fails, so two racing creators cannot both win; an existing empty directory with the chosen slug is taken over, with no data lost.
 - With `--key`, the check for an existing node with that key and the `rename` happen under `flock` on the tree root's `.awt/events.jsonl`. The search starts at the tree root (the topmost node above the resolved one) and covers every descendant, so a key is unique across the whole tree. A match prints the existing node's path relative to the resolved node and its kind, and exits 0 (idempotent), wherever it is and whatever `--name`, parent or kind was asked. If the filesystem has no `flock`, the command refuses with fix "keyed init needs a local filesystem". Without `--key`, a retry after a crash can leave a duplicate (`t`, `t-2`): a harness that retries must pass `--key`.
-- `--goal`/`--done` are required for `task`, optional for the others. `workspace` and `agent` get a placeholder goal from `--name` when absent.
+- `--goal`/`--done` are required for `task`, optional for the others. `project`, `workspace` and `agent` get a placeholder goal from `--name` when absent.
 - Output: one line, `init <path relative to the resolved node> <kind>` for child kinds. `--kind root` and plain `init` print `init <dir>: <what was made>`.
 
 Layout by kind:
@@ -282,6 +297,7 @@ Layout by kind:
 | Kind | Creates |
 |---|---|
 | `root` | `.awt/`, `AGENTS.md` (tree form), `README.md`, `workspaces/` |
+| `project` | `.awt/`, `context/`, `docs/`, `misc/`; `workspaces/` on the first workspace |
 | `workspace` | `.awt/`, `context/`, `docs/`, `misc/` |
 | `task` | The `init` layout above, with `AGENTS.md` in tree form, the `.claude/settings.json` hook running `awt resume --hook`, and no `README.md` |
 | `agent` | `.awt/`, `scratch/`, `out.md` created on first write |
@@ -294,7 +310,7 @@ Unchanged: `--dir` > `AWT_DIR` > script directory > walk up from `cwd`. A person
 
 Ancestors are the parent chain, nearest first, at most 8 levels, stopping after the first `root`. Descendants are found by walking the reserved directories only, at most 8 levels deep and 2,000 nodes. Symlinked directories are never followed, so a loop cannot occur; `doctor` reports them. Hitting a limit is reported, never silent.
 
-Every walk of a node's own files (listing, `find`, resume section 5, `save`) skips any subdirectory that contains `.awt/`, and the reserved directories are not listed under `misc`. A child's files belong to the child.
+Every walk of a node's own files (listing, `find`, resume section 5) skips any subdirectory that contains `.awt/`, and the reserved directories are not listed under `misc`. A child's files belong to the child.
 
 ### Reading across nodes
 
@@ -343,8 +359,9 @@ Paseo 0.15.4's hook payloads carry no plugin metadata, no `background` flag, and
 
 | Paseo | awt | Key |
 |---|---|---|
-| Project | not a node. A `ref kind=paseo` on each workspace node | `paseo:project/<id>` |
-| Workspace | `workspace` node | `paseo:workspace/<id>` |
+| Project | `project` node, name `customName ?? displayName`, a `ref` to its `rootPath` and a `ref` to its own key | `paseo:project/<id>` |
+| No `projectId`, and every `unassigned--*` workspace | `project` `unassigned` | `paseo:project/unassigned` |
+| Workspace | `workspace` node under its project's `workspaces/` (refs: working directory, project, workspace) | `paseo:workspace/<id>` |
 | No workspace, or a `cwd` outside any | `workspace` `unassigned--<cwd basename>` | `paseo:unassigned/<hash of cwd>` |
 | none | `task` `main`, created with the workspace | `paseo:task/<workspace id>/main` |
 | Agent | `agent` node under the workspace's current task | `paseo:agent/<id>` |
@@ -356,14 +373,14 @@ Hooks:
 
 | Hook | Action |
 |---|---|
-| `workspace.create.after` | Ensure the workspace node (refs: working directory, project, workspace) and its `main` task |
+| `workspace.create.after` | Ensure the project node from `workspace.projectId` (name and root path from `projects.json` when it has the row, else from `projects.list`), the workspace node under it (refs: working directory, project, workspace) and its `main` task. If the project node cannot be made, the workspace goes directly under the root and the hook logs it |
 | `agent.create.before` | Append the static awt block (one paragraph, at most 700 chars; it names `awt find --like` and says to call `awt_resume` again after compaction) to `systemPrompt`, once, and only when `awt` is working (the root node could be ensured). Otherwise the request is unchanged. Nothing else changes |
 | `agent.open.before` | Only for `purpose: interactive`. Ensure the agent's node. Add `AWT_DIR` (the node), `AWT_BY` (the agent id) and, when the daemon has it set, `AWT_RELATED` to `env`, and the `awt_resume` tool. Runs on every open, so resumed agents get the same node |
 | `agent.create.after` | Ensure the node (covers an order where it runs before open). When the parent is known (see above) and the node is not under the parent's, record the parent as above |
 | `agent.turn.before` / `agent.turn.after` | By default the plugin sends no prompt into a conversation; the handoff is asked for by the static prompt block and the `awt_resume` brief. After a completed turn of a non-subagent with an `AWT_DIR` (from `agent.open.before` in this process, or, after a plugin reload, an agent whose `paseo:agent/<id>` node already exists, which is then remembered; an agent with no node is skipped) and no `main` `state` row newer than the turn's start, it records the agent's last assistant message (from the timeline, cut to 240 chars, prefixed `[auto] `) as `state --scope auto`. A scope of its own means it never replaces a handoff the agent wrote, `resume` shows it beside one, and awt's refusal of an unchanged state keeps repeated replies from adding rows; `AWT_AUTO_HANDOFF=0` turns this off. With `AWT_NUDGE=1` the plugin instead sends the follow-up below. Nudge rule: at most one follow-up asking for `awt state` per agent per stretch, where a stretch ends when the agent records a `state` row. After a completed turn of a non-subagent that got an `AWT_DIR` from `agent.open.before` in this process, with no `state` row newer than the turn's start, send the follow-up unless one was sent since the agent last recorded state. Agents without `AWT_DIR` are never nudged |
 | `agent.turn.after` (receipt) | After the handoff above, for any outcome and for subagents too, an agent with a node (found by key if the plugin was reloaded since it opened) gets one plugin timeline item (`agents.ref(id).timeline.append`, id `awt.receipt.<turn id>`, kind `awt.receipt`, version 1) with `data` `{node, counts, ids (max 5), auto, empty}`, read through `awt list --since <turn start> --down --json`, the turn start being the one `agent.turn.before` recorded. `node` is the agent node's name. `counts` has only the non-zero types; `node` rows and rows written by `paseo-plugin` other than the auto state are not counted. `ids` are the first 5 by `ts`. `auto` is true when the stand-in handoff was written this turn. A receipt counts its own node and the subagent nodes below it, so a subagent's row shows in both its own receipt and its parent's, by design. The client renders one muted line (`awt · 1 decision d-... · 1 note · handoff`, `awt · handoff [auto]`, `awt · 1 handoff · handoff [auto]` when the agent also wrote one; the stand-in handoff is always shown apart from the agent's own, `awt · nothing stored this turn`); an unknown version or bad data renders nothing. `AWT_RECEIPT=changes` skips empty receipts and those whose only row is the auto state, `0` or `off` skips all. An append failure is logged and changes nothing. Plugin timeline items are UI-only; the gated tier 2 test confirms they are not sent to the provider |
 | `agent.permission.before` | The node dir (`AWT_DIR`) is always outside the agent's cwd, so opencode (`external_directory`, whose `input.patterns` are `<dir>/*` globs) and Claude (a write, edit or read with a `filePath`) ask before the agent may write there, and a headless run stalls. The plugin answers `allow` through `agents.ref(id).respondToPermission`, and only when every target path, resolved with `realpath` (symlinks followed, a not-yet-existing tail kept, `..` collapsed), is the calling agent's own node dir or inside it. Not its parent's, a sibling's, a child's outside it, or `AWT_ROOT` itself; a request with any target outside, an unknown shape, a relative path, a glob other than the trailing `/*`, shell commands, or from an agent with no node: left untouched for the person. It never denies |
-| `agent.archive.after`, `workspace.archive.after` | `awt status done`; if refused, `paused` |
+| `agent.archive.after`, `workspace.archive.after` | `awt status done`; if refused, `paused`. After a workspace archive the plugin also reads `archivedAt` of the workspace's project from `projects.json` (path `AWT_PASEO_PROJECTS`, default `$PASEO_HOME or ~/.paseo` + `/projects/projects.json`; the SDK has no project archive hook and `projects.list` has no `archivedAt`). When it is set, the project node gets the same `done`, else `paused`. A missing, symlinked, oversized or malformed file means no archive information |
 
 `awt_resume` takes no input and prints the brief of the node found for the calling agent's key. It cannot name another node; which node it reads is decided by the key lookup, which is only as safe as key uniqueness (see above).
 
@@ -379,13 +396,16 @@ Not in this version: `/task` commands and the composer pill, background-agent fi
 
 Sources:
 1. `--from SNAPSHOT`, a JSON file with `projects`, `workspaces` and `agents`. The plugin writes one from the SDK with exact `workspaceId` and `parentAgentId` for every agent. Tests use the same format.
-2. Paseo's on-disk JSON under `--home` (default `~/.paseo`), read-only: `agents/*/*.json` (one file per agent, with `workspaceId`, `archivedAt`, `internal`, label `paseo.parent-agent-id`, which is where Paseo records the parent of a subagent; on a real install it agreed with `paseo inspect` `ParentAgentId` for every agent checked), `projects/projects.json` and `projects/workspaces.json` (`archivedAt`, `background`). It is mapped to the snapshot shape, so every agent has an exact workspace. A `background` workspace and an `internal` agent are skipped. A file that cannot be read is skipped and listed; a missing or malformed `workspaces.json` is a refusal with a fix line.
+2. Paseo's on-disk JSON under `--home` (default `~/.paseo`), read-only: `projects/projects.json` (`projectId`, `displayName`, `customName`, `rootPath`, `archivedAt`), `agents/*/*.json` (one file per agent, with `workspaceId`, `archivedAt`, `internal`, label `paseo.parent-agent-id`, which is where Paseo records the parent of a subagent; on a real install it agreed with `paseo inspect` `ParentAgentId` for every agent checked), `projects/projects.json` and `projects/workspaces.json` (`archivedAt`, `background`). It is mapped to the snapshot shape, so every agent has an exact workspace. A `background` workspace and an `internal` agent are skipped. A file that cannot be read is skipped and listed; a missing or malformed `workspaces.json` is a refusal with a fix line.
 
 Mapping:
 
 | Paseo item | awt result |
 |---|---|
-| Workspace | `workspace` node, name `<project>--<name>`, `ref` repository path, `ref paseo:project/<id>` |
+| Project | `project` node under `projects/`, key `paseo:project/<id>`, name `customName ?? displayName`, `ref` to `rootPath`. One per row of `projects.json`; `unassigned` (key `paseo:project/unassigned`) is made when a workspace needs it |
+| Workspace | `workspace` node under its project's `workspaces/`, name `<project>--<name>`, `ref` repository path, `ref paseo:project/<id>`. No `projectId`, or an `unassigned--*` workspace: project `unassigned` |
+| Workspace node found directly under the root (the earlier layout) | Moved under its project, one `rename` of the node: the project of its `ref paseo:project/<id>`, else its `projectId` in the snapshot or `workspaces.json`, else `unassigned`. Only nodes keyed `paseo:workspace/*` or `paseo:unassigned/*` move; a workspace made by hand stays |
+| Archived project (`archivedAt`) | The project node moves from `active` to `done`, or to `paused` when work below it is open (a workspace still active). Checked on every run; a project that is already `paused` is retried, so it becomes `done` once its last open work closes (as the plugin does) |
 | Agent, exact workspace id | `agent` node under task `imported` of that workspace |
 | Agent without a workspace id, `cwd` (normalised with `normpath`) matches exactly one workspace | The same |
 | Agent without a workspace id whose `cwd` matches several workspaces or none, or whose workspace id is not listed | Under workspace `unassigned--<cwd basename>`, task `imported`. Listed in the report |
@@ -399,6 +419,7 @@ Each agent node gets `goal` from its Paseo title (cut to the cap), a `ref kind=p
 
 Properties:
 - Idempotent: a second run, or a run after a crash, creates only what is missing; names are never changed after creation. After import awt owns the status: the script never sets `active`, and moves a node only from `active` to `done` when Paseo has it archived, so a status the user set survives reruns. Output and report give created and already-present counts separately.
+- Moves: a node moves at most once, by one `rename` onto a name that does not exist (a collision gets a numeric suffix), so a subtree moves whole and a kill leaves each node in the old place or the new one; the next run finishes. A rerun finds every node by key under its project and moves nothing. Keyed refs resolve by key under the tree root, so they follow a moved node; paths cached by a running plugin are dropped when gone. A running agent's `AWT_DIR` keeps the old path until it is reopened (awt exits 4 with a fix; nothing is written to the wrong node), so run the migration with the Paseo daemon stopped.
 - Existing nodes are found by key across the whole tree before anything is created, so a node is never duplicated or moved when its parent changes in Paseo. Refs and statuses are read in process and written through `awt`.
 - A lock: a second concurrent run exits 1 with a fix. The report file doubles as the lock (`flock`), because `awt` itself takes `flock` on `events.jsonl`. Taking the lock truncates the report to a "run in progress" header, so a killed run never leaves the previous report looking current.
 - `legacy/paseo-migration.md` in the root: counts, every ambiguity, every skipped item with its reason.
