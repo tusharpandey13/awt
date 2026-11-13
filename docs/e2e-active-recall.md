@@ -60,7 +60,7 @@ The `before()` of `paseo-plugin/test/daemon.test.ts`, unchanged (temp home, free
 
 - A second repo `$T/ledgerline` and workspace `W2`; after the plugin creates its node, `awt --dir <node with key paseo:workspace/W2> decide "Retry gateway calls with exponential backoff and full jitter" --why "Fixed backoff synchronised the clients and overloaded the gateway" --tag rule` (id `D_RULE`).
 - Daemon env adds `AWT_RELATED=2` and `AWT_FAKE_WIRE=$T/wire.jsonl`.
-- Harness extensions (test code, not product code): **H1** `fake/acp_agent.py` appends every inbound JSON-RPC line to `$AWT_FAKE_WIRE` when set. **H2** `receipts(id)`: timeline items with `type: "plugin"` and `kind: "awt.receipt"`, read from `paseo --home $H logs <id> --json`; if E-R10 step 0 finds that the CLI does not emit plugin items, read them with `@getpaseo/client` `agents.ref(id).timeline.refetch({ direction: "tail", limit: 100 })` instead, and the test file states which path it uses. **H3** `waitReceipts(id, n)`: poll H2 every 250 ms until `n` receipts or 15 s (then fail). **H4** `FAIL: <cmd>` prompt: the fake runs the command, then answers the prompt with a JSON-RPC error.
+- Harness extensions (test code, not product code): **H1** `fake/acp_agent.py` appends every inbound JSON-RPC line to `$AWT_FAKE_WIRE` when set. **H2** `receipts(id)`: timeline items with `type: "plugin"` and `kind: "awt-receipt"`, read from `paseo --home $H logs <id> --json`; if E-R10 step 0 finds that the CLI does not emit plugin items, read them with `@getpaseo/client` `agents.ref(id).timeline.refetch({ direction: "tail", limit: 100 })` instead, and the test file states which path it uses. **H3** `waitReceipts(id, n)`: poll H2 every 250 ms until `n` receipts or 15 s (then fail). **H4** `FAIL: <cmd>` prompt: the fake runs the command, then answers the prompt with a JSON-RPC error.
 - Changing a daemon setting means `paseo daemon stop` then `paseo daemon start` with the new env (`restart` keeps the supervisor's env).
 
 ## 1. CLI journeys (tier cli)
@@ -279,7 +279,7 @@ Pre: D0 with the Claude provider enabled; daemon env `CLAUDE_CONFIG_DIR=$T/claud
 |---|---|---|
 | 1 | `cc=paseo run --provider claude --model <cheapest Claude model> --workspace W1 --title cc1 'Run the shell command  awt note "cc probe"  and reply DONE'` | 1 receipt, `counts.note == 1` |
 | 2 | `paseo send cc1 "Reply with the word NEXT"` | 2 receipts |
-| 3 | grep `$T/requests/` (or transcript) for `awt.receipt\|awt ·\|nothing stored` | 0 matches. A match fails the journey and, per R4, flips the default to off |
+| 3 | grep `$T/requests/` (or transcript) for `awt-receipt\|awt ·\|nothing stored` | 0 matches. A match fails the journey and, per R4, flips the default to off |
 | 4 | `paseo send cc1 "/compact"` | a `compaction` timeline item with `status: completed` |
 | 5a | **Native-hook path** (if SPEC.md records it): request body / transcript after the compaction boundary | contains the brief header of `cc1`'s node (`# awt` brief first line) from a `SessionStart` hook; deterministic: 3/3 runs |
 | 5b | **Prompt-line path** (if SPEC.md records it): `paseo send cc1 "Continue with the task"` | a tool call to `awt_resume` appears after the compaction item, before any other write to the node; ≥ 4/5 runs |

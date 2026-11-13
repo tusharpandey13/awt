@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /** The plugin timeline row that shows what awt stored during one turn. */
-export const RECEIPT_KIND = "awt.receipt";
+export const RECEIPT_KIND = "awt-receipt";
 export const RECEIPT_VERSION = 1;
 
 export const RECEIPT_TYPES = ["decision", "question", "answer", "note", "ref", "state", "effect", "capture"] as const;

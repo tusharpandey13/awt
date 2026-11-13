@@ -97,7 +97,7 @@ After every turn of an agent that has a node (subagents included), the plugin ap
 - **When:** in `agent.turn.after`, for any outcome (completed, failed or canceled), after the stand-in handoff has been written, so the receipt includes it.
 - **What counts:** event rows with `ts` at or after the turn's start, in the agent's own node and its descendant subagent nodes.
 - **How the plugin reads it:** the plugin may not read `.awt/` directly. A new read flag returns the rows: `awt list --since ISO8601 --json` gives an array of rows of every type, each with `type`, `ts`, `by`, `id`, plus `scope` for states. `--since` combines with `--down` to include descendant nodes, and each such row also gets `node`.
-- **Timeline item:** `{ type: "plugin", kind: "awt.receipt", version: 1, data }`, where `data` is:
+- **Timeline item:** `{ type: "plugin", kind: "awt-receipt", version: 1, data }`, where `data` is:
   - `node`: the agent node's name;
   - `counts`: per type (decision, question, answer, note, ref, state, effect, capture);
   - `ids`: at most 5 ids;
@@ -151,7 +151,7 @@ Core (`tests/test_recall.py`):
 
 Plugin (`paseo-plugin/test/`):
 
-- **P15:** a turn that wrote a decision and a note appends one `awt.receipt` with matching counts and ids.
+- **P15:** a turn that wrote a decision and a note appends one `awt-receipt` with matching counts and ids.
 - **P16:** a turn that wrote nothing appends `empty: true`. With `AWT_RECEIPT=changes` nothing is appended. With `AWT_RECEIPT=0` nothing is appended.
 - **P17:** the receipt comes after the stand-in handoff, with `auto: true`.
 - **P18:** a timeline append that throws is logged and the turn is unaffected.
