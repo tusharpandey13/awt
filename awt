@@ -183,7 +183,7 @@ Every refusal prints `error:` and `fix:`. Read the `fix:` first.
 | State | You may | You must not |
 |---|---|---|
 | `planned` | `begin` it, then send; `mark dropped` if it is cancelled | Send without `begin` when a person asked for the ledger |
-| `begun` | Send (once), then `mark sent`, `not-sent --why` or `unknown --why` | Begin again; leave it unmarked |
+| `begun` | Send (once) only if you ran `begin` yourself in this session; otherwise treat it as unknown and ask a person. Then `mark sent`, `not-sent --why` or `unknown --why` | Begin again; leave it unmarked |
 | `sent` | Proceed; cite `--ref` if known | Plan the same send again |
 | `unknown` | Run `effect show <id>`, report to a person, wait for them | Resend. Plan on that target. Mark it yourself. Run `status done`. |
 | `dropped` | Move on | Revive without a person asking |
@@ -508,31 +508,38 @@ def valid(r):
     return True
 
 
+REMOVED_FLAGS = ("--run", "--snapshot", "--verify", "--class", "--timeout")
+
+
 def claim_path(e):
     return P(".awt", "claims", "%s.%s" % (e["key"], e["attempt"]))
 
 
 def fold_effect(D, r):
-    """Effect state machine (SPEC 6.2). `claimed` is the old name of `begun`. A claim file with no `begun` row (a crash between the two) reads as begun."""
+    """Effect state machine (SPEC 6.2). `claimed` is the old name of `begun`; two legacy `claimed` rows for one attempt mean two processes ran it (legacy conflict), but a second `begun` row is quarantined. A claim file with no `begun` row (a crash between the two) reads as begun."""
     i, s, n = r["id"], r["step"], r.get("attempt", 1)
-    s = "begun" if s == "claimed" else s
+    legacy = s == "claimed"
+    s = "begun" if legacy else s
     e = D["eff"].get(i)
     if e is None:
         if s != "planned" or not r.get("target") or not r.get("key"):
             return False
-        e = D["eff"][i] = dict(r, attempt=n, hist=[])
+        e = D["eff"][i] = dict(r, attempt=n, hist=[], claims=0)
     else:
         cur = derive(e)
         if s == "planned":
             ok = n == e["attempt"] + 1 and cur in ("begun", "unknown")
         else:
             ok = n == e["attempt"] and (
-                (s == "begun" and cur in ("planned", "begun")) or (s == "sent" and cur in ("planned", "begun", "unknown"))
+                (s == "begun" and (e["step"] == "planned" or legacy and e["step"] == "begun")) or (s == "sent" and cur in ("planned", "begun", "unknown"))
                 or (s == "unknown" and cur == "begun") or (s == "dropped" and cur == "planned"))
         if not ok:
             return False
         e["attempt"] = n
+        if s == "planned":
+            e["claims"] = 0
     e["step"] = s
+    e["claims"] += legacy
     e["hist"].append(r)
     return True
 
@@ -712,6 +719,9 @@ def fit(head, lines, key, sect, suffix=""):
 def eff_next(e):
     if e["state"] == "planned":
         return "./awt effect begin %s, send it, then ./awt effect mark %s sent" % (e["id"], e["id"])
+    if e["state"] == "begun":
+        w = "legacy conflict: may have been sent twice; " if e["claims"] > 1 else ""
+        return w + "send only if you ran begin yourself this session, else ask a person; then ./awt effect mark %s sent|not-sent (see effect show)" % e["id"]
     return "check the target, then ./awt effect mark %s sent|not-sent  (see ./awt effect show %s)" % (e["id"], e["id"])
 
 
@@ -1669,9 +1679,13 @@ def eff_plan(a):
     nonce = os.urandom(8).hex() if a.again else ""
     key = sha(json.dumps([a.target, bsha or "", nonce]).encode())
     for e in D["eff"].values():
-        if e["key"] == key:
+        # rows written before v2 carry `class` and were keyed with run and class too
+        old = sha(json.dumps([a.target, e.get("run") or "", bsha or "", e.get("class") or "additive", nonce]).encode())
+        if e["key"] == key or "class" in e and e["key"] == old:
             if e["state"] == "dropped":
                 die("%s was dropped" % e["id"], "plan it again with --again")
+            if e["state"] == "sent":
+                return out("%s is already sent (nothing written); to send again use --again, or plan a narrower --target" % e["id"])
             return out("%s %s (already planned, nothing written)" % (e["id"], e["state"]))
     if not a.again:
         for e in D["eff"].values():
@@ -1712,7 +1726,7 @@ def eff_show(a):
     e = get_eff(load(), a.id)
     old = ("class", "snapshot", "verify")
     for k, v in e.items():
-        if k not in ("hist", "run", "how") + old:
+        if k not in ("hist", "run", "how", "claims") + old:
             out("%s: %s" % (k, v))
     if e.get("how") or e.get("run"):
         out("how: %s" % (e.get("how") or e["run"]))
@@ -1722,13 +1736,17 @@ def eff_show(a):
     out("history:")
     for r in e["hist"]:
         out("  %s %s attempt=%s %s" % (r["ts"], r["step"], r.get("attempt", 1), r.get("reason") or r.get("ref") or r.get("why") or ""))
+    if e["claims"] > 1:
+        out("legacy conflict: may have been sent twice")
     for sub in ("runs", "blobs"):
+        if sub == "blobs" and not e.get("snapshot"):
+            continue  # blobs are named by content hash, so they cannot be tied to one effect
         try:
             names = sorted(n for n in os.listdir(P(".awt", sub)) if sub == "blobs" or n.startswith(a.id + "."))
         except OSError:
             continue
         for n in names[:20]:
-            out("legacy file: .awt/%s/%s" % (sub, n))
+            out("legacy file: .awt/%s/%s%s" % (sub, n, " (tree-wide)" if sub == "blobs" else ""))
     if e.get("body"):
         out("body path: " + e["body"])
         try:
@@ -1992,10 +2010,14 @@ def build():
     V(sp, "save", [("message", T)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
+    V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing
     V(es, "plan", opt=[(("--target",), dict(required=True)), (("--body",), T), (("--how",), T), (("--after",), dict(action="append")), (("--again",), F), (("--why",), T)])
     V(es, "begin", [("id", T)])
     V(es, "show", [("id", T)])
     V(es, "mark", [("id", T), ("to", dict(choices=["sent", "not-sent", "unknown", "dropped"]))], [(("--ref",), T), (("--why",), T)])
+    for q in list(es.choices.values()):  # removed flags: hidden, accepted, refused after parsing so option values are never mistaken for them
+        for f in REMOVED_FLAGS:
+            q.add_argument(f, dest="gone", nargs="?", action="append", help=argparse.SUPPRESS)
     return p
 
 
@@ -2028,12 +2050,10 @@ def main(argv):
         return out(AGENT_REF)
     if not rest or rest[0] in ("help", "--help", "-h"):
         return out(USAGE)
-    if rest[:1] == ["effect"]:
-        gone = rest[1:2] == ["apply"] or any(x.split("=")[0] in ("--run", "--snapshot", "--verify", "--class", "--timeout") for x in rest[1:])
-        if gone:
-            die("effect apply, --run, --snapshot, --verify, --class and --timeout were removed: awt never runs commands",
-                "send it yourself; ./awt effect plan --target T [--body FILE] [--how TEXT], ./awt effect begin ID, then ./awt effect mark ID sent", 2)
     a = build().parse_args(rest)
+    if a.verb == "effect" and (a.eop == "apply" or getattr(a, "gone", None) is not None):
+        die("effect apply, --run, --snapshot, --verify, --class and --timeout were removed: awt never runs commands",
+            "send it yourself; ./awt effect plan --target T [--body FILE] [--how TEXT], ./awt effect begin ID, then ./awt effect mark ID sent", 2)
     a.dir = d
     if a.verb is None or (a.verb == "effect" and not a.eop):
         die("missing verb", USAGE.splitlines()[0], 2)

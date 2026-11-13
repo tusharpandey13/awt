@@ -126,7 +126,7 @@ Listings walk the filesystem, so a file a person drops into `context/`, `docs/`,
 
 An effect is a record of one thing leaving your machine (a message, comment, doc or edit), tracked so it is never sent twice or retried blindly.
 
-**awt never executes commands.** It keeps the ledger; the sender (an agent or a person) sends with their own tools, so the host's permission system sees the real command. No code path of an `effect` verb starts a process. This is the *declared* path: optional, for sends where a blind retry is costly. (Detected effects, where a host hook writes the same rows, are a later phase.)
+**awt never executes commands.** It keeps the ledger; the sender (an agent or a person) sends with their own tools, so the host's permission system sees the real command. No code path of an `effect` verb starts a process (no `git` either: the effect verbs only read and append the log and touch `.awt/claims/`). This is the *declared* path: optional, for sends where a blind retry is costly. (Detected effects, where a host hook writes the same rows, are a later phase.)
 
 ```
 planned --begin--> begun --mark sent--------> sent
@@ -141,7 +141,7 @@ planned --begin--> begun --mark sent--------> sent
 - `--target` is free text such as `slack:#eng` or `jira:TKT-1`, cap 200. `--body` is optional; it must be a regular file inside the root, `outbox/` is the convention.
 - `--how` is the intended command as text, cap 400. It is shown to people (`begin`, `show`, `list effects --json` as `how`). It is never run and is not part of the key.
 - `key = sha256(target, body sha, nonce)`. `nonce` is empty unless `--again` sets a random one.
-- Same key as an existing effect: print its id and state, exit 0, write nothing. If that effect is `dropped`, refuse with fix `--again`.
+- Same key as an existing effect: print its id and state, exit 0, write nothing (if it is `sent`, say so and point to `--again` or a narrower `--target`). If that effect is `dropped`, refuse with fix `--again`. An old effect (its row has `class`) was keyed `sha256(target, run, body sha, class or additive, nonce)`; it also matches by that formula, using its own `run` and `class`, so a re-plan across the upgrade finds it.
 - A new plan on a target with an open `unknown` effect is refused unless `--again`.
 - `--after` ids must exist. Output includes the exact next command.
 
@@ -157,11 +157,11 @@ Legal only as drawn: from `planned`: `sent` (a person who sent it without `begin
 
 `effect show ID` prints every field, the state, the attempt history, `how`, the body path and body.
 
-A `begun` effect with no mark stays `begun`, needs attention in the brief, and blocks `status done`. No timeout changes it: only the sender knows. A crash after `begin` leaves `begun`, never retried, shown to a person. awt cannot verify a send: the sender records it with `mark sent --ref`.
+A `begun` effect with no mark stays `begun`, needs attention in the brief, and blocks `status done`. A reader cannot tell whether a `begun` effect was sent (a legacy dead-pid `claimed` row, or a crash between the claim file and the row, also read `begun`), so the brief and the agent reference say: send only if you ran `begin` yourself in this session, otherwise treat it as unknown and ask a person. No timeout changes it: only the sender knows. A crash after `begin` leaves `begun`, never retried, shown to a person. awt cannot verify a send: the sender records it with `mark sent --ref`.
 
-State derivation in `load()`: `planned` with an existing claim file for the current attempt reads as `begun` (crash between steps 2 and 3). Effect rows other than `planned` for an unknown id, and illegal transitions, are quarantined. Old trees read unchanged: step `claimed` reads as `begun`; a row's `run`, `class`, `snapshot` and `verify` are accepted, and `show` prints `run` as `how` and the others as `legacy NAME: VALUE`, plus `legacy file:` lines for `.awt/runs/<id>.*` and `.awt/blobs/*`. A `planned` row with `run` is an ordinary planned effect. `events.jsonl` is never rewritten; `.awt/runs/` and `.awt/blobs/` are never written by effect verbs and never deleted.
+State derivation in `load()`: `planned` with an existing claim file for the current attempt reads as `begun` (crash between steps 2 and 3). Effect rows other than `planned` for an unknown id, and illegal transitions, are quarantined; so is a second `begun` row for an attempt already `begun`. Two legacy `claimed` rows for one attempt (the old `conflict`: two processes ran it) are not quarantined: the effect reads `begun`, and `show` and the brief say `legacy conflict: may have been sent twice`. Old trees read unchanged: step `claimed` reads as `begun`; a row's `run`, `class`, `snapshot` and `verify` are accepted, and `show` prints `run` as `how` and the others as `legacy NAME: VALUE`, plus `legacy file:` lines for `.awt/runs/<id>.*`, and for `.awt/blobs/*` (marked tree-wide: blobs are named by content hash) only for an effect whose row had `snapshot`. A `planned` row with `run` is an ordinary planned effect. `events.jsonl` is never rewritten; `.awt/runs/` and `.awt/blobs/` are never written by effect verbs and never deleted.
 
-Removed: `effect apply`, and the flags `--run`, `--snapshot`, `--verify`, `--class`, `--timeout`. They exit 2 with a `fix:` naming `plan`, `begin` and `mark`. (`.awt/runs/` is still written by `relay` for worker logs.)
+Removed: `effect apply`, and the flags `--run`, `--snapshot`, `--verify`, `--class`, `--timeout`. They are registered as hidden options and refused after parsing (exit 2, `fix:` naming `plan`, `begin` and `mark`), so an option value such as `--why=--timeout` is not mistaken for one. (`.awt/runs/` is still written by `relay` for worker logs.)
 
 ## doctor
 

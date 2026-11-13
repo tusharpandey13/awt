@@ -49,7 +49,7 @@ Record a decision:
 ./awt decide "Cap parsekit retries at 3" --why "Thread shows retries amplify the outage" --tag rule
 ```
 
-The agent now works. It writes `outbox/update-eng.md` and runs `./awt effect plan --target "slack:#eng" --body outbox/update-eng.md`. That prints an effect id and the next command. the tool never sends anything: you (or the agent, with its own tools) do.
+The agent now works. It writes `outbox/update-eng.md` and runs `./awt effect plan --target "slack:#eng" --body outbox/update-eng.md`. That prints an effect id and the next command. The tool never sends anything: you (or the agent, with its own tools) do.
 
 Read the draft, post it in Slack, then:
 
@@ -61,7 +61,7 @@ The id is the one `plan` printed. `./awt list effects` shows it as `sent`. Finis
 
 ## 3. Sending things
 
-The tool never runs a command. You or the agent send with your own tools, so Claude Code, opencode or Paseo see and gate the real command. it keeps the ledger.
+The tool never runs a command. You or the agent send with your own tools, so Claude Code, opencode or Paseo see and gate the real command. It keeps the ledger.
 
 **The declared path** (when a blind retry is costly):
 
@@ -76,7 +76,7 @@ The tool never runs a command. You or the agent send with your own tools, so Cla
 
 **A send that went wrong.** `./awt effect mark e-1a2b3c4d not-sent --why "gateway refused"` returns it to `planned` for another attempt. `./awt effect mark e-1a2b3c4d unknown --why "timed out"` says you cannot tell. A `begun` effect with no mark stays `begun` and blocks `status done`: only the sender knows what happened.
 
-**`unknown`.** The send may have happened. the tool never retries. Check the real destination, then:
+**`unknown`.** The send may have happened. The tool never retries. Check the real destination, then:
 
 ```sh
 ./awt effect mark e-1a2b3c4d sent        # it went out

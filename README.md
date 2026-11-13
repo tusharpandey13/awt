@@ -6,7 +6,7 @@ Every new agent session starts cold. It doesn't know what was decided yesterday,
 
 - **One file, no dependencies.** A single Python 3.9 script. No server, no database, no account.
 - **Works with any agent** that reads `AGENTS.md` and runs shell commands: Claude Code, Codex, opencode and others.
-- **Safe outbound work.** Messages, comments and updates can be declared before they go out, are claimed only once, and are never silently retried. it keeps the ledger and never runs the command itself.
+- **Safe outbound work.** Messages, comments and updates can be declared before they go out, are claimed only once, and are never silently retried. It keeps the ledger and never runs the command itself.
 - **Scales with the task.** A small brief for a small task, and a tree of workspaces, tasks and agents for a big one.
 - **Plugs into Paseo.** One plugin gives every Paseo workspace and agent its own place in the tree, automatically.
 
@@ -63,7 +63,7 @@ Links beat copies. `./awt ref <url> --title "..."` records a link, and `--no-acc
 - **One append-only record.** Decisions, questions, links and handoffs go through `./awt` into `.awt/events.jsonl`. Malformed input is refused on the way in, and a corrupt line is skipped and counted rather than breaking anything.
 - **Skipped handoffs still show.** The brief lists the files and commits changed since the last handoff, so the next session sees what happened even if the last one recorded nothing.
 - **The brief has a fixed size.** It stays under 4,400 characters however large the task grows (5,200 for a node in a tree). Everything else is one `./awt find` away.
-- **Outbound work can be declared before it is sent.** Each effect is claimed once (`begin`). A send that was begun and never marked stays `begun`, and one marked `unknown` is never retried automatically, because it may have gone through. the tool never executes the command: the sender uses their own tools, so the host's permission system sees the real command.
+- **Outbound work can be declared before it is sent.** Each effect is claimed once (`begin`). A send that was begun and never marked stays `begun`, and one marked `unknown` is never retried automatically, because it may have gone through. The tool never executes the command: the sender uses their own tools, so the host's permission system sees the real command.
 - **Parallel agents are safe.** Every write is a single atomic append, with no locks to go stale.
 
 ## Big work: the node tree

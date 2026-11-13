@@ -481,6 +481,63 @@ class TestEffects(Base):
         for d in ("blobs", "runs"):
             self.assertFalse(os.path.exists(self.p(".awt", d)), d)
 
+    def test_option_values_that_look_like_removed_flags_are_not_refused(self):
+        r = self.ok("effect", "plan", "--target", "q:r", "--why=--timeout")
+        self.assertEqual(self.rows("effect")[0]["why"], "--timeout")
+        e = r.stdout.split()[0]
+        self.begin(e)
+        self.mark(e, "unknown", "--why=--run")
+        self.assertEqual(self.state_of(e), "unknown")
+        r = self.bad("effect", "plan", "--target", "q:r2", "--why", "--timeout", code=2)  # argparse: a flag, not a value
+        self.assertEqual(len(self.rows("effect")), 3)
+
+    def test_replanning_a_sent_effect_says_sent(self):
+        e = self.plan()
+        self.mark(e, "sent")
+        r = self.ok("effect", "plan", "--target", "slack:#eng")
+        self.assertIn("already sent", r.stdout)
+        self.assertIn("--again", r.stdout)
+        self.assertNotIn("already planned", r.stdout)
+        self.assertEqual(len([x for x in self.rows("effect") if x["step"] == "planned"]), 1)
+
+    def test_begun_brief_line_says_unknown_unless_you_began(self):
+        e = self.plan()
+        self.begin(e)
+        out = self.ok("resume").stdout
+        self.assertIn("ran begin yourself this session", out)
+        self.assertIn("ask a person", out)
+        ref = self.ok("help", "agents").stdout
+        self.assertIn("only if you ran `begin` yourself in this session", ref)
+
+    def test_second_begun_row_for_the_same_attempt_is_quarantined(self):
+        e = self.plan()
+        self.begin(e)
+        self.raw_append(dict(type="effect", id=e, step="begun", attempt=1))
+        self.assertEqual(self.state_of(e), "begun")
+        self.assertIn("1 quarantined", self.ok("resume").stdout)
+        self.assertNotIn("legacy conflict", self.ok("effect", "show", e).stdout)
+
+    def test_quarantine_counts_for_illegal_transitions(self):
+        e = self.plan()
+        self.begin(e)
+        self.mark(e, "sent")
+        self.raw_append(dict(type="effect", id=e, step="begun", attempt=1))  # sent -> begun
+        self.raw_append(dict(type="effect", id=e, step="unknown", attempt=1))  # sent -> unknown
+        self.assertEqual(self.state_of(e), "sent")
+        self.assertIn("2 quarantined", self.ok("resume").stdout)
+        d = self.plan("--again", target="D")
+        self.mark(d, "dropped")
+        self.raw_append(dict(type="effect", id=d, step="begun", attempt=1))  # dropped -> begun
+        self.raw_append(dict(type="effect", id=d, step="sent", attempt=1))  # dropped -> sent
+        u = self.plan(target="U")
+        self.begin(u)
+        self.mark(u, "unknown", "--why", "w")
+        self.raw_append(dict(type="effect", id=u, step="begun", attempt=1))  # unknown -> begun
+        self.raw_append(dict(type="effect", id=u, step="dropped", attempt=1))  # unknown -> dropped
+        self.assertEqual(self.state_of(d), "dropped")
+        self.assertEqual(self.state_of(u), "unknown")
+        self.assertIn("6 quarantined", self.ok("doctor").stdout)
+
     def test_init_writes_no_ask_rule_and_no_outbox_paragraph(self):
         st = slurp(self.p(".claude", "settings.json"))
         self.assertNotIn("effect apply", st)
@@ -558,6 +615,31 @@ class TestEffects(Base):
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
                     todo.append(n.func.id)
         self.assertIn("load", seen)
+
+    def test_effect_verbs_start_no_process_at_runtime(self):
+        """Dynamic: every effect verb runs in a child python under an audit hook that fails on any process start.
+        awt's git calls live in other verbs (init, save, brief) and are not reached from an effect verb."""
+        self.write("outbox/m.md", "hello\n")
+        e = self.plan("--body", "outbox/m.md", "--how", "touch hits.txt")
+        calls = [("begin", e), ("show", e), ("mark", e, "unknown", "--why", "w"), ("mark", e, "not-sent", "--why", "w"),
+                 ("begin", e), ("mark", e, "sent"), ("plan", "--target", "t", "--again"), ("plan", "--target", "t", "--again", "--body", "outbox/m.md")]
+        code = (
+            "import sys, importlib.machinery as m, importlib.util as u\n"
+            "sp = u.spec_from_loader('awtmod', m.SourceFileLoader('awtmod', %r)); mod = u.module_from_spec(sp); sp.loader.exec_module(mod)\n"
+            "bad = ('subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn', 'os.fork', 'os.forkpty', 'os.spawn')\n"
+            "def hook(ev, args):\n"
+            "    if ev in bad:\n"
+            "        sys.stderr.write('PROCESS ' + ev + '\\n'); raise SystemExit(99)\n"
+            "sys.addaudithook(hook)\n"
+            "mod.main(['--dir', %r, 'effect'] + sys.argv[1:])\n" % (AWT, self.root))
+        for c in calls:  # one child per call: the verbs hold the log lock until exit
+            r = subprocess.run([sys.executable, "-I", "-c", code] + list(c), capture_output=True, text=True, env=self.env, cwd=self.tmp)
+            self.assertNotIn("PROCESS", r.stderr, c)
+            self.assertIn(r.returncode, (0, 1), "%s\n%s%s" % (c, r.stdout, r.stderr))
+        self.assertEqual(self.state_of(e), "sent")
+        self.assertFalse(os.path.exists(self.hits))
+
+    def test_how_text_is_inert(self):
         e = self.plan("--how", "touch hits.txt; echo $(id) >> hits.txt")
         self.begin(e)
         self.mark(e, "sent")
@@ -610,6 +692,35 @@ class TestLegacyEffects(Base):
         self.ok("effect", "mark", "e-0000000a", "not-sent", "--why", "checked")
         self.assertEqual(self.state_of("e-0000000a"), "planned")
         self.ok("effect", "mark", "e-0000000c", "sent")
+
+    def test_replanning_an_old_effect_finds_it_by_its_legacy_key(self):
+        import hashlib
+        self.write("outbox/c.md", "hi\n")
+        bsha = hashlib.sha256(b"hi\n").hexdigest()
+        for i, (run, cls) in enumerate((("jira-cli comment PK-1", "overwrite"), ("", "additive")), 1):
+            key = hashlib.sha256(json.dumps(["t:%d" % i, run, bsha, cls, ""]).encode()).hexdigest()
+            self.raw_append(dict(type="effect", id="e-1000000%d" % i, step="planned", attempt=1, target="t:%d" % i, key=key,
+                                 body="outbox/c.md", body_sha=bsha, **({"run": run} if run else {}), **{"class": cls}))
+            self.raw_append(dict(type="effect", id="e-1000000%d" % i, step="sent", attempt=1))
+            r = self.ok("effect", "plan", "--target", "t:%d" % i, "--body", "outbox/c.md")
+            self.assertIn("e-1000000%d is already sent" % i, r.stdout)
+        self.assertEqual(len([r for r in self.rows("effect") if r["step"] == "planned"]), 5)  # 3 from setUp, 2 here: no re-plan wrote a row
+
+    def test_blobs_are_listed_only_for_effects_with_a_snapshot(self):
+        s = self.ok("effect", "show", "e-0000000b").stdout
+        self.assertNotIn("blobs", s)
+        self.assertIn("(tree-wide)", self.ok("effect", "show", "e-0000000a").stdout)
+
+    def test_two_legacy_claimed_rows_read_as_a_legacy_conflict(self):
+        self.raw_append(dict(type="effect", id="e-0000000b", step="claimed", attempt=1, pid=1))
+        self.raw_append(dict(type="effect", id="e-0000000b", step="claimed", attempt=1, pid=2))
+        self.assertEqual(self.state_of("e-0000000b"), "begun")
+        self.assertIn("legacy conflict: may have been sent twice", self.ok("effect", "show", "e-0000000b").stdout)
+        out = self.ok("resume").stdout
+        self.assertIn("legacy conflict: may have been sent twice", out)
+        self.assertNotIn("quarantined", out)
+        self.assertNotIn("legacy conflict", self.ok("effect", "show", "e-0000000a").stdout)
+        self.ok("effect", "mark", "e-0000000b", "unknown", "--why", "two claims")
 
     def test_reads_and_marks_never_rewrite_the_log_or_delete_runs_and_blobs(self):
         for args in (("resume",), ("list", "effects"), ("effect", "show", "e-0000000a"), ("doctor",), ("status", "done")):
