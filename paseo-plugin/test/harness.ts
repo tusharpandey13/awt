@@ -33,8 +33,8 @@ export interface Rig {
 export function rig(extraEnv: Record<string, string | undefined> = {}, workspaces: Record<string, { name: string; directory: string; projectId: string }> = {}): Rig {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), "awtplug-")));
   const root = join(tmp, "root");
-  const env: Record<string, string | undefined> = { ...process.env, HOME: tmp, AWT_BIN: AWT, AWT_ROOT: root, AWT_TIMEOUT_MS: "20000", GIT_CONFIG_GLOBAL: "/dev/null", ...extraEnv };
-  for (const k of Object.keys(extraEnv)) if (extraEnv[k] === undefined) delete env[k]; // undefined means truly unset
+  const env: Record<string, string | undefined> = { ...process.env, AWT_DIR: undefined, HOME: tmp, AWT_BIN: AWT, AWT_ROOT: root, AWT_TIMEOUT_MS: "60000", GIT_CONFIG_GLOBAL: "/dev/null", ...extraEnv };
+  for (const k of ["AWT_DIR", ...Object.keys(extraEnv)]) if (env[k] === undefined) delete env[k]; // undefined means truly unset
   const hooks = new Map<string, Handler>();
   const logs: string[] = [];
   const sent: { id: string; text: string }[] = [];
