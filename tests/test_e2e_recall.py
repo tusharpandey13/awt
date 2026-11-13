@@ -65,6 +65,11 @@ def git_show(rev_path, dest):
     return dest
 
 
+def top(root, path):
+    """A node path as find and related lines print it from a cwd outside the tree: relative to the tree top."""
+    return os.path.relpath(path, root)
+
+
 class Cli(unittest.TestCase):
     """Temp dir T, a clean environment, and a `run` that applies the universal check U1."""
 
@@ -192,13 +197,13 @@ class ER1(F1Case):
     def test_er1_find_like_across_workspaces(self):
         R, p = self.copy("er1")
         before = tree_hash(R)
-        # 1: agent vantage point, cwd outside the tree: absolute prefixes
+        # 1: agent vantage point, cwd outside the tree: prefixes relative to the tree top
         r1 = self.run_awt("find", "--like", QX, cwd=p.repo, AWT_DIR=p.A1)
         l1 = r1.stdout.splitlines()
         self.assertEqual(len(l1), 3, l1)
-        self.assertEqual(l1[0], self.rule_line(p.LL))
-        self.assertTrue(l1[1].startswith("state @%s: " % p.GW) and "Gateway timeout mapped" in l1[1], l1[1])
-        self.assertTrue(l1[2].startswith("ref @%s: " % p.RB) and "Backoff and jitter notes" in l1[2], l1[2])
+        self.assertEqual(l1[0], self.rule_line(top(R, p.LL)))
+        self.assertTrue(l1[1].startswith("state @%s: " % top(R, p.GW)) and "Gateway timeout mapped" in l1[1], l1[1])
+        self.assertTrue(l1[2].startswith("ref @%s: " % top(R, p.RB)) and "Backoff and jitter notes" in l1[2], l1[2])
         # 2: --dir from another cwd, identical bytes
         self.assertEqual(self.run_awt("find", "--like", QX, dir=p.A1, cwd=p.elsewhere).stdout, r1.stdout)
         # 3: from the root: relative prefixes
@@ -254,13 +259,13 @@ class ER2(F1Case):
         self.run_awt("find", "gateway", "--like", QX, cwd=R, expect=(2,))
         # --limit without --like (Resolution 4)
         self.run_awt("find", "gateway", "--limit", "5", cwd=R, expect=(2,))
-        # scope narrowing, from a cwd outside the tree: absolute prefixes
+        # scope narrowing, from a cwd outside the tree: prefixes relative to the tree top
         down = self.run_awt("find", "--like", QX, "--down", dir=p.RB, cwd=p.elsewhere).stdout.splitlines()
         self.assertEqual(len(down), 1, down)
-        self.assertTrue(down[0].startswith("ref @%s: Backoff and jitter notes" % p.RB), down[0])  # cwd is outside the node
+        self.assertTrue(down[0].startswith("ref: Backoff and jitter notes"), down[0])  # own node: no prefix
         up = self.run_awt("find", "--like", QX, "--up", dir=p.A1, cwd=p.elsewhere).stdout.splitlines()
         self.assertEqual(len(up), 1, up)
-        self.assertTrue(up[0].startswith("ref @%s: Backoff and jitter notes" % p.RB), up[0])
+        self.assertTrue(up[0].startswith("ref @%s: Backoff and jitter notes" % top(R, p.RB)), up[0])
         # ids are kept as words (1-word query)
         self.run_awt("note", "see %s" % D, dir=p.PK)
         out = self.run_awt("find", "--like", D, cwd=R).stdout.splitlines()
@@ -281,9 +286,9 @@ class ER3(F1Case):
         self.assertTrue(m, l[0])
         new1 = m.group(1)
         self.assertEqual(l[1], cut("related: %s @%s [rule]: Retry gateway calls with exponential backoff and full jitter "
-                                   "(why: Fixed backoff synchronised the clients and overloaded the gateway)" % (ids["D_RULE"], p.LL)))
+                                   "(why: Fixed backoff synchronised the clients and overloaded the gateway)" % (ids["D_RULE"], top(R, p.LL))))
         self.assertEqual(l[2], cut("related: %s @%s: Retry with capped exponential backoff (why: Fixed backoff synchronised clients)"
-                                   % (ids["D_NEW"], p.RB)))
+                                   % (ids["D_NEW"], top(R, p.RB))))
         d = self.jlist("decisions", p.A1)
         row = [x for x in d if x["id"] == new1]
         self.assertEqual(len(row), 1)
@@ -298,7 +303,7 @@ class ER3(F1Case):
         l2 = self.run_awt(*DECIDE_ARGS, cwd=p.repo, AWT_DIR=p.A1).stdout.splitlines()
         self.assertEqual(len(l2), 4, l2)
         new2 = l2[0].split()[0]
-        rel = {x.split()[1] for x in l2[1:]}
+        rel = {x.split()[1].rstrip(":") for x in l2[1:]}  # own-node lines have no @ prefix
         self.assertEqual(rel, {new1, ids["D_RULE"], ids["D_NEW"]})
         self.assertNotIn(new2, rel)
 
@@ -311,18 +316,18 @@ class ER4(F1Case):
         self.assertEqual(len(l), 3, l)
         self.assertTrue(re.match(r"^q-[0-9a-f]{8} asked$", l[0]), l[0])
         self.assertEqual(l[1], cut("related: %s @%s: Is the 30 s gateway timeout a hard limit? → Yes, the gateway enforces it"
-                                   % (ids["Q1"], p.GW)))
-        self.assertIn(" @" + p.GW, l[2])
+                                   % (ids["Q1"], top(R, p.GW))))
+        self.assertIn(" @" + top(R, p.GW), l[2])
         self.assertIn("Gateway timeout mapped", l[2])
         q2 = self.first("ask", "Which jitter cap applies to the soak tenants?", dir=p.B1)
         ask2 = ("ask", "What jitter cap applies to soak tenants?")
         l = self.run_awt(*ask2, cwd=p.repo, AWT_DIR=p.A1).stdout.splitlines()
-        self.assertEqual(l[1], cut("related: %s @%s: Which jitter cap applies to the soak tenants?" % (q2, p.B1)))
+        self.assertEqual(l[1], cut("related: %s @%s: Which jitter cap applies to the soak tenants?" % (q2, top(R, p.B1))))
         self.assertNotIn("→", l[1])
         self.run_awt("answer", q2, "Ten seconds", dir=p.B1)
         l = self.run_awt(*ask2, cwd=p.repo, AWT_DIR=p.A1).stdout.splitlines()
         line = [x for x in l if q2 in x][0]
-        self.assertEqual(line, cut("related: %s @%s: Which jitter cap applies to the soak tenants? \u2192 Ten seconds" % (q2, p.B1)))
+        self.assertEqual(line, cut("related: %s @%s: Which jitter cap applies to the soak tenants? \u2192 Ten seconds" % (q2, top(R, p.B1))))
         self.assertIn(" \u2192 Te", line)
 
 
@@ -370,9 +375,8 @@ class ER5(F1Case):
 
 
 class IntArgsNeedFix(F1Case):
-    """FINDING F1 (awt, I3): a non-integer `--limit` / `--related` exits 2 through argparse with `error:` but no `fix:`."""
+    """F1 (I3): a non-integer `--limit` / `--related` exits 2 with `error:` and a `fix:` line."""
 
-    @unittest.expectedFailure
     def test_non_integer_flag_has_fix_line(self):
         R, p = self.copy("fix1")
         for args in (("find", "--like", QX, "--limit", "x"), ASK_ARGS + ("--related", "x")):

@@ -27,6 +27,8 @@ Tiers:
 
 Built once per test class with the worktree `awt`; each journey works on `cp -a $T/f1 $T/<journey>` and sets `R` to that copy. Texts avoid trailing periods (see open question Q1).
 
+In expected output, `@$X` for a cwd outside the tree means `$X` relative to `$R` (for example `@workspaces/ledgerline`), per SPEC `find --like`; the resolved node's own lines have no `@` prefix.
+
 ```
 R=$T/f1; mkdir -p $R $T/repo/parsekit $T/elsewhere; git init -q $T/repo/parsekit
 awt --dir $R init --kind root
@@ -400,7 +402,6 @@ Gaps and partial coverage:
 | E-R21 step 2 | Runs only if `python3.9` is on `PATH` | Add python3.9 to the CI image |
 | E-R1 step 8, E-R4 step 3 | Compared after the 200-char cut because temp paths are long; the "ends with `Ten seconds`" form is not asserted | None needed |
 | U3 (nothing outside `$T` changes) | Not checked directly; each test uses a private HOME and temp dir | A before/after snapshot of a sentinel HOME |
-| I3 for argparse type errors (finding) | `find --limit x` and `<cmd> --related x` exit 2 with `error:` but no `fix:` (generic argparse path, all verbs). Left unchanged | Wrap `ArgumentParser.error` to add a `fix:` line; then drop `expectedFailure` on `IntArgsNeedFix` |
 
 ## 6. Open questions (untestable or ambiguous in the feature spec)
 
