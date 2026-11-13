@@ -127,7 +127,7 @@ class Create(TreeBase):
             self.assertNotIn("Traceback", r.stderr)
         for n in os.listdir(os.path.join(ws, "tasks")):
             self.assertRegex(n, r"^[a-z0-9-]{1,50}$")
-        self.assertEqual(set(os.listdir(ws)) - {"tasks", "context", "docs", "misc", ".awt", ".gitignore"}, set())
+        self.assertEqual(set(os.listdir(ws)) - {"tasks", "context", "docs", "misc", ".awt", ".gitignore", "BRIEF.md"}, set())
         self.refuses("init", "--kind", "task", "--name", "x" * 500, "--goal", "g", "--done", "d", root=ws)
 
     def test_secret_in_name_or_key(self):  # T8

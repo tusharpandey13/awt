@@ -146,8 +146,8 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R2e A corrupt events file in another node does not fail the write.
 - T-R2f A simulated exceeded budget (`AWT_RELATED_MS`): the write stands, the stop line prints.
 - T-R2g The 200-character cut of a `related:` line includes its prefix.
-- T-R3a The task `AGENTS.md` template has the `find --like` line.
-- T-R3b The plugin block is at most 700 characters and names `find --like`.
+- T-R3a `awt help agents` has the `find --like` line; the task `AGENTS.md` template no longer does (it shrank to about 250 chars; `decide` and `ask` print related records anyway).
+- T-R3b The plugin block is at most 260 characters and names `BRIEF.md` and `awt_resume`; `find --like` moved to `help agents`.
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
 
@@ -168,6 +168,27 @@ Fictional `parsekit` transcripts written by hand into a temp `AWT_CLAUDE_PROJECT
 - N11 `save` exits 2 naming `git commit` and `awt doctor --staged`; the parser has `ingest`, no `save`, at most 16 verbs. `init` writes a `SessionEnd` hook running `ingest --source claude --hook`.
 - N12 `doctor`: never-run and stale ingest warn; fresh is ok; store mode, loose file mode, git work tree and sync folder warn; oldest transcript age against `cleanupPeriodDays` (default 30, read from the settings file); doctor never creates the store.
 - N13 `doctor --staged`: clean index ok; a staged secret exits 1 naming file and pattern but not the secret; the staged blob counts, not the working copy; runs from a hook with no `--dir`; outside a repo exits 1 with a `fix:`.
+
+## BRIEF.md and the short prompt (`test_brief.py`; plugin P2, P2b)
+
+| ID | Proves |
+|---|---|
+| B1 | `init` writes `BRIEF.md` equal to `resume` plus the trailing `Generated` line |
+| B2 | Every write verb (`note decide ask state ref status`) regenerates it |
+| B3 | `list`, `find`, `resume` do not touch it (same inode, same text) |
+| B4 | Written by rename: new inode, no temp left in the node or `.awt/` |
+| B5 | Never read back: a forged `BRIEF.md` changes nothing in `resume`; `list` and `list misc` do not show it |
+| B6 | It is not a "file newer than state" |
+| B7 | `BRIEF.md` is in `.gitignore` |
+| B8 | A directory named `BRIEF.md` does not fail the write |
+| B9, B10 | `resume --hook` refreshes it; outside a node it prints and writes nothing |
+| B11 | Agent fixture with no `AGENTS.md`: running the `SessionStart` command from its `settings.json` (as the host would) prints the brief, and `BRIEF.md` matches |
+| B12 | The settings template has `SessionStart` with no `matcher` (runs after compaction) |
+| B13 | The standalone AGENTS block is short, names `BRIEF.md`, `decide`, `ask`, the subagent line, and has no handoff line |
+| B14 to B16 | Tree: every node kind gets a brief at creation; a child write refreshes the parent; a task write refreshes the agents below it |
+| B17 | The tree block names `$AWT_DIR/BRIEF.md` and `$AWT_DIR/out.md` |
+| P2 | The plugin block is at most 260 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `decide`, `ask`; no `state`, no `find --like` |
+| P2b | An agent opened through the plugin has `BRIEF.md` in `AWT_DIR` before any tool call, refreshed by an awt write |
 
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
 
@@ -242,7 +263,7 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by the installed `@getpaseo/plugin` SDK (so `tsc` catches drift, P11; recordings from a real daemon come with tier 2), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
 
 - P1 `workspace.create.after`: workspace node exists with key and refs (working directory, project, workspace) and a `main` task; the project's display name labels the workspace (P13); replay adds nothing.
-- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars, naming `find --like`; no brief text enters the prompt.
+- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 260 chars, naming `$AWT_DIR/BRIEF.md`; no brief text enters the prompt.
 - P3 `agent.open.before` for a workspace with no task: task `main` is created once, even for several simultaneous agents.
 - PJ1 `workspace.create.after` creates the project node from `workspace.projectId` (key `paseo:project/<id>`, refs to the root path and to its own key) and the workspace under it.
 - PJ2 Two workspaces of one project share one project node, also under concurrent and replayed hooks and after a plugin restart.

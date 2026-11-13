@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `BRIEF.md` in every node: the `resume` brief as a plain file, regenerated atomically after `init` and every awt write (to the node, its parent and, for a task, its agents), never read back as state, in the `.gitignore` lines `init` writes. SPEC rule 4 now allows it as a derived file. `resume --hook` refreshes it. See `docs/adr/0007-zero-abstraction-cost.md`.
 - `ingest [--source claude|all] [--hook]`: copies Claude Code transcripts (`~/.claude/projects`, override `AWT_CLAUDE_PROJECTS`) into a canonical raw JSONL store at `${AWT_STORE:-~/.local/share/awt-store}` (mode 700/600). One row per source line with the record verbatim, a `secret_flags` count, and no redaction or size cap. Incremental by (path, inode, offset), idempotent, crash safe and safe under concurrent runs. `--hook` is silent and exits 0. `init` adds it to the `SessionEnd` hook in `.claude/settings.json`. Design: `docs/adr/0003-canonical-raw-jsonl.md`.
 - `doctor` checks the store (mode, sync folder, git work tree), ingest freshness (warns when never run or over 7 days) and the oldest Claude transcript against `cleanupPeriodDays`.
 - `doctor --staged`: secret scan of staged blobs, for a git pre-commit hook.
@@ -20,6 +21,7 @@
 - `effect apply` and the `--run`, `--snapshot`, `--verify`, `--class` and `--timeout` flags (exit 2 with a `fix:` naming plan, begin and mark). `effect` no longer writes `.awt/runs/` or `.awt/blobs/` (`relay` still writes worker logs to `.awt/runs/`). Design: `docs/adr/0002-awt-never-executes.md`.
 
 ### Changed
+- The agent prompt shrinks to about 250 chars in both places: the Paseo plugin block (was about 700) and the `AGENTS.md` template (was about 2 KB): where the brief is (`BRIEF.md`, or `awt_resume`), `decide`, `ask`, "everything else is recorded for you"; the AGENTS template keeps the subagent line. The handoff (`state`) line is gone (ARCHITECTURE-v2 decisions, 15): the plugin's `auto` handoff covers it. `state`, `note`, `ref`, `capture` stay as verbs, listed by `awt help agents`.
 - `migrate-paseo` puts new workspaces under project nodes (`projects/<slug>/workspaces/<name>`), not directly under the root, and its output counts projects created and workspaces moved.
 - Effects are a declared ledger: `effect plan --target T [--body FILE] [--how TEXT] [--after ID]... [--again] [--why T]`, `effect begin ID` (claims it once), `effect mark ID sent [--ref URL] | not-sent --why T | unknown --why T | dropped`, `effect show ID`. awt never executes commands; `--how` is text. A person can `mark sent` straight from `planned`. A `begun` effect never times out and blocks `status done`. `resume` shows `begun` and `unknown` effects.
 - `init` no longer writes the `ask` rule for `effect apply` into `.claude/settings.json`, and the task `AGENTS.md` block no longer carries the outbox/plan/apply paragraph. `doctor` warns, naming the exact lines to remove, when an old settings file still has the rule; it never edits it.
