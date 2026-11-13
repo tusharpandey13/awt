@@ -27,3 +27,23 @@ Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default). Every
 ## Consequences
 
 A second copy of every conversation exists on disk, readable by the account that owns it. Backups and disk cleanup of the store are the owner's job. Rebuilding derived data (`--rebuild`, phase 2) never needs the provider again.
+
+## Rubric (ARCHITECTURE-v2 section 9, 0-2 each)
+
+The author did not score this ADR when it was written. Opus review of the whole phase 1 diff (ADRs 0003 and 0008 together):
+
+| Criterion | Author | Reviewer | Why (reviewer) |
+|---|---|---|---|
+| Necessity | not scored | 2 | |
+| Layer fit | not scored | 2 | |
+| Host-native first | not scored | 2 | |
+| Buy before build | not scored | 1 | |
+| Agent abstraction cost | not scored | 2 | |
+| Agent ergonomics | not scored | 2 | |
+| Human visibility | not scored | 1 | |
+| Failure semantics | not scored | 1 | one bad record or file stopped ingest (fixed: per-file errors, doctor) |
+| Data quality | not scored | 1 | src_ref line numbers were wrong after blank lines (fixed) |
+| Complexity cost | not scored | 1 | |
+| Honest security | not scored | 2 | |
+
+Reviewer total 17 of 22, no zeros. The author's scores and a second independent review are still owed (section 9 steps 2 and 3).

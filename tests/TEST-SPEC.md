@@ -167,7 +167,10 @@ Fictional `parsekit` transcripts written by hand into a temp `AWT_CLAUDE_PROJECT
 - N10 `--hook` prints nothing and exits 0 even when the store cannot be created; without it that is exit 1 with a `fix:`. `--source pi` exits 2. A missing source directory is not an error. Store location follows `AWT_STORE`, `XDG_DATA_HOME`, then `~/.local/share`.
 - N11 `save` exits 2 naming `git commit` and `awt doctor --staged`; the parser has `ingest`, no `save`, at most 16 verbs. `init` writes a `SessionEnd` hook running `ingest --source claude --hook`.
 - N12 `doctor`: never-run and stale ingest warn; fresh is ok; store mode, loose file mode, git work tree and sync folder warn; oldest transcript age against `cleanupPeriodDays` (default 30, read from the settings file); doctor never creates the store.
-- N13 `doctor --staged`: clean index ok; a staged secret exits 1 naming file and pattern but not the secret; the staged blob counts, not the working copy; runs from a hook with no `--dir`; outside a repo exits 1 with a `fix:`.
+- N14 Robustness: a record with a lone surrogate (built at runtime) is stored (escaped, file valid UTF-8) and later files are still ingested; a file whose append fails is recorded under `errors`, the rest ingested, `last_run` saved, doctor warns, and the error clears when the file works again.
+- N15 `src_ref` is the physical line (blank lines counted) while `seq` stays dense. A same-inode in-place rewrite longer than the offset is rescanned (head hash).
+- N16 `CLAUDE_CONFIG_DIR` is the default source and settings dir. Missing parents of the store keep the default mode, the store and its subdirectories are 700, an existing loose store dir is not chmodded. `doctor` reports store size and files; a git-ignored store in a work tree does not warn.
+- N13 `doctor --staged`: clean index ok; a staged secret exits 1 naming file and pattern but not the secret; a type change is scanned and a textconv filter does not hide a secret; the staged blob counts, not the working copy; runs from a hook with no `--dir`; outside a repo exits 1 with a `fix:`.
 
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
 
@@ -231,7 +234,7 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 - MP7 A name taken in the project's `workspaces/` gets a numeric suffix; the existing node is not replaced.
 - MP8 A run that left the project made and one node moved is finished by the next run; keys stay unique; the second run changes nothing.
 - MP9 Archived project: `done`, or `paused` when a workspace below is still active (the report notes it).
-- MP10 Archive is applied on a later run, not only the first.
+- MP10 Archive is applied on a later run, not only the first. A paused (archived) project becomes `done` on the run after its last open work closes, and stays paused until then.
 - MP11 `--dry-run` on a legacy tree writes nothing and prints each move and project.
 - MP12 `--dry-run` without a root names the projects.
 - MP13 Hostile project rows (secret in id, duplicate id, non-object, null id, secret in name and path): no secret in output, report or tree; one node per key.

@@ -11,6 +11,11 @@ SID = "3f0c1a2b-0000-4000-8000-00000000aaaa"
 CWD = "/work/parsekit"
 
 
+def slurp_b(p):
+    with open(p, "rb") as g:
+        return g.read()
+
+
 def rec(kind, i, text=None, **kw):
     r = {"type": kind, "uuid": "u-%d" % i, "parentUuid": "u-%d" % (i - 1) if i else None, "sessionId": SID,
          "timestamp": "2026-10-%02dT09:%02d:00.000Z" % (3 + i // 50, i % 50), "cwd": CWD}
@@ -300,6 +305,105 @@ class TestIngest(Ing):
         self.assertNotIn("save", verbs)
         self.assertLessEqual(len([v for v in verbs if v != "help"]), 16)
 
+    def test_lone_surrogate_is_stored_and_does_not_stop_the_run(self):
+        bad = b'{"type":"user","message":{"role":"user","content":"x \\ud83d y"}}\n'  # built at runtime: a lone surrogate escape
+        self.put([bad, rec("user", 1, "after")])
+        s2 = self.src("3f0c1a2b-0000-4000-8000-00000000bbbb")
+        self.put([rec("user", 0, "other session")], path=s2)
+        self.ingest()
+        raw = slurp_b(self.outpath())
+        raw.decode("utf-8")  # canonical file is valid UTF-8
+        got = self.rows()
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[0]["raw"]["message"]["content"], "x \ud83d y")
+        self.assertEqual(len(self.rows("3f0c1a2b-0000-4000-8000-00000000bbbb")), 1)
+        self.assertEqual(self.ingest().stdout.split()[1], "0")
+
+    def test_one_failing_file_is_recorded_and_the_rest_ingested(self):
+        self.put(self.base_rows())
+        other = "3f0c1a2b-0000-4000-8000-00000000cccc"
+        self.put([rec("user", 0, "ok")], path=self.src(other))
+        self.ingest()
+        self.put([rec("user", 9, "more")], mode="ab")
+        self.put([rec("user", 8, "more")], path=self.src(other), mode="ab")
+        victim = os.path.join(self.store, "log", "claude", "2026-10", SID + ".jsonl")
+        os.chmod(victim, 0o400)  # append fails for this file only
+        try:
+            if os.access(victim, os.W_OK):
+                self.skipTest("running as a user that ignores modes")
+            r = self.ingest()
+        finally:
+            os.chmod(victim, 0o600)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len(self.rows(other)), 2)
+        st = json.loads(slurp(os.path.join(self.store, "ingest", "claude.offsets.json")))
+        self.assertEqual(list(st["errors"]), ["-work-parsekit/%s.jsonl" % SID])
+        self.assertTrue(st["last_run"])
+        self.init()
+        self.assertRegex(self.awt("doctor").stdout, r"warn .*ingest error.*%s" % SID)
+        self.ingest()  # the file works again: error cleared, row appended
+        self.assertEqual(len(self.rows()), 6)
+        self.assertFalse(json.loads(slurp(os.path.join(self.store, "ingest", "claude.offsets.json"))).get("errors"))
+
+    def test_src_ref_counts_physical_lines_and_seq_stays_dense(self):
+        self.put([rec("user", 0, "a"), b"\n", b"\n", rec("user", 1, "b")])
+        self.ingest()
+        self.put([b"\n", rec("user", 2, "c")], mode="ab")
+        self.ingest()
+        got = self.rows()
+        self.assertEqual([g["seq"] for g in got], [0, 1, 2])
+        self.assertEqual([g["src_ref"].rsplit(":", 1)[1] for g in got], ["0", "3", "5"])
+        lines = slurp_b(self.src()).split(b"\n")
+        for g in got:
+            self.assertEqual(json.loads(lines[int(g["src_ref"].rsplit(":", 1)[1])]), g["raw"])
+
+    def test_same_inode_rewrite_longer_than_offset_is_rescanned(self):
+        old = [rec("user", 0, "first version of the text"), rec("user", 1, "second")]
+        self.put(old)
+        self.ingest()
+        new = [rec("user", 0, "REWRITTEN in place, now longer"), rec("user", 1, "second"), rec("user", 2, "third"), rec("user", 3, "fourth" * 40)]
+        ino = os.stat(self.src()).st_ino
+        with open(self.src(), "r+b") as g:  # same inode, longer than the saved offset
+            g.write(b"".join(line(r) for r in new))
+        self.assertEqual(os.stat(self.src()).st_ino, ino)
+        self.ingest()
+        raws = [g["raw"] for g in self.rows()]
+        for r in new:
+            self.assertIn(r, raws)
+        for r in raws:
+            self.assertIn(r, old + new)
+
+    def test_claude_config_dir_is_the_default_source(self):
+        cfg = os.path.join(self.tmp, "cfg")
+        os.makedirs(os.path.join(cfg, "projects", "-work-parsekit"))
+        self.put(self.base_rows(), path=os.path.join(cfg, "projects", "-work-parsekit", SID + ".jsonl"))
+        env = {k: v for k, v in self.env.items() if k not in ("AWT_CLAUDE_PROJECTS", "AWT_CLAUDE_SETTINGS")}
+        env["CLAUDE_CONFIG_DIR"] = cfg
+        self.ok("ingest", "--source", "claude", root="", env=env)
+        self.assertEqual(len(self.rows()), 5)
+        with open(os.path.join(cfg, "settings.json"), "w") as g:
+            json.dump({"cleanupPeriodDays": 3650}, g)
+        old = time.time() - 40 * 86400
+        os.utime(os.path.join(cfg, "projects", "-work-parsekit", SID + ".jsonl"), (old, old))
+        self.init()
+        self.assertRegex(self.awt("doctor", env=env).stdout, r"oldest Claude transcript is 40 days.*3650")
+
+    def test_private_dir_leaves_parents_alone(self):
+        env = dict(self.env, AWT_STORE=os.path.join(self.tmp, "newparent", "deeper", "store"))
+        self.put(self.base_rows())
+        self.ok("ingest", "--source", "claude", root="", env=env)
+        for d in ("newparent", os.path.join("newparent", "deeper")):
+            self.assertNotEqual(stat.S_IMODE(os.stat(os.path.join(self.tmp, d)).st_mode) & 0o077, 0, d)
+        self.assertEqual(stat.S_IMODE(os.stat(env["AWT_STORE"]).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(env["AWT_STORE"], "log", "claude")).st_mode), 0o700)
+
+    def test_existing_loose_store_dir_is_not_chmodded(self):
+        os.makedirs(self.store, mode=0o755)
+        os.chmod(self.store, 0o755)
+        self.put(self.base_rows())
+        self.ingest()
+        self.assertEqual(stat.S_IMODE(os.stat(self.store).st_mode), 0o755)
+
     def test_init_settings_has_session_end_hook(self):
         self.init()
         s = json.loads(slurp(self.p(".claude", "settings.json")))
@@ -364,6 +468,22 @@ class TestDoctorStore(Ing):
         out = self.awt("doctor").stdout
         self.assertRegex(out, r"ok .*oldest Claude transcript is 40 days.*3650")
 
+    def test_store_in_git_work_tree_respects_gitignore(self):
+        repo = os.path.join(self.tmp, "repo")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q", repo], check=True, env=self.env)
+        self.env["AWT_STORE"] = os.path.join(repo, "s")
+        self.init()
+        self.assertRegex(self.awt("doctor").stdout, r"warn .*git work tree")
+        with open(os.path.join(repo, ".gitignore"), "w") as g:
+            g.write("s/\n")
+        self.assertNotRegex(self.awt("doctor").stdout, r"warn .*git work tree")
+
+    def test_doctor_reports_store_size(self):
+        self.put(self.base_rows())
+        self.ingest()
+        self.assertRegex(self.awt("doctor").stdout, r"ok store size [\d.]+ (B|KB|MB|GB) in \d+ files")
+
     def test_doctor_does_not_create_store(self):
         self.doctor()
         self.assertFalse(os.path.exists(self.store))
@@ -395,6 +515,23 @@ class TestDoctorStaged(Base):
         self.write("leak.txt", "k=" + AKIA + "\n")
         self.git("add", "leak.txt")
         self.bad("doctor", "--staged", root="", cwd=self.root)
+
+    def test_staged_type_change_and_no_textconv(self):
+        os.makedirs(self.root, exist_ok=True)
+        self.git("init", "-q")
+        self.write("a.txt", "fine\n")
+        self.git("add", "a.txt")
+        self.git("commit", "-qm", "x")
+        os.remove(os.path.join(self.root, "a.txt"))
+        os.symlink("elsewhere", os.path.join(self.root, "a.txt"))
+        self.git("add", "a.txt")  # typechange (T)
+        self.ok("doctor", "--staged")
+        # a textconv filter must not rewrite what is scanned
+        self.write(".gitattributes", "*.dat diff=hide\n")
+        self.git("config", "diff.hide.textconv", "echo clean #")
+        self.write("k.dat", "k=" + AKIA + "\n")
+        self.git("add", ".gitattributes", "k.dat")
+        self.bad("doctor", "--staged")
 
     def test_not_a_repo(self):
         r = self.bad("doctor", "--staged", root=self.tmp)

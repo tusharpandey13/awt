@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `doctor` reports store size; ingest records per-file errors (`errors` in the offsets file), keeps going and `doctor` surfaces them; lone-surrogate records are stored with `\u` escapes; `src_ref` counts physical lines; a source rewritten in place is detected by a hash of the bytes before the offset; `CLAUDE_CONFIG_DIR` is honoured; the git-work-tree warning respects `.gitignore`; `doctor --staged` includes type changes and ignores textconv; only the store directory (not missing parents) is created mode 700. `migrate-paseo` turns a paused archived project into `done` once its work closes.
 - `ingest [--source claude|all] [--hook]`: copies Claude Code transcripts (`~/.claude/projects`, override `AWT_CLAUDE_PROJECTS`) into a canonical raw JSONL store at `${AWT_STORE:-~/.local/share/awt-store}` (mode 700/600). One row per source line with the record verbatim, a `secret_flags` count, and no redaction or size cap. Incremental by (path, inode, offset), idempotent, crash safe and safe under concurrent runs. `--hook` is silent and exits 0. `init` adds it to the `SessionEnd` hook in `.claude/settings.json`. Design: `docs/adr/0003-canonical-raw-jsonl.md`.
 - `doctor` checks the store (mode, sync folder, git work tree), ingest freshness (warns when never run or over 7 days) and the oldest Claude transcript against `cleanupPeriodDays`.
 - `doctor --staged`: secret scan of staged blobs, for a git pre-commit hook.
