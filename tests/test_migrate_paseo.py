@@ -591,6 +591,24 @@ class ProjectLevel(Base):
         self.ok(home=h)
         self.assertEqual(self.nodes()["projects/docs-site"][2], "done")
 
+    def test_p10b_paused_project_becomes_done_when_work_closes(self):
+        h = tempfile.mkdtemp(dir=self.tmp) + "/h"
+        shutil.copytree(HOME, h)
+        pf = os.path.join(h, "projects", "projects.json")
+        rows = read_json(pf)
+        rows[1]["archivedAt"] = "2026-02-01T00:00:00.000Z"  # docs-site: its workspace is still active
+        write_json(pf, rows)
+        self.ok(home=h)
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "paused")
+        self.ok(home=h)  # nothing changed: still paused
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "paused")
+        wf = os.path.join(h, "projects", "workspaces.json")
+        ws = read_json(wf)
+        ws[2]["archivedAt"] = "2026-02-01T00:00:00.000Z"
+        write_json(wf, ws)
+        self.ok(home=h)
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "done")
+
     def test_p11_dry_run_on_a_legacy_tree_writes_nothing_and_says_what_moves(self):
         self.ok(snap="basic")
         shutil.rmtree(self.root)

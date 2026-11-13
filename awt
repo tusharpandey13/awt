@@ -1926,7 +1926,14 @@ def store_checks(line):
             mode = stat.S_IMODE(os.stat(store).st_mode)
             line("ok" if not mode & 0o077 else "warn", "store mode %o (%s)" % (mode, store) if not mode & 0o077 else
                  "store %s has mode %o, expected 700 (chmod 700 it; it holds full conversation text)" % (store, mode))
+            allf = [os.stat(os.path.join(dp, f)) for dp, _, fns in os.walk(store) for f in fns]
             loose = [os.path.join(dp, f) for dp, _, fns in os.walk(store) for f in fns if os.stat(os.path.join(dp, f)).st_mode & 0o077]
+            size = float(sum(x.st_size for x in allf))
+            for unit in ("B", "KB", "MB", "GB"):
+                if size < 1024 or unit == "GB":
+                    break
+                size /= 1024
+            line("ok", "store size %s %s in %d files (awt never deletes; remove old months by hand)" % (("%d" % size) if unit == "B" else "%.1f" % size, unit, len(allf)))
             if loose:
                 line("warn", "%d store files are readable by others, expected 600 (chmod 600 %s)" % (len(loose), loose[0]))
             top = os.path.realpath(store)
@@ -1940,12 +1947,24 @@ def store_checks(line):
         while d and not os.path.exists(os.path.join(d, ".git")) and d != os.path.dirname(d):
             d = os.path.dirname(d)
         if os.path.exists(os.path.join(d, ".git")):
-            line("warn", "store is inside a git work tree (%s); it holds full conversation text and could be committed" % d)
+            try:
+                target = os.path.join(top if os.path.isdir(store) else os.path.join(top, os.path.basename(store)), "")  # trailing slash: a directory, also before it exists
+                ign = subprocess.run(["git", "-C", d, "check-ignore", "-q", target], capture_output=True).returncode == 0
+            except OSError:
+                ign = False
+            if not ign:
+                line("warn", "store is inside a git work tree (%s) and not git-ignored; it holds full conversation text and could be committed" % d)
         try:
             with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
-                last = json.load(g).get("last_run")
+                st = json.load(g)
+            last, errs = st.get("last_run"), st.get("errors")
+            errs = errs if isinstance(errs, dict) else {}
         except (OSError, ValueError, AttributeError):
-            last = None
+            last, errs = None, {}
+        for k in sorted(errs)[:5]:
+            line("warn", "ingest error for %s: %s (fix it, then awt ingest --source claude)" % (k, errs[k]))
+        if len(errs) > 5:
+            line("warn", "%d more ingest errors in %s" % (len(errs) - 5, os.path.join(store, "ingest", "claude.offsets.json")))
         age = (time.time() - epoch(last)) / 86400 if last else None
         if last is None:
             line("warn", "claude ingest has never run (awt ingest --source claude; init's SessionEnd hook runs it)")
@@ -1955,7 +1974,7 @@ def store_checks(line):
             line("ok", "claude ingest ran %s" % ago(last))
         keep = 30
         try:
-            with open(os.environ.get("AWT_CLAUDE_SETTINGS") or os.path.expanduser("~/.claude/settings.json"), encoding="utf-8") as g:
+            with open(os.environ.get("AWT_CLAUDE_SETTINGS") or os.path.join(claude_home(), "settings.json"), encoding="utf-8") as g:
                 v = json.load(g).get("cleanupPeriodDays")
             if isinstance(v, int) and not isinstance(v, bool) and v > 0:
                 keep = v
@@ -1984,8 +2003,8 @@ def doctor_staged(a):
     if g("rev-parse", "--show-toplevel").returncode:
         die("not a git repo: " + d, "run awt doctor --staged inside a git work tree")
     held = []
-    for f in [x.decode("utf-8", "replace") for x in g("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z").stdout.split(b"\0") if x]:
-        r = g("show", ":" + f)
+    for f in [x.decode("utf-8", "replace") for x in g("diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z").stdout.split(b"\0") if x]:
+        r = g("cat-file", "blob", ":" + f)
         b = r.stdout
         if r.returncode or len(b) > K["big"] or b"\0" in b:
             continue
@@ -2098,15 +2117,24 @@ def store_dir():
     return os.environ.get("AWT_STORE") or os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "awt-store")
 
 
+def claude_home():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+
 def claude_dir():
-    return os.environ.get("AWT_CLAUDE_PROJECTS") or os.path.expanduser("~/.claude/projects")
+    return os.environ.get("AWT_CLAUDE_PROJECTS") or os.path.join(claude_home(), "projects")
 
 
-def private_dir(path):
-    """Create path and any missing parents, each mode 700."""
+def private_dir(path, top=None):
+    """Create path mode 700 and the missing directories between top (the store, default path) and it.
+    Missing parents of top get the default mode; an existing directory is never chmodded (doctor warns instead)."""
+    top = top or path
     if os.path.isdir(path):
         return
-    private_dir(os.path.dirname(path))
+    if path == top:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    else:
+        private_dir(os.path.dirname(path), top)
     try:
         os.mkdir(path, 0o700)
     except FileExistsError:
@@ -2182,10 +2210,11 @@ def first_month(path, rows):
 
 
 def ingest_claude(store):
-    """Append new source lines as canonical rows. Returns (rows written, files seen)."""
+    """Append new source lines as canonical rows. Returns (rows written, files seen, files that failed).
+    A file that fails is recorded under `errors` in the offsets file and the rest are still ingested."""
     root = claude_dir()
-    private_dir(os.path.join(store, "ingest"))
-    private_dir(os.path.join(store, "log", "claude"))
+    private_dir(os.path.join(store, "ingest"), store)
+    private_dir(os.path.join(store, "log", "claude"), store)
     lock = os.open(os.path.join(store, "ingest", "claude.lock"), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -2194,8 +2223,10 @@ def ingest_claude(store):
             with open(offp, encoding="utf-8") as g:
                 state = json.load(g)
             files = state["files"]
-        except (OSError, ValueError, KeyError, TypeError):
-            files = {}
+            errors = state.get("errors")
+            errors = errors if isinstance(errors, dict) else {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            files, errors = {}, {}
         used = {v.get("out") for v in files.values()}
         total, seen = 0, 0
         for path, rel_, name in claude_sessions(root) if os.path.isdir(root) else ():
@@ -2203,26 +2234,49 @@ def ingest_claude(store):
             try:
                 st = os.stat(path)
                 e = files.get(rel_)
-                reset = e is not None and (e["inode"] != st.st_ino or st.st_size < e["offset"])
+                reset = e is not None and (e["inode"] != st.st_ino or st.st_size < e["offset"] or not head_ok(path, e))
                 e = dict(e or dict(inode=st.st_ino, offset=0, seq=0, out=None, month=None))
                 if reset:
-                    e.update(inode=st.st_ino, offset=0)
+                    e.update(inode=st.st_ino, offset=0, head=None)
                 if e["offset"] == st.st_size and not reset:
+                    errors.pop(rel_, None)
                     continue
                 n, e2 = ingest_one(store, path, rel_, name, e, reset, used)
                 total += n
-                if e2 != files.get(rel_):
+                if e2 != files.get(rel_) or rel_ in errors:
                     files[rel_] = e2
-                    save_offsets(offp, files)
+                    errors.pop(rel_, None)
+                    save_offsets(offp, files, errors)
             except FileNotFoundError:
                 continue
-        save_offsets(offp, files, now())
-        return total, seen
+            except Exception as x:
+                errors[rel_] = "%s: %s" % (type(x).__name__, str(x)[:200])
+        save_offsets(offp, files, errors, now())
+        return total, seen, len(errors)
     finally:
         os.close(lock)
 
 
-def save_offsets(offp, files, last=None):
+HEAD = 64
+
+
+def head_of(path, offset):
+    """Short hash of the (up to) 64 source bytes just before offset: tells a rewrite in place from an append."""
+    with open(path, "rb") as g:
+        g.seek(max(0, offset - HEAD))
+        return sha(g.read(min(HEAD, offset)))[:16]
+
+
+def head_ok(path, e):
+    if not e.get("head") or not e["offset"]:
+        return True  # nothing to compare (entry from before the check, or nothing read yet)
+    try:
+        return head_of(path, e["offset"]) == e["head"]
+    except OSError:
+        return True
+
+
+def save_offsets(offp, files, errors, last=None):
     prev = None
     if last is None:
         try:
@@ -2233,12 +2287,21 @@ def save_offsets(offp, files, last=None):
     tmp = "%s.%d.tmp" % (offp, os.getpid())
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as g:
-        json.dump(dict(adapter=ADAPTER, last_run=last or prev, files=files), g)
+        json.dump(dict(adapter=ADAPTER, last_run=last or prev, files=files, errors=errors), g)
     os.rename(tmp, offp)
 
 
+def row_bytes(row):
+    """One canonical line. UTF-8 as is; a record with a lone surrogate (not encodable) is written with \\u escapes
+    instead, so the file stays valid UTF-8 and valid JSON and the parsed raw is unchanged."""
+    try:
+        return json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+    except UnicodeEncodeError:
+        return json.dumps(row, ensure_ascii=True, separators=(",", ":")).encode() + b"\n"
+
+
 def ingest_one(store, path, rel_, name, e, reset, used):
-    batch, pos = [], e["offset"]
+    batch, pos, lineno = [], e["offset"], 0 if reset else e.get("lines", 0)
     try:
         with open(path, "rb") as g:
             g.seek(pos)
@@ -2252,15 +2315,17 @@ def ingest_one(store, path, rel_, name, e, reset, used):
                     if not ok:
                         break  # a record still being written: wait for it
                 pos += len(raw)
+                lineno += 1
                 if txt:
                     try:
-                        batch.append(json.loads(txt))
+                        batch.append((lineno - 1, json.loads(txt)))
                     except ValueError:
-                        batch.append({"_unparsed": txt})
+                        batch.append((lineno - 1, {"_unparsed": txt}))
+            e["head"] = head_of(path, pos) if pos else None
     except OSError:
         return 0, e  # the source vanished or is unreadable; the store is untouched
     if e["out"] is None:
-        month = first_month(path, batch)
+        month = first_month(path, [r for _, r in batch])
         out = name
         if out + ".jsonl" in {os.path.basename(u or "") for u in used}:
             out = "%s~%s" % (name, sha(rel_.encode())[:8])
@@ -2277,29 +2342,27 @@ def ingest_one(store, path, rel_, name, e, reset, used):
                     skip[h] = skip.get(h, 0) + 1
                 except Exception:
                     pass
-    rows, seq, ordinal = [], last + 1 if reset else e["seq"], 0 if reset else e.get("lines", 0)
+    rows, seq = [], last + 1 if reset else e["seq"]
     ts = now()
-    for r in batch:
-        ordinal += 1
+    for ref, r in batch:
         if reset and skip.get(canon(r)):
             skip[canon(r)] -= 1
             continue
         if seq <= last:
             seq += 1  # written by a run that died before saving its offset
             continue
-        rows.append(json.dumps(dict(v=1, src="claude", adapter=ADAPTER, session=name, seq=seq, ingested=ts,
-                                    src_ref="%s:%d" % (rel_, ordinal - 1), secret_flags=secret_flags(r), raw=r),
-                               ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
+        rows.append(row_bytes(dict(v=1, src="claude", adapter=ADAPTER, session=name, seq=seq, ingested=ts,
+                                   src_ref="%s:%d" % (rel_, ref), secret_flags=secret_flags(r), raw=r)))
         seq += 1
     if rows:
-        private_dir(os.path.dirname(outp))
+        private_dir(os.path.dirname(outp), store)
         fd = os.open(outp, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             for b in rows:
                 os.write(fd, b)  # one append per row
         finally:
             os.close(fd)
-    e.update(offset=pos, seq=seq, lines=ordinal)
+    e.update(offset=pos, seq=seq, lines=lineno)
     return len(rows), e
 
 
@@ -2307,7 +2370,7 @@ def cmd_ingest(a):
     try:
         store = store_dir()
         private_dir(store)
-        n, f = (None, None) if a.rebuild else ingest_claude(store)
+        n, f, bad = (None, None, 0) if a.rebuild else ingest_claude(store)
         private_dir(os.path.join(store, "ingest"))
         built = sync_store(store, find_root(a.dir), a.rebuild)
     except BaseException as x:
@@ -2320,7 +2383,7 @@ def cmd_ingest(a):
         die("ingest failed: %s: %s" % (type(x).__name__, x), "check that %s is writable (AWT_STORE overrides it) and run: awt ingest --source claude" % store_dir())
     if not a.hook:
         if n is not None:
-            out("ingested %d rows from %d claude files into %s" % (n, f, store))
+            out("ingested %d rows from %d claude files into %s%s" % (n, f, store, "; %d files failed (awt doctor shows which)" % bad if bad else ""))
         if built:
             out("%s store.db: %d sessions, %d messages, %d records" % ("rebuilt" if a.rebuild else "updated", built["sessions"], built["messages"], built["records"]))
 

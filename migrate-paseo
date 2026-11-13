@@ -293,14 +293,15 @@ def node_status(node):
 
 
 def archive(node, report, label, paused=False):
-    """Paseo archived it: move an active node to done (a project with open work below goes to paused instead).
+    """Paseo archived it: move an active node to done (a project with open work below goes to paused instead; a paused project is retried, as the plugin does).
     awt owns the status after import, so nothing else is ever set."""
-    if node_status(node) != "active":
-        return
+    cur = node_status(node)
+    if cur != "active" and not (paused and cur == "paused"):
+        return  # a paused project is retried: its last open work may have closed since
     r = awt(node, "status", "done", check=False)
     if r.returncode:
         why = r.stderr.strip().splitlines()[0][:120] if r.stderr.strip() else "refused"
-        if paused and awt(node, "status", "paused", check=False).returncode == 0:
+        if paused and (cur == "paused" or awt(node, "status", "paused", check=False).returncode == 0):
             report["notes"].append("%s is paused, not done: %s" % (label, why))
         else:
             report["notes"].append("%s could not be marked done: %s" % (label, why))
