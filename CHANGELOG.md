@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- `ingest [--source claude|all] [--hook]`: copies Claude Code transcripts (`~/.claude/projects`, override `AWT_CLAUDE_PROJECTS`) into a canonical raw JSONL store at `${AWT_STORE:-~/.local/share/awt-store}` (mode 700/600). One row per source line with the record verbatim, a `secret_flags` count, and no redaction or size cap. Incremental by (path, inode, offset), idempotent, crash safe and safe under concurrent runs. `--hook` is silent and exits 0. `init` adds it to the `SessionEnd` hook in `.claude/settings.json`. Design: `docs/adr/0003-canonical-raw-jsonl.md`.
+- `doctor` checks the store (mode, sync folder, git work tree), ingest freshness (warns when never run or over 7 days) and the oldest Claude transcript against `cleanupPeriodDays`.
+- `doctor --staged`: secret scan of staged blobs, for a git pre-commit hook.
 - `find --like TEXT [--limit N]`: ranked related decisions, answers, notes, refs and states from every workspace in the tree.
 - `decide` and `ask` print up to 3 `related:` records after the id line. `--related N` or `AWT_RELATED` sets the number; 0 turns it off. The lookup never fails the write and stops after 2 s.
 - `list --since ISO8601 [--down] --json`: rows written since a time, for the Paseo plugin.
@@ -10,6 +13,7 @@
 - The task `AGENTS.md` template points at `find --like`.
 
 ### Removed
+- `save`: use `git commit`. Its secret check is now `awt doctor --staged` (for `.git/hooks/pre-commit`). `awt save` exits 2 with a `fix:`. The verb count stays 16 (decision #2 of ARCHITECTURE-v2-DECISIONS).
 - `effect apply` and the `--run`, `--snapshot`, `--verify`, `--class` and `--timeout` flags (exit 2 with a `fix:` naming plan, begin and mark). `effect` no longer writes `.awt/runs/` or `.awt/blobs/` (`relay` still writes worker logs to `.awt/runs/`). Design: `docs/adr/0002-awt-never-executes.md`.
 
 ### Changed

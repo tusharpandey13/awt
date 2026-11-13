@@ -139,6 +139,24 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
 
+## Ingest (`test_ingest.py`; chaos `ingest-*`, `save-removed-and-staged-scan`)
+
+Fictional `parsekit` transcripts written by hand into a temp `AWT_CLAUDE_PROJECTS`; `AWT_STORE` and `AWT_CLAUDE_SETTINGS` point into the temp dir. Token-shaped strings are built at runtime.
+
+- N1 Round trip: every source line becomes one row; `raw` equals the parsed line; `v`, `src`, `adapter`, `session`, contiguous `seq`, `src_ref`, month directory.
+- N2 Modes: store dirs 700 and files 600, also under `umask 000`.
+- N3 Idempotent: a rerun writes no rows and leaves every canonical file byte- and mtime-identical. Appended source lines add only the new rows.
+- N4 Secrets: matches are counted in `secret_flags` and the text is unchanged; a 600 KB string is stored whole.
+- N5 Read-only: the transcript's hash, mtime and inode are unchanged; no file appears beside it.
+- N6 Torn source tail (partial last line) waits for its newline. Torn canonical tail is healed. Offsets file lost after rows were appended: no duplicates.
+- N7 Truncated source: nothing duplicated and later rows continue the `seq`. Rotated source (new inode) with the same content writes nothing; with new content appends.
+- N8 Subagent transcripts and several sessions land in separate files. A non-JSON line is kept as `_unparsed`.
+- N9 Concurrent ingests (8 processes, growing source, SIGKILLed runs): seqs are exactly 0..n-1.
+- N10 `--hook` prints nothing and exits 0 even when the store cannot be created; without it that is exit 1 with a `fix:`. `--source pi` exits 2. A missing source directory is not an error. Store location follows `AWT_STORE`, `XDG_DATA_HOME`, then `~/.local/share`.
+- N11 `save` exits 2 naming `git commit` and `awt doctor --staged`; the parser has `ingest`, no `save`, at most 16 verbs. `init` writes a `SessionEnd` hook running `ingest --source claude --hook`.
+- N12 `doctor`: never-run and stale ingest warn; fresh is ok; store mode, loose file mode, git work tree and sync folder warn; oldest transcript age against `cleanupPeriodDays` (default 30, read from the settings file); doctor never creates the store.
+- N13 `doctor --staged`: clean index ok; a staged secret exits 1 naming file and pattern but not the secret; the staged blob counts, not the working copy; runs from a hook with no `--dir`; outside a repo exits 1 with a `fix:`.
+
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
 
 Same style as today: seeded, one line per attack, a failure prints the seed and the commands. Quick mode picks small counts of each.
