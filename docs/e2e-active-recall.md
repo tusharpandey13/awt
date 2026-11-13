@@ -265,6 +265,17 @@ Limit: an ACP agent keeps its own history, so this proves Paseo does not forward
 
 Pre: the Paseo app connected to the D0 daemon only (never the user's daemon), agents from E-R10/E-R11. Expected muted lines, exactly: `awt · 1 decision <id> · 1 note · handoff` (E-R10 turn 1, see Q5), `awt · handoff [auto]` (E-R11 turn 1), `awt · nothing stored this turn` (E-R11 turn 2); a receipt with `version: 2` injected through the client API shows no line and no error (P20 live). Evidence: one screenshot per line stored in the test run dir. Manual until Paseo offers a headless render hook (Q13).
 
+## Daemon gaps
+
+Daemon-tier journeys not fully covered by `paseo-plugin/test/daemon-recall.test.ts` (E-R9 to E-R15 and E-R22 pass there; run with `npm run test:daemon`).
+
+| Journey | Why not covered | What would cover it |
+|---|---|---|
+| E-R16 (receipt rendering) | Needs the Paseo app attached to the temp daemon and screenshots; Paseo has no headless render hook (Q13). The test is a named skip. | A headless render hook in Paseo, or a manual run on the D0 daemon only. |
+| E-R9 step 4 (prompt block) | Covered through `paseo inspect`-style agent snapshot metadata (`persistence.metadata.systemPrompt`) read via `@getpaseo/client`, not `$T/wire.jsonl`: ACP does not forward the system prompt, so the wire is asserted to carry no `[awt]`. | Nothing further for ACP; a Claude-provider run is E-R17. |
+| E-R15 step 2 | The test restarts with `paseo daemon stop` then `start` (same env) rather than `daemon restart`; the resumed turn is asserted to reach the provider, not that `session/load` specifically was used. | Assert `session/load` in the wire once the fake agent supports it. |
+| E-R15 (receipts of agents opened before a plugin restart) | Receipt caches live in the plugin process, so receipts for agents opened before a daemon restart are lost; the test uses a fresh agent. | A spec decision on whether receipts survive a restart. |
+
 ## 3. Agentic journeys (tier agentic-paid)
 
 **Need owner approval before any run, including pilots.** Harness: `tests/agentic/run.py` (cold `claude -p`, `MODEL = claude-haiku-5-5`, sandboxed settings, ≤ 25 turns, 300 s, judged by scripts) with these additions: a tree setup (F1 minus the `metronome`/quillwort rows), a per-arm `cwd`/env/`--append-system-prompt`, and an `awt` shim first on `PATH` that appends its argv as one JSON line to `$T/argv.jsonl` (outside every node) and execs `$AWT`. Cost is recorded per session from `total_cost_usd`.
