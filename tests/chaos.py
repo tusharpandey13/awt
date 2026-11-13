@@ -1664,7 +1664,7 @@ def a_tree_hostile_names(c):
             c.fail("bad directory name %r" % os.path.basename(n))
     if left:
         c.fail("leftover .new dirs after clean runs: %d" % len(left))
-    extra = set(os.listdir(w)) - {"tasks", "context", "docs", "misc", ".awt", ".gitignore"}
+    extra = set(os.listdir(w)) - {"tasks", "context", "docs", "misc", ".awt", ".gitignore", "BRIEF.md"}
     if extra:
         c.fail("something escaped into the workspace dir: %s" % sorted(extra)[:5])
     tree_audit(c, top)
@@ -1959,6 +1959,8 @@ def mig_hash(root):
             p = os.path.join(dp, n)
             if os.path.relpath(p, root) == os.path.join("legacy", "paseo-migration.md"):
                 continue  # created vs already-present counts differ between a clean run and a resumed one
+            if n == "BRIEF.md":
+                continue  # derived, and carries its own generation time
             data = open(p, "rb").read()
             if n == "events.jsonl":
                 data = re.sub(rb'"ts":"[^"]*"', b'"ts":""', data)

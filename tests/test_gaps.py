@@ -115,6 +115,8 @@ class PreTreeBrief(Base):
             f.write(g.stdout)
 
         def run(script, *a):
+            if script == old and os.path.exists(self.p("BRIEF.md")):
+                os.unlink(self.p("BRIEF.md"))  # the old awt knows no BRIEF.md and would count it as a changed file
             r = subprocess.run([sys.executable, "-I", script, "--dir", self.root] + list(a), capture_output=True, text=True, env=self.env, cwd=self.tmp)
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout

@@ -11,7 +11,7 @@ One directory per task. It holds context from unconnected informal sources (Slac
 1. Agents are hurried, not hostile. Protect against accidents and shortcuts.
 2. One write path, validated before commit. A bad write is refused with a `fix:` line.
 3. Record only what no machine can know. Activity comes from the filesystem and git.
-4. Views are computed at read time, never written.
+4. Views are computed at read time, never written. One exception: `BRIEF.md`, a derived copy of the `resume` brief that is regenerated after every awt write and never read back as state (see "BRIEF.md"). Delete it and nothing is lost.
 5. Only kernel-managed primitives: `O_APPEND`, `O_EXCL`, `rename`, and `flock` where a plan must check then write, since the kernel releases it when a process dies. No lock files, no allocators, no caches.
 6. Forgetting must be harmless: a missing record degrades visibly.
 7. No hook, settings file or git repo is required. They are conveniences.
@@ -29,7 +29,8 @@ One directory per task. It holds context from unconnected informal sources (Slac
 ```
 AGENTS.md              contract (template below); existing file gets the marked block appended
 README.md              only if absent; short human guide (template below)
-.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/runs/
+.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/runs/ BRIEF.md
+BRIEF.md               derived brief, written after every awt write (see "BRIEF.md")
 .claude/settings.json  only if absent (template below); if present, print the snippet instead
 context/ docs/ outbox/ misc/ scratch/
 .awt/events.jsonl      the only state
@@ -117,6 +118,16 @@ Sections in this order, each with a budget in one constants table. Total at most
 | 7 | One inventory line (counts of refs, no-access refs, context, docs, outbox, misc), quarantine count if nonzero, the pointer `./awt list`, `./awt find <term>` | 200 |
 
 Add one last line when the newest state is missing: `No handoff yet. Before stopping: ./awt state --now "..." --next "..."`.
+
+## BRIEF.md
+
+Every node has `BRIEF.md`: the `resume` brief for that node, plus one last line `Generated <time>; ages above are as of then.` (relative ages go stale in a file). It exists so an agent needs only `cat`, whatever the host: it is a plain file, so it works when the Paseo `awt_resume` tool is not delivered or the Claude Code hook does not load.
+
+- **Written:** after `init` (any kind), and after every verb that writes to a node: `state note decide ask answer ref capture supersede status` and `effect plan|begin|mark`. It is written for the node written to, for its parent (the Children section shows the child's state), and, when that node is a task, for every agent below it, when there are at most 20 (their Task section shows the task's state; with more, they refresh at their own next write or session start). `resume --hook` also refreshes the node's own file (not when `AWT_NO_BRIEF` is set, which `doctor` sets for its hook check: a check writes nothing). Other changes (a file dropped in `docs/`, a git commit, an ancestor above the parent) show up at the next write to that node or the next session start.
+- **Atomic:** the text goes to `.awt/BRIEF.<pid>.tmp`, then `rename` onto `BRIEF.md`. A reader sees the old or the new file, never half.
+- **Derived, never state (rule 4):** nothing reads it back, `resume` and every listing ignore it, and it does not count as a change since the newest state. A failure to write it (read-only directory, a directory named `BRIEF.md`) is silent and never fails the verb. Reading verbs other than the hook do not write it.
+- **Git:** `BRIEF.md` is in the `.gitignore` lines `init` writes. It changes on every write, differs per checkout and is rebuilt from `.awt/events.jsonl`, which is what gets committed.
+- **Not covered here:** ingest and plugin-side effects are phase 2 store work and phase 3; a brief regenerated on ingest comes with them.
 
 ## Listing
 
@@ -210,26 +221,11 @@ The block is wrapped in `<!-- awt:begin -->` and `<!-- awt:end -->`. On re-init,
 ```markdown
 # Task workspace (awt)
 
-Everything about this task lives here. Keep records with `./awt`. Never hand-edit `.awt/`.
-
-**Start:** unless you are a subagent with its own brief, run `./awt resume` and follow it.
-**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel workstreams: add `--scope <name>`.
-
-| You have | Do |
-|---|---|
-| A link to something readable later (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Prefer this to copying. |
-| A link you cannot open | Still record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
-| Text with no usable link (pasted chat, meeting notes, research) | `./awt capture --from slack --title "..." [file]` |
-| A plan, ADR, result or other working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
-| A decision | `./awt decide "the choice" --why "the reason"`. Reversing one: add `--supersedes <id>` |
-| A small fact worth keeping | `./awt note "..."` |
-| A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
-| Anything else | `misc/`. Throwaway work: `scratch/`. |
-
-**Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace in the tree. Check before deciding or asking; `decide` and `ask` also list related records, so read them.
-**Stuck or refused:** read the `fix:` line, then `./awt help agents`.
-**Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+**Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
 ```
+
+About 250 characters of prompt plus the subagent line. There is no handoff line (ARCHITECTURE-v2-DECISIONS 15): the plugin writes an `auto` state after a turn with none, and `state` stays an optional verb that `awt help agents` still documents. The tree form (`awt` for `./awt`) opens with "Your node is `$AWT_DIR` if set, else this directory.", names `$AWT_DIR/BRIEF.md`, and sends a subagent's result to `$AWT_DIR/out.md`.
 
 ### README.md (task dir)
 
@@ -257,6 +253,8 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
   }
 }
 ```
+
+`SessionStart` has no `matcher`, so it also runs after startup, resume, clear and compaction, and its stdout is the brief (delivered whether or not the agent ever saw an awt prompt). Where the host does not load the hook (Claude Code under Paseo does not load a node's settings), `BRIEF.md` is the fallback.
 
 Do not add an `Edit` deny rule for `.awt/`: Claude Code merges those into the OS sandbox, which then stops `awt` writing its own log. A chaos run confirmed this. Hand edits are handled by quarantine.
 
@@ -315,7 +313,7 @@ Layout by kind:
 | `task` | The `init` layout above, with `AGENTS.md` in tree form, the `.claude/settings.json` hook running `awt resume --hook`, and no `README.md` |
 | `agent` | `.awt/`, `scratch/`, `out.md` created on first write |
 
-`.gitignore` lines for `scratch/` and `.awt/claims|runs/` are written at every node.
+`.gitignore` lines for `scratch/`, `.awt/claims|runs/` and `BRIEF.md` are written at every node, and every node gets a `BRIEF.md` when created.
 
 ### Resolution
 
@@ -387,7 +385,7 @@ Hooks:
 | Hook | Action |
 |---|---|
 | `workspace.create.after` | Ensure the project node from `workspace.projectId` (name and root path from `projects.json` when it has the row, else from `projects.list`), the workspace node under it (refs: working directory, project, workspace) and its `main` task. If the project node cannot be made, the workspace goes directly under the root and the hook logs it |
-| `agent.create.before` | Append the static awt block (one paragraph, at most 700 chars; it names `awt find --like` and says to call `awt_resume` again after compaction) to `systemPrompt`, once, and only when `awt` is working (the root node could be ensured). Otherwise the request is unchanged. Nothing else changes |
+| `agent.create.before` | Append the static awt block (about 250 chars, at most 260: the brief is `$AWT_DIR/BRIEF.md` or the `awt_resume` tool, `awt decide` and `awt ask`, "Everything else is recorded for you"; no handoff line, no other verb) to `systemPrompt`, once, and only when `awt` is working (the root node could be ensured). Otherwise the request is unchanged. Nothing else changes |
 | `agent.open.before` | Only for `purpose: interactive`. Ensure the agent's node. Add `AWT_DIR` (the node), `AWT_BY` (the agent id) and, when the daemon has it set, `AWT_RELATED` to `env`, and the `awt_resume` tool. Runs on every open, so resumed agents get the same node |
 | `agent.create.after` | Ensure the node (covers an order where it runs before open). When the parent is known (see above) and the node is not under the parent's, record the parent as above |
 | `agent.turn.before` / `agent.turn.after` | By default the plugin sends no prompt into a conversation; the handoff is asked for by the static prompt block and the `awt_resume` brief. After a completed turn of a non-subagent with an `AWT_DIR` (from `agent.open.before` in this process, or, after a plugin reload, an agent whose `paseo:agent/<id>` node already exists, which is then remembered; an agent with no node is skipped) and no `main` `state` row newer than the turn's start, it records the agent's last assistant message (from the timeline, cut to 240 chars, prefixed `[auto] `) as `state --scope auto`. A scope of its own means it never replaces a handoff the agent wrote, `resume` shows it beside one, and awt's refusal of an unchanged state keeps repeated replies from adding rows; `AWT_AUTO_HANDOFF=0` turns this off. With `AWT_NUDGE=1` the plugin instead sends the follow-up below. Nudge rule: at most one follow-up asking for `awt state` per agent per stretch, where a stretch ends when the agent records a `state` row. After a completed turn of a non-subagent that got an `AWT_DIR` from `agent.open.before` in this process, with no `state` row newer than the turn's start, send the follow-up unless one was sent since the agent last recorded state. Agents without `AWT_DIR` are never nudged |

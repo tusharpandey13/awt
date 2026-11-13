@@ -1,5 +1,5 @@
 /** Added once to every new agent's system prompt. Static, so it caches. */
-export const AWT_BLOCK = `[awt] Your work record is the awt node at $AWT_DIR. First call the awt_resume tool (or run \`awt resume\`); unless another agent started you, call it again after your context is compacted. Record with \`awt note|decide|ask|ref\`, and before you stop run \`awt state --now "..." --next "..."\`. Before a decision or question, \`awt find --like "topic"\` shows related records from every workspace; \`decide\` and \`ask\` list them too. Never edit .awt/. If another agent started you, skip the resume and write your result to $AWT_DIR/out.md.`;
+export const AWT_BLOCK = `[awt] Your task brief is $AWT_DIR/BRIEF.md (or the awt_resume tool). Record a choice with \`awt decide "..." --why "..."\` and a question for a person with \`awt ask "..."\`. Everything else is recorded for you. Never edit .awt/.`;
 
 export const NUDGE =
   'Before you stop, record where things stand: awt state --now "where things stand" --next "the next concrete step". Then finish.';

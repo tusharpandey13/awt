@@ -270,15 +270,16 @@ class RelatedOnWrite(RecallBase):
 class Pointers(RecallBase):
     def test_template_has_the_like_line(self):  # T-R3a
         self.init()
-        self.assertIn('find --like "a sentence"', test_awt.slurp(self.p("AGENTS.md")))
-        root = self.make_root()
-        self.assertIn('awt find --like "a sentence"', test_awt.slurp(os.path.join(root, "AGENTS.md")))
+        # the template shrank to about 250 chars (v2 phase 2); the like line lives in `help agents`
+        self.assertIn('find --like "a sentence"', self.ok("help", "agents", root="").stdout)
+        self.assertNotIn("find --like", test_awt.slurp(self.p("AGENTS.md")))
 
-    def test_plugin_block_is_short_and_points_at_like(self):  # T-R3b
+    def test_plugin_block_is_short_and_points_at_the_brief(self):  # T-R3b
         src = test_awt.slurp(os.path.join(REPO, "paseo-plugin", "server", "prompt.ts"))
         block = re.search(r"AWT_BLOCK = `(.*?)`;", src, re.S).group(1).replace("\\`", "`")
-        self.assertLessEqual(len(block), 700, len(block))
-        self.assertIn("find --like", block)
+        self.assertLessEqual(len(block), 260, len(block))
+        self.assertNotIn("find --like", block)
+        self.assertIn("BRIEF.md", block)
         self.assertIn("awt_resume", block)
 
     def test_session_start_hook_covers_compaction(self):  # T-R5a

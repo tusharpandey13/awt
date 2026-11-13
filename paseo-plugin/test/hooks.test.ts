@@ -34,13 +34,27 @@ test("P2 agent.create.before appends the static block once and touches nothing e
   const config = { provider: "claude", cwd: "/x", systemPrompt: "be kind", model: "m" };
   const out = await r.call("agent.create.before", { request: { config, env: { A: "1" } } });
   assert.equal(out.config.systemPrompt, "be kind\n\n" + AWT_BLOCK);
-  assert.ok(AWT_BLOCK.length <= 700, String(AWT_BLOCK.length));
-  assert.match(AWT_BLOCK, /find --like/);
+  assert.ok(AWT_BLOCK.length <= 260, String(AWT_BLOCK.length));
+  assert.match(AWT_BLOCK, /\$AWT_DIR\/BRIEF\.md/);
+  assert.match(AWT_BLOCK, /awt_resume/);
+  assert.match(AWT_BLOCK, /awt decide/);
+  assert.match(AWT_BLOCK, /awt ask/);
+  assert.ok(!/state|find --like|note|resume`/.test(AWT_BLOCK), "decision 15: no handoff line, no other verbs");
   assert.deepEqual({ ...out.config, systemPrompt: undefined }, { ...config, systemPrompt: undefined });
   assert.deepEqual(out.env, { A: "1" });
   const again = await r.call("agent.create.before", { request: out });
   assert.equal(again.config.systemPrompt, out.config.systemPrompt);
   assert.ok(!AWT_BLOCK.includes("awt resume`:") && !/# awt task/.test(AWT_BLOCK), "no brief text in the prompt");
+});
+
+test("P2b an opened agent has BRIEF.md at AWT_DIR without calling any tool, and awt writes keep it fresh", async () => {
+  const r = mk({}, WS);
+  const out = await r.call("agent.open.before", openReq("a1", { title: "Brief me" }));
+  const dir = out.env.AWT_DIR as string;
+  const brief = () => readFileSync(join(dir, "BRIEF.md"), "utf8");
+  assert.match(brief(), /# awt task/);
+  r.awt(dir, "decide", "pick-sqlite", "--why", "local");
+  assert.match(brief(), /pick-sqlite/);
 });
 
 test("P3 two agents opened at once share one main task", async () => {

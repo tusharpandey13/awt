@@ -72,7 +72,7 @@ class Docs(unittest.TestCase):
         self.assertIn("./awt", plain)
         for stale in ("./awt", "Everything about this task lives here", "docs/<brief>.out.md"):
             self.assertNotIn(stale, tree)
-        for fresh in ("$AWT_DIR/out.md", "from any directory"):
+        for fresh in ("$AWT_DIR/out.md", "$AWT_DIR/BRIEF.md"):
             self.assertIn(fresh, tree)
 
     def test_tree_block_opens_with_the_node_rule_and_fits_2kb(self):

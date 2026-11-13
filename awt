@@ -38,9 +38,9 @@ ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.
 LIMIT = "tree exceeds depth %d / %d nodes; deeper nodes are not covered" % (K["depth"], K["nodes"])
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
 LISTS = SECTIONS + ["nodes", "tree"]
-SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
+SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore", "BRIEF.md",
            "legacy", "context", "docs", "outbox", "misc"}
-IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/"]  # runs/: relay worker logs
+IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/", "BRIEF.md"]  # runs/: relay worker logs; BRIEF.md: derived, regenerated
 SECRETS = [(n, re.compile(p)) for n, p in [
     ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
     ("github-pat", r"github_pat_[A-Za-z0-9_]{20,}"), ("slack-token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
@@ -51,25 +51,14 @@ BLOCK_BEGIN, BLOCK_END = "<!-- awt:begin -->", "<!-- awt:end -->"
 AGENTS_BLOCK = BLOCK_BEGIN + r'''
 # Task workspace (awt)
 
-Everything about this task lives here. Keep records with `./awt`. Never hand-edit `.awt/`.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+**Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
+''' + BLOCK_END + "\n"
+TREE_BLOCK = BLOCK_BEGIN + r'''
+# Task workspace (awt)
 
-**Start:** run `./awt resume` and follow it, unless you are a subagent with a brief.
-**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel work: add `--scope <name>`.
-
-| You have | Do |
-|---|---|
-| A link (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Don't copy it. |
-| An unopenable link | Record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
-| No usable link (pasted chat, notes, research) | `./awt capture --from slack --title "..." [file]` |
-| A plan, ADR, result or working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
-| A decision | `./awt decide "the choice" --why "the reason"`. Reversing: add `--supersedes <id>` |
-| A small fact | `./awt note "..."` |
-| A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
-| Anything else | `misc/`. Throwaway: `scratch/`. |
-
-**Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace. Check before deciding or asking; `decide` and `ask` list related records too, so read them.
-**Stuck or refused:** read `fix:`, then `./awt help agents`.
-**Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
+Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Your brief is `$AWT_DIR/BRIEF.md` (or run `awt resume`). Record a choice with `awt decide "..." --why "..."`, a question for a person with `awt ask "..."`. Everything else is recorded for you. Stuck: `awt help agents`.
+**Subagents:** skip the brief, write the result to `$AWT_DIR/out.md`.
 ''' + BLOCK_END + "\n"
 README = '''# {goal}
 
@@ -79,9 +68,6 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 - `./awt list`, `./awt find <term>`: everything known about this task
 - `context/` inbound material, `docs/` working docs, `outbox/` drafts going out, `misc/` the rest, `scratch/` throwaway
 '''
-TREE_BLOCK = (AGENTS_BLOCK.replace("./awt", "awt")
-              .replace("Everything about this task lives here. Keep records with `awt`. Never hand-edit `.awt/`.", "Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Keep records with `awt`, from any directory.")
-              .replace("write output to `docs/<brief>.out.md`", "write the result to `$AWT_DIR/out.md`"))
 TREE_README = '''# {goal}
 
 Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `projects/<name>/workspaces/<name>/tasks/<name>/agents/<name>/` (a workspace may also sit directly under the root, in `workspaces/`).
@@ -113,6 +99,7 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 |---|---|
 | Starting, not a subagent | `./awt resume` |
 | Need to know if it is already recorded | `./awt find "term"` |
+| Related decisions, answers and notes from every workspace | `./awt find --like "a sentence"` (`decide` and `ask` list them too) |
 | List one kind of thing | `./awt list refs` (also context docs outbox misc decisions questions effects notes state) |
 | See old/superseded/answered/terminal items | `./awt list decisions --all` |
 | Small fact for later, not a decision | `./awt note "text"` |
@@ -681,6 +668,8 @@ def newer_files(since):
     for dp, dns, fns in os.walk(ROOT):
         dns[:] = [d for d in dns if d != ".git" and not (dp == ROOT and d in (".awt", "scratch")) and not is_node_dir(os.path.join(dp, d))]
         for n in fns:
+            if n == "BRIEF.md" and dp == ROOT:
+                continue
             seen += 1
             try:
                 m = os.lstat(os.path.join(dp, n)).st_mtime
@@ -966,6 +955,49 @@ def listing(name, D, all_):
     return ["[%s] %s now: %s | next: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"]) for s in rows]
 
 
+# ---------- BRIEF.md: a derived file, never read back as state ----------
+FANOUT = 20  # most agents below a task whose briefs a task write refreshes
+WRITES = {"state", "note", "decide", "ask", "answer", "ref", "capture", "supersede", "status"}
+
+
+def write_brief(path):
+    """Regenerate path/BRIEF.md from the log: temp file in .awt/, then rename. Nothing reads it back; any failure is silent."""
+    global ROOT, A
+    old, tmp = (ROOT, A), os.path.join(path, ".awt", "BRIEF.%d.tmp" % os.getpid())
+    try:
+        if not os.path.isdir(os.path.join(path, ".awt")):
+            return
+        ROOT = path
+        A = "awt" if (not node_info(path)["legacy"] or parent(path)) else "./awt"
+        text = brief() + "Generated %s; ages above are as of then.\n" % now()[:19]
+        with open(tmp, "w", encoding="utf-8") as g:
+            g.write(text)
+        os.replace(tmp, os.path.join(path, "BRIEF.md"))
+    except (Exception, SystemExit):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    finally:
+        ROOT, A = old
+
+
+def refresh_briefs(path):
+    """After a write at path: its own brief, its parent's (children section) and, for a task, every agent below (task section)."""
+    write_brief(path)
+    p = parent(path)
+    if p:
+        write_brief(p)
+    try:
+        if node_info(path)["kind"] == "task":
+            agents = [q for q, _ in descendants(path)[0] if node_info(q)["kind"] == "agent"]
+            if len(agents) <= FANOUT:  # a big fan-out would make every task write cost one file per agent; their next write or hook refreshes them
+                for q in agents:
+                    write_brief(q)
+    except (Exception, SystemExit):
+        pass
+
+
 # ---------- verbs ----------
 def create(path, text):
     try:
@@ -1107,6 +1139,7 @@ def init_child(a):
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
+        refresh_briefs(final)
         out("init %s %s" % (rel(final), kind))
     finally:
         if lockfd is not None:
@@ -1174,6 +1207,7 @@ def cmd_init(a):
     if a.goal and (not t or (t["goal"], t["done_means"]) != (a.goal, a.done)):
         emit("task", goal=a.goal, done_means=a.done)
         made.append("task")
+    refresh_briefs(ROOT)
     out("init %s: %s" % (ROOT, " ".join(made) or "nothing to change"))
 
 
@@ -1206,6 +1240,9 @@ def cmd_resume(a):
                 globals()["ROOT"] = r
                 set_cmd()
                 sys.stdout.write(brief())
+                sys.stdout.flush()
+                if not os.environ.get("AWT_NO_BRIEF"):
+                    write_brief(r)
         except BaseException as x:
             if isinstance(x, KeyboardInterrupt):
                 raise
@@ -1452,7 +1489,7 @@ def _find_here(term, prefix):
                         and not is_node_dir(os.path.join(dp, d)))
         for n in sorted(fns):
             p = os.path.join(dp, n)
-            if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n == "awt"):
+            if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n in ("awt", "BRIEF.md")):
                 continue
             try:
                 if not os.path.isfile(p) or os.path.getsize(p) > K["big"]:
@@ -2004,7 +2041,8 @@ def cmd_doctor(a):
     has = has_block(ROOT) or (intree and any(has_block(p) for p in ancestors(ROOT)))
     line("ok" if has else "fail", "AGENTS.md has the awt block" if has else "AGENTS.md lacks the awt block (./awt init)")
     try:
-        r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30,
+                           env=dict(os.environ, AWT_NO_BRIEF="1"))  # a check must not write
         line("ok" if r.returncode == 0 and r.stdout.strip() else "fail", "resume --hook prints a brief")
     except Exception as x:
         line("fail", "resume --hook did not run: %s" % x)
@@ -2638,6 +2676,8 @@ def main(argv):
             return cmd_doctor(a)
         die("no task found", "./awt init", 4)
     globals()[("eff_" + a.eop) if a.verb == "effect" else ("cmd_" + a.verb)](a)
+    if a.verb in WRITES or (a.verb == "effect" and a.eop != "show"):
+        refresh_briefs(ROOT)
 
 
 if __name__ == "__main__":
