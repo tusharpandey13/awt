@@ -376,6 +376,21 @@ Pre: D0 started with the plugin built from `a35fea8` (`git show` into `$T/oldplu
 | Distribution | E-R21 | none |
 | Upgrade / I8 | E-R20, E-R22 | I8 suite |
 
+## 5a. CLI-tier coverage and gaps
+
+All CLI journeys (E-R1 to E-R8, E-R20, E-R21) have a test in `tests/test_e2e_recall.py`. Run it with `python3 -m unittest discover -s tests -p test_e2e_recall.py`. Daemon-gated (E-R9 to E-R16, E-R22) and agentic (E-R17 to E-R19) journeys are outside this file.
+
+Gaps and partial coverage:
+
+| Journey | Why not covered | What would cover it |
+|---|---|---|
+| E-R7 (default run) | The 2,000-descendant tree takes minutes to build, so the test is skipped unless `AWT_E2E_SLOW=1` (it passes with it; a cached tree makes reruns ~17 s) | Run it in `chaos-full` CI with `AWT_E2E_SLOW=1` |
+| E-R8 b), f) | `chmod 000` has no effect for uid 0 | Run as a non-root user (the sub-checks run automatically then) |
+| E-R21 step 2 | Runs only if `python3.9` is on `PATH` | Add python3.9 to the CI image |
+| E-R1 step 8, E-R4 step 3 | Compared after the 200-char cut because temp paths are long; the "ends with `Ten seconds`" form is not asserted | None needed |
+| U3 (nothing outside `$T` changes) | Not checked directly; each test uses a private HOME and temp dir | A before/after snapshot of a sentinel HOME |
+| I3 for argparse type errors (finding) | `find --limit x` and `<cmd> --related x` exit 2 with `error:` but no `fix:` (generic argparse path, all verbs). Left unchanged | Wrap `ArgumentParser.error` to add a `fix:` line; then drop `expectedFailure` on `IntArgsNeedFix` |
+
 ## 6. Open questions (untestable or ambiguous in the feature spec)
 
 1. **Tokenizer and punctuation.** `[a-z0-9][a-z0-9_./-]+` keeps a trailing `.` or `/`: `gateway.` and `gateway` would be different words, so sentence-final words stop matching. Strip trailing `./-`? (Fixtures here avoid trailing periods until this is decided.)
