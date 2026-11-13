@@ -114,6 +114,17 @@ Names are scenario ids.
 - T50 Two agents write to their own nodes in parallel (20 processes, 50 writes each): no row lost, no row crosses nodes, each node's log is valid JSON lines (I3).
 - T51 `AWT_BY` is stamped on every row written under it.
 
+**Project level** (`test_tree.py` Projects)
+- PT1 `init --kind project --name N --key K` under a root makes `projects/<slug>/` with a `project` node row, `context/`, `docs/`, `misc/`; lineage of a node below it reads root, project, workspace, task; `list tree` shows it; `doctor` passes.
+- PT2 Legal pairs: a project holds only workspaces; a project inside a project, workspace, task or agent is refused (exit 1, a fix naming what the parent may contain); a task or agent directly in a project is refused.
+- PT3 A project key is found from anywhere in the tree and `init --key` is idempotent for it (no row written, no second directory).
+- PT4 A workspace directly under the root still resolves, lists and takes tasks. `doctor` warns about it only when the root also holds a project, and never fails on it.
+- PT5 `status done` on a project is refused while a workspace below is active (the refusal names it), and so is `status done` on the root while a project is active; once the workspace is done, the project can be done.
+- PT6 `doctor` warns when a done project still has an active workspace.
+- PT7 A project in `workspaces/` is a warning (it does not match its node row), not a failure.
+- PT8 A workspace moved by `rename` under a project: a `ref kind=node` made before the move still resolves, and `init --key` for the workspace returns the moved path.
+- PT9 `--kind project` needs `--name` (exit 2).
+
 ## Active recall (`test_recall.py`)
 
 Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across nodes, Paseo plugin).
@@ -210,6 +221,22 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 - M11 (gated, `paseo-plugin/test/daemon.test.ts`): the on-disk store written by a real daemon in a temp `--home` (1 workspace, 2 agents made with the scripted agent) is read by `migrate-paseo --home`; every workspace and agent key is present, and a second run leaves the node count unchanged. It does not compare against an expected tree. Skipped unless `AWT_E2E_PASEO=1`.
 - M12 A secret-shaped string (built at runtime) in a workspace name, cwd, provider, model, title, workspace id or agent id appears in no file under ROOT and in no output, including `--dry-run`, and drops no workspace. A user's `status` survives a rerun. Created and already-present counts are separate. A killed run leaves a "run in progress" report.
 
+**Project level** (`test_migrate_paseo.py` ProjectLevel; chaos `migrate-kill-mid-move`)
+- MP1 A fixture with two projects (`parsekit`, `docs-site`) and an unassigned workspace migrates to `projects/parsekit`, `projects/docs-site` and `projects/unassigned` (key `paseo:project/unassigned`), each workspace under its project's `workspaces/`; a rerun changes nothing (I7) and says `0 projects created, 0 workspaces moved`.
+- MP2 A project node has the name `customName ?? displayName` (`projects.json` through `--home`), key `paseo:project/<id>`, and `ref`s to `rootPath` and to its own key.
+- MP3 `customName` wins over `displayName`, in the project name and its directory.
+- MP4 A tree in the earlier layout (workspaces directly under the root) is moved: project from the workspace's `ref paseo:project/<id>`, else `workspaces.json`, else `unassigned`; each subtree moves whole (its records are byte-identical); a workspace made by hand with no key stays; the output counts the moves.
+- MP5 A rerun after the move moves and creates nothing.
+- MP6 A `ref kind=node` to a moved workspace resolves to the new place.
+- MP7 A name taken in the project's `workspaces/` gets a numeric suffix; the existing node is not replaced.
+- MP8 A run that left the project made and one node moved is finished by the next run; keys stay unique; the second run changes nothing.
+- MP9 Archived project: `done`, or `paused` when a workspace below is still active (the report notes it).
+- MP10 Archive is applied on a later run, not only the first.
+- MP11 `--dry-run` on a legacy tree writes nothing and prints each move and project.
+- MP12 `--dry-run` without a root names the projects.
+- MP13 Hostile project rows (secret in id, duplicate id, non-object, null id, secret in name and path): no secret in output, report or tree; one node per key.
+- C24 *Kill mid-move.* A pre-project tree is migrated while the process is SIGKILLed over and over; after every kill each workspace key exists once, and after the final run the tree equals an uninterrupted run, no workspace is left in `workspaces/`, and a further rerun changes nothing.
+
 ## Plugin (`paseo-plugin/test`)
 
 Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by the installed `@getpaseo/plugin` SDK (so `tsc` catches drift, P11; recordings from a real daemon come with tier 2), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
@@ -217,6 +244,18 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - P1 `workspace.create.after`: workspace node exists with key and refs (working directory, project, workspace) and a `main` task; the project's display name labels the workspace (P13); replay adds nothing.
 - P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars, naming `find --like`; no brief text enters the prompt.
 - P3 `agent.open.before` for a workspace with no task: task `main` is created once, even for several simultaneous agents.
+- PJ1 `workspace.create.after` creates the project node from `workspace.projectId` (key `paseo:project/<id>`, refs to the root path and to its own key) and the workspace under it.
+- PJ2 Two workspaces of one project share one project node, also under concurrent and replayed hooks and after a plugin restart.
+- PJ3 The project name is `customName ?? displayName` from `projects.json`, which beats the SDK listing.
+- PJ4 A workspace with no `projectId` goes under project `unassigned`; an agent with no workspace goes to `unassigned--<cwd>` under it.
+- PJ5 An agent opened before its workspace exists still gets a workspace under the right project.
+- PJ6 `workspace.archive.after`: when `projects.json` has `archivedAt` for the workspace's project, the project is `done`, or `paused` while work below is open; without `archivedAt` it stays active.
+- PJ7 Project `done` when nothing below is open.
+- PJ8 A missing, malformed, wrong-shaped or deeply nested `projects.json` gives no archive information and no log line of failure.
+- PJ9 A symlinked `projects.json` is ignored.
+- PJ10 A workspace moved under a project by `migrate-paseo` while the plugin runs: cached paths that are gone are dropped, the agent's next open finds the moved node by key, and nothing is duplicated.
+- PJ11 A workspace still directly under the root is found and used; no copy is made.
+- PJ12 Hostile project names and root paths never escape the tree or reach disk as secrets.
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node, the parent read from `parentAgentId` or the label `paseo.parent-agent-id`; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
 - P6 `awt_resume` takes no input and returns the brief of the node found for the calling agent's key; an agent id with no node errors. A key on two nodes resolves to nothing (C36).
