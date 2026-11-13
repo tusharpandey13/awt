@@ -368,7 +368,7 @@ class Isolation(TreeBase):
         self.assertNotIn(os.path.basename(t2), r.stdout)
         self.assertEqual(len(self.rows_of(os.path.join(iw, r.stdout.split()[1]), "node")), 1)
 
-    def test_misc_listing_and_save_skip_nested_nodes(self):
+    def test_misc_listing_skips_nested_nodes(self):
         root, ws, task, agent, sub = self.chain()
         inner = os.path.join(task, "misc", "side")
         os.makedirs(inner)
@@ -378,11 +378,6 @@ class Isolation(TreeBase):
         out = self.ok("list", "misc", root=task).stdout
         self.assertIn("mine.md", out)
         self.assertNotIn("theirs.md", out)
-        subprocess.run(["git", "init", "-q", task], check=True, env=self.env)
-        self.ok("save", "m", root=task)
-        files = subprocess.run(["git", "-C", task, "ls-files"], capture_output=True, text=True, env=self.env).stdout
-        self.assertIn("misc/mine.md", files)
-        self.assertNotIn("theirs.md", files)
 
     def test_parallel_agents_keep_their_own_logs(self):  # T50
         root, ws, task, agent, sub = self.chain()

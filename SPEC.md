@@ -97,8 +97,8 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `supersede OLD NEW [--why T]` | Both must be under `docs/` and exist; moves OLD to `docs/_superseded/` with `rename`, with a numeric suffix on collision. Refuse OLD equal to NEW. |
 | `status active\|paused\|done` | `done` is refused while any question is unanswered or any effect is `planned`, `begun` or `unknown`; the refusal lists them. |
 | `effect plan\|begin\|mark\|show` | Below. |
-| `doctor` | Below. |
-| `save MESSAGE` | Below. |
+| `doctor [--staged]` | Below. |
+| `ingest [--source claude\|all] [--hook]` | Below. |
 
 `help` and `--help` print usage and do not count as verbs. `help agents` prints the embedded agent reference. `--version` prints the version.
 
@@ -169,13 +169,23 @@ Prints one `ok`, `warn` or `fail` line per check, and exits 1 on any `fail`. It 
 
 - `fail`: Python below 3.9; no task root; a real `O_APPEND` and `O_EXCL` probe in `.awt/` fails; `AGENTS.md` lacks the awt block; `./awt resume --hook` run as a subprocess prints no brief.
 - `warn`: quarantined rows, with their line numbers; the path contains `iCloud`, `Dropbox`, `OneDrive` or `Google Drive`, or is a network mount; `CLAUDE.md` in the directory or an ancestor; `.claude/settings.json` lacks the awt hook; `.claude/settings.json` still has the obsolete `ask` rule for `effect apply` (one warning per line, naming the line number and text to remove; awt never edits the file); `awt` is not executable; a git remote exists (task data would be pushed if committed, so check it is private); open `begun` or `unknown` effects.
+- Store checks (run even without a task root, never create anything): `warn` when the store directory is not mode 700 or holds files that others can read, when it sits in a sync folder, network mount or git work tree, when `ingest` never ran or last ran over 7 days ago, and when the oldest Claude transcript is within 7 days of `cleanupPeriodDays` (from `${AWT_CLAUDE_SETTINGS:-~/.claude/settings.json}`, default 30) and ingest is more than a day old.
+- `doctor --staged`: needs only a git work tree (`--dir`, default the current directory), not a task. Scans the staged blobs (not the working copy) of added, copied, modified and renamed text files under 2 MB for the secret scan; prints each match as `error:` with the file and pattern, never the secret, and exits 1. Meant for `.git/hooks/pre-commit`. `save` was removed: it exits 2 with a `fix:` naming `git commit` and `doctor --staged`.
 
-## save
+## ingest
 
-`save MESSAGE`: commit the task directory.
+`ingest [--source claude|all] [--hook]`: copy provider transcripts into the canonical store. Only `claude` exists; `all` means every source that exists. Design: `docs/adr/0003-canonical-raw-jsonl.md`; the wider plan is in ARCHITECTURE-v2 section 3.
 
-- Refuse when not a git repo, or when `git rev-parse --show-toplevel` is not the task root (the task sits inside some other repo). Fix: `git init` here. Never run `git init` itself. Never push.
-- `git add -A -- .`, excluding nested git repos, which are reported. Unstage and report any staged text file under 2 MB that matches the secret scan. Commit with `--no-gpg-sign`. Nothing staged: exit 0 and say so.
+- **Store:** `${AWT_STORE:-${XDG_DATA_HOME:-~/.local/share}/awt-store}`. Directories mode 700, files mode 600, whatever the umask. Separate from the task tree on purpose: it holds full conversation text.
+- **Source:** `${AWT_CLAUDE_PROJECTS:-~/.claude/projects}`, every `*.jsonl` below it, including `<session>/subagents/agent-<id>.jsonl` (session name `<session>.agent-<id>`). Read-only: awt never writes, renames or touches a transcript. Symlinks are not followed. A missing directory is not an error.
+- **Output:** `log/claude/<YYYY-MM>/<session>.jsonl` (the month of the file's first timestamped record), one row per non-blank source line:
+  `{"v":1,"src":"claude","adapter":1,"session":S,"seq":N,"ingested":ISO,"src_ref":"<path under projects>:<line>","secret_flags":K,"raw":<the provider record, verbatim>}`. A line that is not JSON is kept as `raw: {"_unparsed": TEXT}`.
+- **No redaction and no size cap.** `raw` is never altered or cut. `secret_flags` counts matches of the secret scan inside `raw`; it only informs.
+- **Incremental by (path, inode, byte offset)**, kept in `ingest/claude.offsets.json` under the store, written by rename after each file, all under `flock` on `ingest/claude.lock`. A source line without its newline is left for the next run unless it is already a complete JSON object.
+- **Idempotent and crash safe.** One `O_APPEND` write per row. A torn tail on a canonical file is closed with a newline before appending. If a run died after appending but before saving its offset, the next run skips rows whose `seq` is already present. A source whose inode changed, or that is shorter than the saved offset, is rescanned from the start and only rows not already stored are appended. Rerunning with nothing new writes no rows.
+- **`--hook`:** prints nothing and exits 0 on any error. `init` puts it in the `SessionEnd` hook of `.claude/settings.json`.
+- Without `--hook`: prints `ingested N rows from M claude files into STORE`; a store that cannot be written exits 1 with a `fix:`.
+- awt never deletes store data and has no verb that does.
 
 ## Templates
 
@@ -226,6 +236,9 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/awt resume --hook" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/awt ingest --source claude --hook" } ] }
     ]
   }
 }
@@ -294,7 +307,7 @@ Unchanged: `--dir` > `AWT_DIR` > script directory > walk up from `cwd`. A person
 
 Ancestors are the parent chain, nearest first, at most 8 levels, stopping after the first `root`. Descendants are found by walking the reserved directories only, at most 8 levels deep and 2,000 nodes. Symlinked directories are never followed, so a loop cannot occur; `doctor` reports them. Hitting a limit is reported, never silent.
 
-Every walk of a node's own files (listing, `find`, resume section 5, `save`) skips any subdirectory that contains `.awt/`, and the reserved directories are not listed under `misc`. A child's files belong to the child.
+Every walk of a node's own files (listing, `find`, resume section 5) skips any subdirectory that contains `.awt/`, and the reserved directories are not listed under `misc`. A child's files belong to the child.
 
 ### Reading across nodes
 

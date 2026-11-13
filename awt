@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, socket, subprocess, time
+import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, socket, stat, subprocess, time
 
 VERSION = "0.2.0"
 HOST = socket.gethostname()
@@ -94,6 +94,9 @@ SETTINGS = '''{
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt resume --hook" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt ingest --source claude --hook" } ] }
     ]
   }
 }
@@ -121,7 +124,7 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 | About to send something that must not go out twice | `./awt effect plan`, `begin`, send it yourself, `mark` (below) |
 | Effect stuck `begun` or `unknown` | `./awt effect show <id>`, then ask a person |
 | Check workspace health | `./awt doctor` |
-| Commit the task dir (person asked) | `./awt save "message"` |
+| Commit the task dir (person asked) | `git add -A && git commit -m "message"` (`awt doctor --staged` checks for secrets) |
 | Task finished | `./awt status done` |
 
 ## Syntax
@@ -225,7 +228,7 @@ USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
   supersede OLD NEW           status active|paused|done
-  effect plan|begin|mark|show doctor                   save MESSAGE
+  effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|all] [--hook]
 exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
 agent reference: awt help agents"""
 
@@ -1850,6 +1853,87 @@ def tree_problems(root):
     return probs
 
 
+def store_checks(line):
+    """Store path, modes, ingest freshness and Claude retention. Never creates anything."""
+    try:
+        store = store_dir()
+        if os.path.isdir(store):
+            mode = stat.S_IMODE(os.stat(store).st_mode)
+            line("ok" if not mode & 0o077 else "warn", "store mode %o (%s)" % (mode, store) if not mode & 0o077 else
+                 "store %s has mode %o, expected 700 (chmod 700 it; it holds full conversation text)" % (store, mode))
+            loose = [os.path.join(dp, f) for dp, _, fns in os.walk(store) for f in fns if os.stat(os.path.join(dp, f)).st_mode & 0o077]
+            if loose:
+                line("warn", "%d store files are readable by others, expected 600 (chmod 600 %s)" % (len(loose), loose[0]))
+            top = os.path.realpath(store)
+        else:
+            line("ok", "store %s not created yet" % store)
+            top = os.path.realpath(os.path.dirname(store))
+        sync = [m for m in ("iCloud", "Dropbox", "OneDrive", "Google Drive", "Mobile Documents") if m in store or m in top]
+        if sync or netmount(top):
+            line("warn", "store is in a sync folder or network mount; it holds full conversation text (set AWT_STORE elsewhere)")
+        d = top
+        while d and not os.path.exists(os.path.join(d, ".git")) and d != os.path.dirname(d):
+            d = os.path.dirname(d)
+        if os.path.exists(os.path.join(d, ".git")):
+            line("warn", "store is inside a git work tree (%s); it holds full conversation text and could be committed" % d)
+        try:
+            with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
+                last = json.load(g).get("last_run")
+        except (OSError, ValueError, AttributeError):
+            last = None
+        age = (time.time() - epoch(last)) / 86400 if last else None
+        if last is None:
+            line("warn", "claude ingest has never run (awt ingest --source claude; init's SessionEnd hook runs it)")
+        elif age > STALE_DAYS:
+            line("warn", "claude ingest last ran %d days ago (awt ingest --source claude)" % age)
+        else:
+            line("ok", "claude ingest ran %s" % ago(last))
+        keep = 30
+        try:
+            with open(os.environ.get("AWT_CLAUDE_SETTINGS") or os.path.expanduser("~/.claude/settings.json"), encoding="utf-8") as g:
+                v = json.load(g).get("cleanupPeriodDays")
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                keep = v
+        except (OSError, ValueError, AttributeError):
+            pass
+        root = claude_dir()
+        old = min([os.stat(p).st_mtime for p, _, _ in claude_sessions(root)] or [None]) if os.path.isdir(root) else None
+        if old is not None:
+            days = int((time.time() - old) / 86400)
+            risk = days > keep - STALE_DAYS and (age is None or age > 1)
+            line("warn" if risk else "ok", "oldest Claude transcript is %d days old; Claude deletes at %d days%s" % (
+                days, keep, " and ingest is not current (awt ingest --source claude)" if risk else ""))
+    except Exception as x:
+        line("warn", "store check failed: %s" % x)
+
+
+def doctor_staged(a):
+    """Secret scan of the staged blobs of the git repo at --dir (default: cwd). For a pre-commit hook."""
+    d = a.dir or os.getcwd()
+
+    def g(*x):
+        try:
+            return subprocess.run(["git", "-C", d] + list(x), capture_output=True)
+        except FileNotFoundError:
+            die("git is not installed or not on PATH", "install git; awt never installs it")
+    if g("rev-parse", "--show-toplevel").returncode:
+        die("not a git repo: " + d, "run awt doctor --staged inside a git work tree")
+    held = []
+    for f in [x.decode("utf-8", "replace") for x in g("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z").stdout.split(b"\0") if x]:
+        r = g("show", ":" + f)
+        b = r.stdout
+        if r.returncode or len(b) > K["big"] or b"\0" in b:
+            continue
+        n = secret(b.decode("utf-8", "replace"))
+        if n:
+            held.append("%s (%s)" % (f, n))
+    if held:
+        for h in held:
+            print("error: staged file looks like it holds a secret: " + h, file=sys.stderr)
+        die("%d staged file(s) look like secrets" % len(held), "git restore --staged FILE, remove the secret, and commit again")
+    out("ok no secrets in staged files")
+
+
 def cmd_doctor(a):
     global ROOT
     res = []
@@ -1859,6 +1943,7 @@ def cmd_doctor(a):
         out("%s %s" % (level, msg))
 
     line("ok" if sys.version_info >= (3, 9) else "fail", "python %d.%d" % sys.version_info[:2])
+    store_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
         line("fail", "no task root (./awt init)")
@@ -1936,48 +2021,236 @@ def cmd_doctor(a):
     sys.exit(1 if "fail" in res else 0)
 
 
-def cmd_save(a):
-    def g(*x):
+# ---------- ingest ----------
+# Canonical raw store (docs/adr/0003-canonical-raw-jsonl.md). Rows are never redacted or cut; secret matches are only counted.
+ADAPTER = 1
+STALE_DAYS = 7
+
+
+def store_dir():
+    return os.environ.get("AWT_STORE") or os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "awt-store")
+
+
+def claude_dir():
+    return os.environ.get("AWT_CLAUDE_PROJECTS") or os.path.expanduser("~/.claude/projects")
+
+
+def private_dir(path):
+    """Create path and any missing parents, each mode 700."""
+    if os.path.isdir(path):
+        return
+    private_dir(os.path.dirname(path))
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    os.chmod(path, 0o700)
+
+
+def secret_flags(o):
+    if isinstance(o, str):
+        return sum(len(rx.findall(o)) for _, rx in SECRETS)
+    if isinstance(o, dict):
+        return sum(secret_flags(k) + secret_flags(v) for k, v in o.items())
+    if isinstance(o, list):
+        return sum(secret_flags(v) for v in o)
+    return 0
+
+
+def canon(o):
+    return sha(json.dumps(o, sort_keys=True).encode())
+
+
+def tail_rows(path):
+    """(last good seq or -1, torn) for a canonical file; heals a torn tail by ending it with a newline."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return -1, False
+    try:
+        size, torn = os.fstat(fd).st_size, False
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            os.pwrite(fd, b"\n", size)
+            torn = True
+        blk = 1 << 20
+        while True:
+            start = max(0, size - blk)
+            chunk = os.pread(fd, size - start + 1, start)
+            lines = chunk.split(b"\n")
+            if start:
+                lines = lines[1:]
+            for ln in reversed(lines):
+                try:
+                    return int(json.loads(ln)["seq"]), torn
+                except Exception:
+                    continue
+            if not start:
+                return -1, torn
+            blk *= 4
+    finally:
+        os.close(fd)
+
+
+def claude_sessions(root):
+    """(path, relpath, session name) for every transcript below root. Read-only; symlinks are not followed."""
+    for dp, dns, fns in os.walk(root):
+        dns.sort()
+        for f in sorted(fns):
+            p = os.path.join(dp, f)
+            if f.endswith(".jsonl") and os.path.isfile(p) and not os.path.islink(p):
+                r = os.path.relpath(p, root)
+                parts = r.split(os.sep)
+                name = f[:-6]
+                if len(parts) >= 4 and parts[-2] == "subagents":
+                    name = parts[-3] + "." + name
+                yield p, r, name
+
+
+def first_month(path, rows):
+    for r in rows:
+        ts = r.get("timestamp") if isinstance(r, dict) else None
+        if isinstance(ts, str) and re.match(r"\d{4}-\d\d", ts):
+            return ts[:7]
+    return datetime.datetime.fromtimestamp(os.stat(path).st_mtime, datetime.timezone.utc).strftime("%Y-%m")
+
+
+def ingest_claude(store):
+    """Append new source lines as canonical rows. Returns (rows written, files seen)."""
+    root = claude_dir()
+    private_dir(os.path.join(store, "ingest"))
+    private_dir(os.path.join(store, "log", "claude"))
+    lock = os.open(os.path.join(store, "ingest", "claude.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        offp = os.path.join(store, "ingest", "claude.offsets.json")
         try:
-            return subprocess.run(["git", "-C", ROOT] + list(x), capture_output=True, text=True)
-        except FileNotFoundError:
-            die("git is not installed or not on PATH", "install git; awt never installs it")
-    r = g("rev-parse", "--show-toplevel")
-    if r.returncode:
-        die("not a git repo", "git init  (in %s; awt never runs it)" % ROOT)
-    if os.path.realpath(r.stdout.strip()) != ROOT:
-        die("task sits inside another repo (%s)" % r.stdout.strip(), "git init  (in %s)" % ROOT)
-    nested = []
-    for dp, dns, fns in os.walk(ROOT):
-        dns[:] = [d for d in dns if d != ".git"]
-        if dp != ROOT and (".git" in os.listdir(dp) or is_node_dir(dp)):
-            nested.append(rel(dp))
-            dns[:] = []
-    if g("add", "-A", "--", ".", *[":(exclude)" + n for n in nested]).returncode:
-        die("git add failed", "run git status in " + ROOT)
-    held = []
-    for f in [x for x in g("diff", "--cached", "--name-only", "-z").stdout.split("\0") if x]:
-        try:
-            if os.path.getsize(P(f)) > K["big"]:
+            with open(offp, encoding="utf-8") as g:
+                state = json.load(g)
+            files = state["files"]
+        except (OSError, ValueError, KeyError, TypeError):
+            files = {}
+        used = {v.get("out") for v in files.values()}
+        total, seen = 0, 0
+        for path, rel_, name in claude_sessions(root) if os.path.isdir(root) else ():
+            seen += 1
+            try:
+                st = os.stat(path)
+                e = files.get(rel_)
+                reset = e is not None and (e["inode"] != st.st_ino or st.st_size < e["offset"])
+                e = dict(e or dict(inode=st.st_ino, offset=0, seq=0, out=None, month=None))
+                if reset:
+                    e.update(inode=st.st_ino, offset=0)
+                if e["offset"] == st.st_size and not reset:
+                    continue
+                n, e2 = ingest_one(store, path, rel_, name, e, reset, used)
+                total += n
+                if e2 != files.get(rel_):
+                    files[rel_] = e2
+                    save_offsets(offp, files)
+            except FileNotFoundError:
                 continue
-            with open(P(f), "rb") as fh:
-                b = fh.read()
-        except OSError:
+        save_offsets(offp, files, now())
+        return total, seen
+    finally:
+        os.close(lock)
+
+
+def save_offsets(offp, files, last=None):
+    prev = None
+    if last is None:
+        try:
+            with open(offp, encoding="utf-8") as g:
+                prev = json.load(g).get("last_run")
+        except (OSError, ValueError, AttributeError):
+            pass
+    tmp = "%s.%d.tmp" % (offp, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as g:
+        json.dump(dict(adapter=ADAPTER, last_run=last or prev, files=files), g)
+    os.rename(tmp, offp)
+
+
+def ingest_one(store, path, rel_, name, e, reset, used):
+    batch, pos = [], e["offset"]
+    try:
+        with open(path, "rb") as g:
+            g.seek(pos)
+            for raw in g:
+                txt = raw.decode("utf-8", "replace").strip()
+                if not raw.endswith(b"\n"):
+                    try:
+                        ok = isinstance(json.loads(txt), dict)
+                    except ValueError:
+                        ok = False
+                    if not ok:
+                        break  # a record still being written: wait for it
+                pos += len(raw)
+                if txt:
+                    try:
+                        batch.append(json.loads(txt))
+                    except ValueError:
+                        batch.append({"_unparsed": txt})
+    except OSError:
+        return 0, e  # the source vanished or is unreadable; the store is untouched
+    if e["out"] is None:
+        month = first_month(path, batch)
+        out = name
+        if out + ".jsonl" in {os.path.basename(u or "") for u in used}:
+            out = "%s~%s" % (name, sha(rel_.encode())[:8])
+        e["out"] = os.path.join("log", "claude", month, out + ".jsonl")
+        used.add(e["out"])
+    outp = os.path.join(store, e["out"])
+    last, _ = tail_rows(outp)
+    skip = {}
+    if reset and last >= 0:
+        with open(outp, "rb") as g:
+            for ln in g:
+                try:
+                    h = canon(json.loads(ln)["raw"])
+                    skip[h] = skip.get(h, 0) + 1
+                except Exception:
+                    pass
+    rows, seq, ordinal = [], last + 1 if reset else e["seq"], 0 if reset else e.get("lines", 0)
+    ts = now()
+    for r in batch:
+        ordinal += 1
+        if reset and skip.get(canon(r)):
+            skip[canon(r)] -= 1
             continue
-        n = None if b"\0" in b else secret(b.decode("utf-8", "replace"))
-        if n:
-            g("reset", "-q", "--", f)
-            held.append("%s (%s)" % (f, n))
-    for n in nested:
-        print("note: nested %s not saved: %s" % ("git repo" if os.path.exists(P(n, ".git")) else "node", n), file=sys.stderr)
-    for h in held:
-        print("note: unstaged, looks like a secret: " + h, file=sys.stderr)
-    if g("diff", "--cached", "--quiet").returncode == 0:
-        return out("nothing to commit")
-    r = g("commit", "--no-gpg-sign", "-q", "-m", a.message)
-    if r.returncode:
-        die("git commit failed: " + (r.stderr or r.stdout).strip(), "set git user.name and user.email")
-    out("saved %s" % g("rev-parse", "--short", "HEAD").stdout.strip())
+        if seq <= last:
+            seq += 1  # written by a run that died before saving its offset
+            continue
+        rows.append(json.dumps(dict(v=1, src="claude", adapter=ADAPTER, session=name, seq=seq, ingested=ts,
+                                    src_ref="%s:%d" % (rel_, ordinal - 1), secret_flags=secret_flags(r), raw=r),
+                               ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
+        seq += 1
+    if rows:
+        private_dir(os.path.dirname(outp))
+        fd = os.open(outp, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            for b in rows:
+                os.write(fd, b)  # one append per row
+        finally:
+            os.close(fd)
+    e.update(offset=pos, seq=seq, lines=ordinal)
+    return len(rows), e
+
+
+def cmd_ingest(a):
+    try:
+        store = store_dir()
+        private_dir(store)
+        n, f = ingest_claude(store)
+    except BaseException as x:
+        if isinstance(x, KeyboardInterrupt):
+            raise
+        if a.hook:
+            return
+        if isinstance(x, SystemExit):
+            raise
+        die("ingest failed: %s: %s" % (type(x).__name__, x), "check that %s is writable (AWT_STORE overrides it) and run: awt ingest --source claude" % store_dir())
+    if not a.hook:
+        out("ingested %d rows from %d claude files into %s" % (n, f, store))
 
 
 # ---------- main ----------
@@ -2011,8 +2284,8 @@ def build():
     V(sp, "capture", [("file", dict(nargs="?"))], [(("--from",), dict(required=True, dest="from_")), (("--title",), dict(required=True)), (("--ref",), T)])
     V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
     V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
-    V(sp, "doctor")
-    V(sp, "save", [("message", T)])
+    V(sp, "doctor", opt=[(("--staged",), F)])
+    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
     V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing
@@ -2055,6 +2328,9 @@ def main(argv):
         return out(AGENT_REF)
     if not rest or rest[0] in ("help", "--help", "-h"):
         return out(USAGE)
+    if rest[:1] == ["save"]:
+        die("save was removed: git does the commit, and doctor --staged does the secret check",
+            "git add -A && awt doctor --staged && git commit -m MESSAGE   (put awt doctor --staged in .git/hooks/pre-commit to run it on every commit)", 2)
     a = build().parse_args(rest)
     if a.verb == "effect" and (a.eop == "apply" or getattr(a, "gone", None) is not None):
         die("effect apply, --run, --snapshot, --verify, --class and --timeout were removed: awt never runs commands",
@@ -2068,6 +2344,10 @@ def main(argv):
         return cmd_init(a)
     if a.verb == "resume" and a.hook:
         return cmd_resume(a)
+    if a.verb == "ingest":
+        return cmd_ingest(a)
+    if a.verb == "doctor" and a.staged:
+        return doctor_staged(a)
     ROOT = find_root(d)
     set_cmd()
     if not ROOT:
