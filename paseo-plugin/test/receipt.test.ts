@@ -199,3 +199,8 @@ test("P21 after a plugin restart, an agent whose node exists gets the auto hando
   await end(r, "agt_1", "t2");
   assert.equal(r.appended.length, before);
 });
+
+test("receipt kind is a valid Paseo renderer kind", () => {
+  // Paseo's client rejects any renderer kind outside this pattern and then loads none of the plugin's client code.
+  assert.match(RECEIPT_KIND, /^[a-z][a-z0-9-]*$/);
+});

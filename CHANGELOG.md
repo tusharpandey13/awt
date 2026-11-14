@@ -6,7 +6,7 @@
 - `find --like TEXT [--limit N]`: ranked related decisions, answers, notes, refs and states from every workspace in the tree.
 - `decide` and `ask` print up to 3 `related:` records after the id line. `--related N` or `AWT_RELATED` sets the number; 0 turns it off. The lookup never fails the write and stops after 2 s.
 - `list --since ISO8601 [--down] --json`: rows written since a time, for the Paseo plugin.
-- Paseo plugin: a per-turn `awt.receipt` timeline line showing what was stored (`AWT_RECEIPT=0|changes`), `AWT_RELATED` forwarded to agents, and prompt lines for `find --like` and for calling `awt_resume` after compaction (Paseo has no session-hook field).
+- Paseo plugin: a per-turn `awt-receipt` timeline line (renamed from `awt.receipt`: Paseo rejects dots in renderer kinds, so the client never loaded and every row showed "Plugin timeline item unavailable") showing what was stored (`AWT_RECEIPT=0|changes`), `AWT_RELATED` forwarded to agents, and prompt lines for `find --like` and for calling `awt_resume` after compaction (Paseo has no session-hook field).
 - The task `AGENTS.md` template points at `find --like`.
 
 ### Changed
