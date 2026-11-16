@@ -170,5 +170,60 @@ class TestM6(P4):
         self.assertEqual(self.q("select count(*) from messages"), [(5,)])
 
 
+class TestM4(P4):
+    def setUp(self):
+        super().setUp()
+        for k in ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"):
+            self.env.pop(k, None)
+
+    def session(self, dirpath, sid, name=None):
+        os.makedirs(dirpath, exist_ok=True)
+        p = os.path.join(dirpath, name or "2026-10-24T12-00-00-000Z_%s.jsonl" % sid)
+        with open(p, "w", encoding="utf-8") as g:
+            g.writelines(json.dumps(r) + "\n" for r in pi_entries(sid, [("2026-10-24T12:00:00.300Z", "2026-10-24T12:00:01.000Z")]))
+        return p
+
+    def sids(self):
+        return [r[0] for r in self.q("select conversation_id from sessions order by 1")]
+
+    def test_session_dir_env_and_agent_dir_settings(self):
+        agent = os.path.join(self.tmp, "agent")
+        del self.env["AWT_PI_SESSIONS"]
+        self.env["PI_CODING_AGENT_DIR"] = agent
+        self.session(os.path.join(agent, "sessions", "--p--"), "pi-default-01")
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.sids(), ["pi-default-01"])
+        self.env["PI_CODING_AGENT_SESSION_DIR"] = os.path.join(self.tmp, "envdir")
+        self.session(os.path.join(self.tmp, "envdir", "--p--"), "pi-env-01")
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.sids(), ["pi-default-01", "pi-env-01"])  # a session already stored stays; the new location is read too
+        with open(os.path.join(agent, "settings.json"), "w") as g:
+            json.dump({"sessionDir": "custom-sessions"}, g)  # relative to the agent dir
+        self.session(os.path.join(agent, "custom-sessions"), "pi-settings-01")
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.sids(), ["pi-default-01", "pi-env-01", "pi-settings-01"])
+
+    def test_paseo_native_handle_path_and_project_settings(self):
+        f = self.session(os.path.join(self.tmp, "elsewhere"), "pi-handle-01")
+        self.put_agent("agt_h", "pi", "pi-handle-01", handle=f)
+        proj = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(proj, ".pi"))
+        with open(os.path.join(proj, ".pi", "settings.json"), "w") as g:
+            json.dump({"sessionDir": os.path.join(self.tmp, "projsessions")}, g)
+        self.session(os.path.join(self.tmp, "projsessions"), "pi-proj-01")
+        d = os.path.join(self.paseo, "agents", "tmp-parsekit")
+        with open(os.path.join(d, "agt_p.json"), "w") as g:
+            json.dump({"id": "agt_p", "provider": "pi", "cwd": proj, "persistence": {"sessionId": "pi-proj-01", "nativeHandle": "pi-proj-01"}}, g)
+        self.run_src("all", root=self.root)
+        self.assertEqual(self.sids(), ["pi-handle-01", "pi-proj-01"])
+        n = len(self.canon_rows("pi"))
+        self.assertIn("0 rows from", self.run_src("pi", root=self.root).stdout)  # incremental: nothing twice
+        self.assertEqual(len(self.canon_rows("pi")), n)
+        with open(f, "a", encoding="utf-8") as g:
+            g.write(json.dumps({"type": "message", "id": "late", "parentId": "a0", "timestamp": "2026-10-24T12:05:00.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "more"}]}}) + "\n")
+        self.run_src("pi", root=self.root)
+        self.assertEqual(len(self.canon_rows("pi")), n + 1)
+
+
 if __name__ == "__main__":
     unittest.main()

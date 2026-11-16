@@ -3,7 +3,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
 import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
-import math
+import itertools, math
 try:
     import sqlite3
 except ImportError:  # no _sqlite3: every verb but find --like, ingest and doctor's store line still works
@@ -2161,8 +2161,59 @@ def claude_dir():
     return os.environ.get("AWT_CLAUDE_PROJECTS") or os.path.join(claude_home(), "projects")
 
 
+def pi_agent_dir():
+    return os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR") or "~/.pi/agent")
+
+
 def pi_dir():
-    return os.environ.get("AWT_PI_SESSIONS") or os.path.expanduser("~/.pi/agent/sessions")
+    """The first pi session root, whose files are keyed by their path below it: AWT_PI_SESSIONS, else the default `<agent dir>/sessions`."""
+    return os.environ.get("AWT_PI_SESSIONS") or os.path.join(pi_agent_dir(), "sessions")
+
+
+def pi_settings_dir(settings, base):
+    """The `sessionDir` of a pi settings.json (a relative one is taken from base), or None."""
+    try:
+        with open(settings, encoding="utf-8") as g:
+            d = json.load(g).get("sessionDir")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return os.path.join(base, os.path.expanduser(d)) if isinstance(d, str) and d else None
+
+
+def pi_sources():
+    """(path, key, session name) of pi transcripts outside the first root: the other places pi can keep sessions (PI_CODING_AGENT_SESSION_DIR; `sessionDir` in `<agent dir>/settings.json` and,
+    for a Paseo pi agent, in `<its cwd>/.pi/settings.json`; the default `<agent dir>/sessions`, unless AWT_PI_SESSIONS names the root) and the exact file of a Paseo pi agent (`persistence.nativeHandle`). Read-only.
+    The key is the absolute path. A file is yielded once, however many places name it."""
+    agent = pi_agent_dir()
+    dirs = []
+    if not os.environ.get("AWT_PI_SESSIONS"):
+        dirs = [os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR") or ""), pi_settings_dir(os.path.join(agent, "settings.json"), agent), os.path.join(agent, "sessions")]
+    files = []
+    base = os.path.join(paseo_home(), "agents")
+    for d in sorted(os.listdir(base)) if os.path.isdir(base) else ():
+        for f in sorted(os.listdir(os.path.join(base, d))) if os.path.isdir(os.path.join(base, d)) else ():
+            try:
+                with open(os.path.join(base, d, f), encoding="utf-8") as g:
+                    a = json.load(g)
+                if not f.endswith(".json") or a.get("provider") != "pi":
+                    continue
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(a.get("cwd"), str) and os.path.isabs(a["cwd"]):
+                dirs.append(pi_settings_dir(os.path.join(a["cwd"], ".pi", "settings.json"), a["cwd"]))
+            h = (a.get("persistence") or {}).get("nativeHandle") if isinstance(a.get("persistence"), dict) else None
+            if isinstance(h, str) and os.path.isabs(h):
+                files.append(h)
+    seen = {os.path.realpath(pi_dir())}
+    for d in dirs:
+        if d and os.path.realpath(d) not in seen:
+            seen.add(os.path.realpath(d))
+            for p, _, name in claude_sessions(d) if os.path.isdir(d) else ():
+                yield p, os.path.abspath(p), name
+    for p in files:
+        if p.endswith(".jsonl") and os.path.isfile(p) and not os.path.islink(p) and not any(os.path.realpath(p).startswith(r + os.sep) for r in seen):
+            seen.add(os.path.realpath(p))
+            yield p, os.path.abspath(p), os.path.basename(p)[:-6]
 
 
 def opencode_db():
@@ -2262,7 +2313,7 @@ def ingest_claude(store):
 
 
 def ingest_pi(store):
-    return ingest_jsonl(store, "pi", pi_dir())
+    return ingest_jsonl(store, "pi", pi_dir(), pi_sources)
 
 
 def load_state(offp):
@@ -2276,7 +2327,7 @@ def load_state(offp):
         return {}, {}
 
 
-def ingest_jsonl(store, src, root):
+def ingest_jsonl(store, src, root, more=lambda: ()):
     """Append new source lines (one JSONL transcript per session: claude, pi) as canonical rows. Returns (rows written, files seen, files that failed).
     A file that fails is recorded under `errors` in the offsets file and the rest are still ingested."""
     private_dir(os.path.join(store, "ingest"), store)
@@ -2288,7 +2339,7 @@ def ingest_jsonl(store, src, root):
         files, errors = load_state(offp)
         used = {v.get("out") for v in files.values()}
         total, seen = 0, 0
-        for path, rel_, name in claude_sessions(root) if os.path.isdir(root) else ():
+        for path, rel_, name in itertools.chain(claude_sessions(root) if os.path.isdir(root) else (), more()):
             seen += 1
             try:
                 st = os.stat(path)
