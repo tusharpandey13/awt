@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, signal, socket, subprocess, time
+import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, sqlite3, stat, subprocess, time, urllib.parse
 
 VERSION = "0.2.0"
 HOST = socket.gethostname()
@@ -14,13 +14,13 @@ TOTAL = 4400
 BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200, lineage=300, children=500,
               task_goal=400, task_state=600, task_questions=300, task_effects=250, task_decisions=250)
 
-K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, timeout=300, margin=30, newer=8, walk=20000)
+K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, newer=8, walk=20000)
 CAPS = {
     "task.goal": 250, "task.done_means": 250, "state.scope": 40, "state.now": 700, "state.next": 300,
     "note.text": 280, "decision.choice": 300, "decision.why": 300, "decision.tags": 40, "question.text": 400,
     "answer.text": 400, "ref.target": 1000, "ref.title": 120, "ref.why": 200, "ref.kind": 40, "ref.branch": 200,
     "capture.from": 40, "capture.title": 120, "capture.ref": 1000, "doc.why": 200, "effect.target": 200,
-    "effect.why": 200, "effect.reason": 200, "effect.ref": 1000, "effect.run": 1000, "effect.snapshot": 1000,
+    "effect.why": 200, "effect.reason": 200, "effect.ref": 1000, "effect.how": 400, "effect.run": 1000, "effect.snapshot": 1000,
     "effect.verify": 1000, "node.name": 60, "node.key": 200, "ref.key": 200,
 }
 REQ = {
@@ -29,18 +29,18 @@ REQ = {
     "ref": ["target", "title", "kind", "access"], "capture": ["path", "from", "title", "sha"],
     "doc": ["path", "action", "by_doc"], "effect": ["id", "step"], "node": ["kind", "name"],
 }
-KINDS = ("root", "workspace", "task", "agent")
-LEGAL = {"root": ("workspace",), "workspace": ("task",), "task": ("task", "agent"), "agent": ("agent",)}
-PLURAL = {"workspace": "workspaces", "task": "tasks", "agent": "agents"}
-NODE_DIRS = {"root": (), "workspace": ("context", "docs", "misc"), "task": ("context", "docs", "outbox", "misc", "scratch"), "agent": ("scratch",)}
+KINDS = ("root", "project", "workspace", "task", "agent")
+LEGAL = {"root": ("project", "workspace"), "project": ("workspace",), "workspace": ("task",), "task": ("task", "agent"), "agent": ("agent",)}
+PLURAL = {"project": "projects", "workspace": "workspaces", "task": "tasks", "agent": "agents"}
+NODE_DIRS = {"root": (), "project": ("context", "docs", "misc"), "workspace": ("context", "docs", "misc"), "task": ("context", "docs", "outbox", "misc", "scratch"), "agent": ("scratch",)}
 ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
-        "effect.step": ("planned", "claimed", "sent", "unknown", "dropped")}
+        "effect.step": ("planned", "begun", "claimed", "sent", "unknown", "dropped")}
 LIMIT = "tree exceeds depth %d / %d nodes; deeper nodes are not covered" % (K["depth"], K["nodes"])
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
 LISTS = SECTIONS + ["nodes", "tree"]
-SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
+SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore", "BRIEF.md",
            "legacy", "context", "docs", "outbox", "misc"}
-IGNORE = ["scratch/", ".awt/claims/", ".awt/blobs/", ".awt/runs/"]
+IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/", "BRIEF.md"]  # runs/: relay worker logs; BRIEF.md: derived, regenerated
 SECRETS = [(n, re.compile(p)) for n, p in [
     ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
     ("github-pat", r"github_pat_[A-Za-z0-9_]{20,}"), ("slack-token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
@@ -51,33 +51,14 @@ BLOCK_BEGIN, BLOCK_END = "<!-- awt:begin -->", "<!-- awt:end -->"
 AGENTS_BLOCK = BLOCK_BEGIN + r'''
 # Task workspace (awt)
 
-Everything about this task lives here. Keep records with `./awt`. Never hand-edit `.awt/`.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+**Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
+''' + BLOCK_END + "\n"
+TREE_BLOCK = BLOCK_BEGIN + r'''
+# Task workspace (awt)
 
-**Start:** run `./awt resume` and follow it, unless you are a subagent with a brief.
-**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel work: add `--scope <name>`.
-
-| You have | Do |
-|---|---|
-| A link (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Don't copy it. |
-| An unopenable link | Record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
-| No usable link (pasted chat, notes, research) | `./awt capture --from slack --title "..." [file]` |
-| A plan, ADR, result or working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
-| A decision | `./awt decide "the choice" --why "the reason"`. Reversing: add `--supersedes <id>` |
-| A small fact | `./awt note "..."` |
-| A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
-| Anything else | `misc/`. Throwaway: `scratch/`. |
-
-**Anything leaving this machine** (message, comment, PR, ticket, published doc) goes through the outbox. Never send it directly.
-
-1. Write the draft in `outbox/`.
-2. `./awt effect plan --target "slack:#eng" --body outbox/x.md`. Add `--run '<cmd>'` only if a command can send it.
-3. Stop and show the person. They send it or approve `./awt effect apply`. Then `./awt effect mark <id> sent`.
-
-State `unknown` means it may have been sent. Never resend or use `--again`. Ask a person.
-
-**Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace. Check before deciding or asking; `decide` and `ask` list related records too, so read them.
-**Stuck or refused:** read `fix:`, then `./awt help agents`.
-**Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
+Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Your brief is `$AWT_DIR/BRIEF.md` (or run `awt resume`). Record a choice with `awt decide "..." --why "..."`, a question for a person with `awt ask "..."`. Everything else is recorded for you. Stuck: `awt help agents`.
+**Subagents:** skip the brief, write the result to `$AWT_DIR/out.md`.
 ''' + BLOCK_END + "\n"
 README = '''# {goal}
 
@@ -86,16 +67,13 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 - `./awt resume`: where things stand
 - `./awt list`, `./awt find <term>`: everything known about this task
 - `context/` inbound material, `docs/` working docs, `outbox/` drafts going out, `misc/` the rest, `scratch/` throwaway
-- `./awt effect mark <id> sent` after you send something from `outbox/`
 '''
-TREE_BLOCK = (AGENTS_BLOCK.replace("./awt", "awt")
-              .replace("Everything about this task lives here. Keep records with `awt`. Never hand-edit `.awt/`.", "Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Keep records with `awt`, from any directory.")
-              .replace("write output to `docs/<brief>.out.md`", "write the result to `$AWT_DIR/out.md`"))
 TREE_README = '''# {goal}
 
-Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `workspaces/<name>/tasks/<name>/agents/<name>/`.
+Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `projects/<name>/workspaces/<name>/tasks/<name>/agents/<name>/` (a workspace may also sit directly under the root, in `workspaces/`).
 
 - `awt list tree`: everything below here
+- `awt init --kind project --name NAME`: add a project (optional); from inside it, `--kind workspace --name NAME`
 - `awt init --kind workspace --name NAME`: add a workspace; from inside it, `--kind task --name NAME --goal T --done T`
 - Agents run with `AWT_DIR` set to their own node
 '''
@@ -103,10 +81,10 @@ SETTINGS = '''{
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt resume --hook" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt ingest --source claude --hook" } ] }
     ]
-  },
-  "permissions": {
-    "ask": [ "Bash(./awt effect apply *)", "Bash(awt effect apply *)" ]
   }
 }
 '''
@@ -121,6 +99,7 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 |---|---|
 | Starting, not a subagent | `./awt resume` |
 | Need to know if it is already recorded | `./awt find "term"` |
+| Related decisions, answers and notes from every workspace | `./awt find --like "a sentence"` (`decide` and `ask` list them too) |
 | List one kind of thing | `./awt list refs` (also context docs outbox misc decisions questions effects notes state) |
 | See old/superseded/answered/terminal items | `./awt list decisions --all` |
 | Small fact for later, not a decision | `./awt note "text"` |
@@ -130,9 +109,10 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 | Slack/chat you can only see pasted | `./awt capture --from slack --title "t" notes.txt` |
 | Same content on stdin | `./awt capture --from slack --title "t" -` |
 | Doc replaced by a better one | `./awt supersede docs/old.md docs/new.md --why "r"` |
-| Sent message may have failed | `./awt effect show <id>`, then ask a person |
+| About to send something that must not go out twice | `./awt effect plan`, `begin`, send it yourself, `mark` (below) |
+| Effect stuck `begun` or `unknown` | `./awt effect show <id>`, then ask a person |
 | Check workspace health | `./awt doctor` |
-| Commit the task dir (person asked) | `./awt save "message"` |
+| Commit the task dir (person asked) | `git add -A && git commit -m "message"` (`awt doctor --staged` checks for secrets) |
 | Task finished | `./awt status done` |
 
 ## Syntax
@@ -148,26 +128,22 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 ./awt supersede docs/old.md docs/new.md [--why "T"]
 ./awt status active|paused|done
 ./awt find "term"
-./awt effect plan --target T (--body FILE | --run CMD) [--class additive|overwrite] [--snapshot CMD] [--verify CMD] [--after ID]... [--again] [--why T]
+./awt effect plan --target T [--body FILE] [--how TEXT] [--after ID]... [--again] [--why T]
+./awt effect begin ID
+./awt effect mark ID sent [--ref URL] | not-sent --why T | unknown --why T | dropped
 ./awt effect show ID
-./awt effect apply ID --target T [--timeout SECONDS]
-./awt effect mark ID sent|not-sent|dropped [--ref URL] [--why T]
 ```
 
-Example, manual Slack message (normal case):
+The effect ledger is optional. It records a send so it is not made twice. The tool never runs the command: you send with your own tools, and your host's permission system sees the real command.
 
 ```
-./awt effect plan --target "slack:#eng" --body outbox/release-note.md
+./awt effect plan --target "slack:#eng" --body outbox/release-note.md --how 'slack-cli post "#eng" < outbox/release-note.md'
+./awt effect begin e-3c91d0aa        # claims it; print the body path and the mark command
+(send it with your own tools)
 ./awt effect mark e-3c91d0aa sent --ref https://example.slack.com/archives/C1/p1
 ```
 
-Example, scripted send with check:
-
-```
-./awt effect plan --target "jira:TKT-1" --body outbox/c.md --run 'jira-cli comment TKT-1 "$(cat "$AWT_BODY")"' --verify 'jira-cli show TKT-1 | grep -q done'
-```
-
-`apply` is gated by a permission prompt for a person. Do not run it without approval. Each `plan` prints the exact next command: copy it.
+States: `planned` -> `begun` -> `sent`. A failed send: `mark not-sent --why T` (back to `planned`, next attempt). Not sure what happened: `mark unknown --why T`. `--how` is the intended command as text; it is never run. Each `plan` prints the exact next command: copy it.
 
 ## Refusals
 
@@ -181,16 +157,15 @@ Every refusal prints `error:` and `fix:`. Read the `fix:` first.
 | Secret match (names a pattern) | A field holds a credential. Nothing written. No bypass exists. | Remove the secret, refer to it by name or location. If you cannot tell where it is, STOP and ask a person. |
 | Unknown id (exit 4) | Wrong id for `answer`, `--supersedes`, `--after`, `effect`. | `./awt list <section>` and copy the id. |
 | Already answered / already superseded | Duplicate action. | Use the current id the `fix:` names. |
+| Removed flag or `effect apply` (exit 2) | The tool no longer runs commands. | Send it yourself; use `plan`, `begin`, `mark`. |
 | Path escapes the root | `--body` or `supersede` path resolves outside the task dir. | Copy the file into `outbox/` or `docs/` and retry. |
-| `apply`: target mismatch | `--target` differs from the plan. | Re-run with the exact target from `effect show`. Never edit the plan to match. |
-| `apply`: body changed | Body file edited after planning. | Re-plan. Show the person the new body: they approved the old one. |
-| `apply`: manual effect | No `--run`. A person sends. | Show the body path, wait, then `effect mark <id> sent`. |
-| `apply`: `--after` not sent | A prerequisite is not `sent`. | Resolve that effect first. |
+| `begin`: not planned | The effect is `begun`, `unknown`, `sent` or `dropped`. | `effect show <id>`. Never send it again. |
+| `begin`: someone else is sending | Another process holds the claim. | Wait; check `effect show`. |
+| `begin`: body changed | Body file edited after planning. | Re-plan. Show the person the new body. |
+| `begin`: `--after` not sent | A prerequisite is not `sent`. | Resolve that effect first. |
 | `plan`: open `unknown` on target | An earlier send on this target may have happened. | STOP and ask a person. Do not add `--again`. |
 | `plan`: same key, dropped | Person dropped this exact send. | Only if a person wants it again: `--again`. |
-| `overwrite` without `--snapshot` | No way back. | Add `--snapshot CMD`, or ask whether the action should be `additive`. |
-| `status done` refused | Lists open questions and effects (`planned`, `claimed`, `unknown`). | Resolve each. For questions, a person must answer. For `unknown`, STOP and ask. Never mark `sent` or `dropped` to get past it. |
-| `mark`: effect is `claimed`, pid alive | A send is running now. | Wait. |
+| `status done` refused | Lists open questions and effects (`planned`, `begun`, `unknown`). | Resolve each. For questions, a person must answer. For `unknown`, STOP and ask. Never mark `sent` or `dropped` to get past it. |
 | Exit 3 | No write permission. | Give the printed command to a person. |
 | Exit 4, no `.awt/` | Not in a task. | `cd` to the task dir or pass `--dir`. Do not run `init` unless told. |
 
@@ -198,14 +173,13 @@ Every refusal prints `error:` and `fix:`. Read the `fix:` first.
 
 | State | You may | You must not |
 |---|---|---|
-| `planned` | Show the person; wait for approval; `mark dropped` if the person cancels | Send it yourself |
-| `claimed` | Wait | `mark` anything |
+| `planned` | `begin` it, then send; `mark dropped` if it is cancelled | Send without `begin` when a person asked for the ledger |
+| `begun` | Send (once) only if you ran `begin` yourself in this session; otherwise treat it as unknown and ask a person. Then `mark sent`, `not-sent --why` or `unknown --why` | Begin again; leave it unmarked |
 | `sent` | Proceed; cite `--ref` if known | Plan the same send again |
 | `unknown` | Run `effect show <id>`, report to a person, wait for them | Resend. Plan on that target. Mark it yourself. Run `status done`. |
 | `dropped` | Move on | Revive without a person asking |
-| `conflict` | Report to a person | Mark it |
 
-`unknown` means the message may already be out. Resending can duplicate it. Only a person who has checked the real target may run `mark <id> sent` or `mark <id> not-sent`. `not-sent` makes it `planned` again for another attempt; the person decides that, not you.
+`begun` with no mark stays `begun`: it cannot know whether the send happened, so it never retries and never times out. `status done` is refused until it is marked. `unknown` means the message may already be out. Only a person who has checked the real target may mark an `unknown` effect `sent` or `not-sent`. `not-sent` makes it `planned` again for another attempt.
 
 `--again` is not a retry. It creates a new, separate send that bypasses the duplicate check. A failed or `unknown` send is never retried with `--again`. Use it only when a person wants a deliberate second identical message.
 
@@ -215,8 +189,8 @@ Worker, with a brief:
 - Skip `./awt resume`. Read the brief.
 - Write output to `docs/<brief>.out.md`. Never name a file starting with REPORT, SUMMARY, FINDINGS or ANALYSIS: Claude Code refuses those for subagents.
 - Use `note`, `decide`, `ref`, `capture`, `ask`: parallel writes are safe.
-- Do not run `state`, `status`, `effect apply` or `effect mark`. Do not write a handoff.
-- Plan effects only if the brief says so. Never send.
+- Do not run `state` or `status`. Do not write a handoff.
+- Use `effect` only if the brief says so, and send only when it says so.
 
 Orchestrator:
 - Owns `state` and `status`. Run `./awt state` once after collecting worker output, with `--next` naming the next step.
@@ -224,26 +198,25 @@ Orchestrator:
 
 ## Big tasks: relay
 
-If `./relay` exists and the work splits into parts, do not run them all in one session. Write a plan file (`./relay help` shows the format) with small units, a cheap model for reading, and a `check` command wherever a test can decide. Show the person the plan and `./relay run <plan>`, then stop. Afterwards `./awt resume` shows the result. Workers cannot send anything.
+If `./relay` exists and the work splits into parts, do not run them all in one session. Write a plan file (`./relay help` shows the format) with small units, a cheap model for reading, and a `check` command wherever a test can decide. Show the person the plan and `./relay run <plan>`, then stop. Afterwards `./awt resume` shows the result. Workers plan and mark, and send only when their unit says so.
 
 ## Wrong moves
 
 - Editing or deleting anything under `.awt/`. Use verbs. A bad row is quarantined, not fatal.
 - Copying a page or thread you can link: use `ref`. Use `capture` only when no link works.
 - Writing a second handoff such as `docs/HANDOFF.md`. `state` is the handoff.
-- Sending directly (curl, `gh`, `slack` CLI, API call) instead of through `effect`.
 - Putting long text in `--now`, `--why`, `note`. Write `docs/`, reference the path.
 - Using `--again` or a fresh `plan` to get around an `unknown` effect.
 - Re-asking or re-researching without `./awt find` first.'''
 
 USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
-  init --kind root|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
+  init --kind root|project|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
   state --now T --next T      note T                   decide C --why T         ask T
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
   supersede OLD NEW           status active|paused|done
-  effect plan|show|apply|mark doctor                   save MESSAGE
+  effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|all] [--hook]
 exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
 agent reference: awt help agents"""
 
@@ -436,7 +409,7 @@ def load_at(path):
 
 
 def attention(D):
-    return [e for e in D["eff"].values() if e["state"] in ("planned", "claimed", "unknown", "conflict")]
+    return [e for e in D["eff"].values() if e["state"] in ("planned", "begun", "unknown")]
 
 
 def summarize(path, base, depth=None):
@@ -526,61 +499,44 @@ def valid(r):
     return True
 
 
+REMOVED_FLAGS = ("--run", "--snapshot", "--verify", "--class", "--timeout")
+
+
 def claim_path(e):
     return P(".awt", "claims", "%s.%s" % (e["key"], e["attempt"]))
 
 
-def alive(e):
-    pid = e.get("pid")
-    if e.get("chost") != HOST or not isinstance(pid, int) or not 0 < pid < 2 ** 31:
-        return False
-    if time.time() > e["cts"] + e["to"] + K["margin"]:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
 def fold_effect(D, r):
+    """Effect state machine (SPEC 6.2). `claimed` is the old name of `begun`; two legacy `claimed` rows for one attempt mean two processes ran it (legacy conflict), but a second `begun` row is quarantined. A claim file with no `begun` row (a crash between the two) reads as begun."""
     i, s, n = r["id"], r["step"], r.get("attempt", 1)
+    legacy = s == "claimed"
+    s = "begun" if legacy else s
     e = D["eff"].get(i)
     if e is None:
         if s != "planned" or not r.get("target") or not r.get("key"):
             return False
-        e = D["eff"][i] = dict(r, attempt=n, hist=[], claims=0, manual=not r.get("run"))
+        e = D["eff"][i] = dict(r, attempt=n, hist=[], claims=0)
     else:
-        cur, crashed = e["step"], e["step"] == "planned" and os.path.exists(claim_path(e))
+        cur = derive(e)
         if s == "planned":
-            ok = n == e["attempt"] + 1 and (cur in ("unknown", "claimed") or crashed)
+            ok = n == e["attempt"] + 1 and cur in ("begun", "unknown")
         else:
             ok = n == e["attempt"] and (
-                (s == "claimed" and cur in ("planned", "claimed") and not e["manual"])
-                or (s == "sent" and (cur == "unknown" or cur == "claimed" or (cur == "planned" and (e["manual"] or crashed))))
-                or (s == "unknown" and cur == "claimed") or (s == "dropped" and cur == "planned"))
+                (s == "begun" and (e["step"] == "planned" or legacy and e["step"] == "begun")) or (s == "sent" and cur in ("planned", "begun", "unknown"))
+                or (s == "unknown" and cur == "begun") or (s == "dropped" and cur == "planned"))
         if not ok:
             return False
         e["attempt"] = n
         if s == "planned":
             e["claims"] = 0
     e["step"] = s
-    if s == "claimed":
-        e["claims"] += 1
-        e["pid"], e["chost"], e["cts"], e["to"] = r.get("pid"), r.get("host"), epoch(r["ts"]), r.get("timeout", K["timeout"])
+    e["claims"] += legacy
     e["hist"].append(r)
     return True
 
 
 def derive(e):
-    s = e["step"]
-    if s == "claimed":
-        return "conflict" if e["claims"] > 1 else "claimed" if alive(e) else "unknown"
-    if s == "planned" and os.path.exists(claim_path(e)):
-        return "unknown"
-    return s
+    return "begun" if e["step"] == "planned" and os.path.exists(claim_path(e)) else e["step"]
 
 
 def load():
@@ -712,6 +668,8 @@ def newer_files(since):
     for dp, dns, fns in os.walk(ROOT):
         dns[:] = [d for d in dns if d != ".git" and not (dp == ROOT and d in (".awt", "scratch")) and not is_node_dir(os.path.join(dp, d))]
         for n in fns:
+            if n == "BRIEF.md" and dp == ROOT:
+                continue
             seen += 1
             try:
                 m = os.lstat(os.path.join(dp, n)).st_mtime
@@ -752,11 +710,12 @@ def fit(head, lines, key, sect, suffix=""):
 
 
 def eff_next(e):
-    q = shlex.quote
     if e["state"] == "planned":
-        return ("./awt effect apply %s --target %s" % (e["id"], q(e["target"]))) if e.get("run") else \
-            ("send %s by hand, then ./awt effect mark %s sent" % (e.get("body", "it"), e["id"]))
-    return "ask a person, then ./awt effect mark %s sent|not-sent  (see ./awt effect show %s)" % (e["id"], e["id"])
+        return "./awt effect begin %s, send it, then ./awt effect mark %s sent" % (e["id"], e["id"])
+    if e["state"] == "begun":
+        w = "legacy conflict: may have been sent twice; " if e["claims"] > 1 else ""
+        return w + "send only if you ran begin yourself this session, else ask a person; then ./awt effect mark %s sent|not-sent (see effect show)" % e["id"]
+    return "check the target, then ./awt effect mark %s sent|not-sent  (see ./awt effect show %s)" % (e["id"], e["id"])
 
 
 def size(n):
@@ -940,7 +899,7 @@ def ref_view(r):
 
 JSON_KEYS = dict(
     refs="ts by target title kind why access path branch key", decisions="ts by id choice why tags supersedes superseded_by",
-    questions="ts by id text answer", effects="ts by id target why body run state attempt", notes="ts by id text", state="ts by scope now next")
+    questions="ts by id text answer", effects="ts by id target why body how state attempt", notes="ts by id text", state="ts by scope now next")
 
 
 def shaped(name, rows):
@@ -962,7 +921,7 @@ def listing_json(name, D, all_):
     if name == "questions":
         return shaped(name, [dict(q, answer=D["ans"][i]["text"] if i in D["ans"] else None) for i, q in D["q"].items() if all_ or i not in D["ans"]])
     if name == "effects":
-        return shaped(name, [e for e in D["eff"].values() if all_ or e["state"] not in ("sent", "dropped")])
+        return shaped(name, [dict(e, how=e.get("how") or e.get("run")) for e in D["eff"].values() if all_ or e["state"] not in ("sent", "dropped")])
     if name == "notes":
         return shaped(name, D["notes"])
     return shaped("state", D["hist"] if all_ else D["states"].values())
@@ -994,6 +953,49 @@ def listing(name, D, all_):
         return ["%s %s" % (n["id"], n["text"]) for n in D["notes"]]
     rows = D["hist"] if all_ else list(D["states"].values())
     return ["[%s] %s now: %s | next: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"]) for s in rows]
+
+
+# ---------- BRIEF.md: a derived file, never read back as state ----------
+FANOUT = 20  # most agents below a task whose briefs a task write refreshes
+WRITES = {"state", "note", "decide", "ask", "answer", "ref", "capture", "supersede", "status"}
+
+
+def write_brief(path):
+    """Regenerate path/BRIEF.md from the log: temp file in .awt/, then rename. Nothing reads it back; any failure is silent."""
+    global ROOT, A
+    old, tmp = (ROOT, A), os.path.join(path, ".awt", "BRIEF.%d.tmp" % os.getpid())
+    try:
+        if not os.path.isdir(os.path.join(path, ".awt")):
+            return
+        ROOT = path
+        A = "awt" if (not node_info(path)["legacy"] or parent(path)) else "./awt"
+        text = brief() + "Generated %s; ages above are as of then.\n" % now()[:19]
+        with open(tmp, "w", encoding="utf-8") as g:
+            g.write(text)
+        os.replace(tmp, os.path.join(path, "BRIEF.md"))
+    except (Exception, SystemExit):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    finally:
+        ROOT, A = old
+
+
+def refresh_briefs(path):
+    """After a write at path: its own brief, its parent's (children section) and, for a task, every agent below (task section)."""
+    write_brief(path)
+    p = parent(path)
+    if p:
+        write_brief(p)
+    try:
+        if node_info(path)["kind"] == "task":
+            agents = [q for q, _ in descendants(path)[0] if node_info(q)["kind"] == "agent"]
+            if len(agents) <= FANOUT:  # a big fan-out would make every task write cost one file per agent; their next write or hook refreshes them
+                for q in agents:
+                    write_brief(q)
+    except (Exception, SystemExit):
+        pass
 
 
 # ---------- verbs ----------
@@ -1036,7 +1038,7 @@ def build_node(path, kind, name, key, goal, done):
     global ROOT
     old, ROOT = ROOT, path
     try:
-        for d in NODE_DIRS[kind] + (".awt/claims", ".awt/blobs", ".awt/runs"):
+        for d in NODE_DIRS[kind] + (".awt/claims",):
             os.makedirs(P(d), exist_ok=True)
         os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
         emit("node", kind=kind, name=name, key=key)
@@ -1098,7 +1100,7 @@ def init_child(a):
     if kind == "task" and not a.goal:
         die("a task needs --goal and --done", "give both")
     goal = a.goal or a.name
-    done = a.done or ("ongoing" if kind == "workspace" else "agent work recorded")
+    done = a.done or ("ongoing" if kind in ("project", "workspace") else "agent work recorded")
     check("node", dict(kind=kind, name=a.name, key=a.key, by=BY))
     check("task", dict(goal=goal, done_means=done, by=BY))
     base = P(PLURAL[kind])
@@ -1137,6 +1139,7 @@ def init_child(a):
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
+        refresh_briefs(final)
         out("init %s %s" % (rel(final), kind))
     finally:
         if lockfd is not None:
@@ -1154,7 +1157,7 @@ def cmd_init(a):
     if bool(a.goal) != bool(a.done):
         die("--goal and --done go together", "give both", 2)
     if (a.name or a.key) and not a.kind:
-        die("--name and --key need --kind", "give --kind root|workspace|task|agent, or drop them", 2)
+        die("--name and --key need --kind", "give --kind root|project|workspace|task|agent, or drop them", 2)
     tree = a.kind == "root"
     ni = node_info(ROOT)
     if not ni["legacy"] and ni["kind"] != a.kind:
@@ -1167,7 +1170,7 @@ def cmd_init(a):
             has_rows = False
         if has_rows:
             die("%s already has records and no node row" % ROOT, "a root needs a directory without .awt records; use an empty one")
-    for d in (("workspaces",) if tree else ("context", "docs", "outbox", "misc", "scratch")) + (".awt/claims", ".awt/blobs", ".awt/runs"):
+    for d in (("workspaces",) if tree else ("context", "docs", "outbox", "misc", "scratch")) + (".awt/claims",):
         os.makedirs(P(d), exist_ok=True)
     os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
     made = []
@@ -1204,6 +1207,7 @@ def cmd_init(a):
     if a.goal and (not t or (t["goal"], t["done_means"]) != (a.goal, a.done)):
         emit("task", goal=a.goal, done_means=a.done)
         made.append("task")
+    refresh_briefs(ROOT)
     out("init %s: %s" % (ROOT, " ".join(made) or "nothing to change"))
 
 
@@ -1236,6 +1240,9 @@ def cmd_resume(a):
                 globals()["ROOT"] = r
                 set_cmd()
                 sys.stdout.write(brief())
+                sys.stdout.flush()
+                if not os.environ.get("AWT_NO_BRIEF"):
+                    write_brief(r)
         except BaseException as x:
             if isinstance(x, KeyboardInterrupt):
                 raise
@@ -1326,6 +1333,8 @@ def scope_nodes(tree, up, down, deadline=None):
 
 def cmd_find(a):
     if a.like is not None:
+        if a.sessions:
+            die("--sessions cannot be combined with --like", 'awt find --sessions "term"', 2)
         return find_like(a)
     if a.term is None:
         die("find needs a TERM or --like TEXT", 'awt find "term"', 2)
@@ -1343,6 +1352,12 @@ def cmd_find(a):
         out("+%d more" % (len(hits) - K["hits"]))
     if over:
         out("+ " + LIMIT)
+    if a.sessions:
+        found = session_hits(a.term, K["hits"])
+        for h in found or []:
+            out(h)
+        if found is None:
+            out("note: no store.db yet (run awt ingest); sessions not searched")
 
 
 STOPWORDS = set("""a about after all also an and any are as at be been but by can could did do does for from had has have he her his how i if in into
@@ -1360,13 +1375,35 @@ def words(text):
     return seen
 
 
+def fts_ok():
+    """Whether the running sqlite3 has FTS5 (AWT_TEST_NO_FTS5 is a test hook)."""
+    if os.environ.get("AWT_TEST_NO_FTS5"):
+        return False
+    try:
+        sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def bm25_scores(docs, ws):
+    """{index into docs: score, higher is better} for docs matching any word of ws. An in-memory FTS5 index over docs only, so the result depends on nothing but its inputs."""
+    if not ws or not docs:
+        return {}
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE VIRTUAL TABLE d USING fts5(t)")
+    db.executemany("INSERT INTO d(rowid, t) VALUES (?, ?)", enumerate(docs, 1))
+    q = " OR ".join('"%s"' % w for w in ws[:64])
+    return {i - 1: -s for i, s in db.execute("SELECT rowid, bm25(d) FROM d WHERE d MATCH ?", (q,))}
+
+
 def recall_rows(D, prefix, skip=None):
-    """Candidate records of one node for recall: (sort ts, words, line, rule?). Current decisions, questions, notes, refs, the main state."""
+    """Candidate records of one node for recall: (sort ts, words, line, rule?, indexed text). Current decisions, questions, notes, refs, the main state."""
     at = " @" + prefix if prefix else ""
     res = []
 
     def add(r, ident, text, line, rule=False):
-        res.append((r["ts"], set(words(ident + " " + text)), line, rule))
+        res.append((r["ts"], set(words(ident + " " + text)), line, rule, ident + " " + text))
     for d in D["cur_dec"]:
         if d["id"] != skip:
             tag = " [%s]" % ",".join(d["tags"]) if d.get("tags") else ""
@@ -1387,7 +1424,7 @@ def recall_rows(D, prefix, skip=None):
 
 
 def recall(text, limit, nodes, skip=None, deadline=None, width=200):
-    """(lines, stopped): the best-matching records across the --tree node set, ranked by rarity of the shared words. Unreadable nodes are skipped; show_related swallows anything else."""
+    """(lines, stopped): the best-matching records across the --tree node set, ranked by FTS5 bm25 (a rule decision counts 1.5x; ties go to the newest). Unreadable nodes are skipped; show_related swallows anything else."""
     q = words(text)
     if not q:
         return [], False
@@ -1403,17 +1440,11 @@ def recall(text, limit, nodes, skip=None, deadline=None, width=200):
             continue
     if os.environ.get("AWT_TEST_RECALL_FAULT"):  # a test hook: proves a failure here cannot undo a write
         raise RuntimeError("injected recall fault")
-    df = {}
-    for _, ws, _, _ in cands:
-        for w in ws:
-            df[w] = df.get(w, 0) + 1
+    sc = bm25_scores([c[4] for c in cands], q)
     need = 1 if len(q) <= 2 else 2
-    scored = []
-    for ts, ws, line, rule in cands:
-        shared = [w for w in q if w in ws]
-        if len(shared) >= need:
-            scored.append((sum(math.log(1 + len(cands) / df[w]) for w in shared) * (1.5 if rule else 1), ts, line))
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    scored = [(sc[i] * (1.5 if c[3] else 1), c[0], c[2]) for i, c in enumerate(cands) if i in sc and sum(w in c[1] for w in q) >= need]
+    scored.sort(key=lambda x: x[1], reverse=True)  # ties go to the newest
+    scored.sort(key=lambda x: x[0], reverse=True)
     return [cut(" ".join(l.split()), width) for _, _, l in scored[:limit]], stopped
 
 
@@ -1458,7 +1489,7 @@ def _find_here(term, prefix):
                         and not is_node_dir(os.path.join(dp, d)))
         for n in sorted(fns):
             p = os.path.join(dp, n)
-            if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n == "awt"):
+            if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n in ("awt", "BRIEF.md")):
                 continue
             try:
                 if not os.path.isfile(p) or os.path.getsize(p) > K["big"]:
@@ -1672,24 +1703,34 @@ def cmd_status(a):
         for p, _ in ds:
             d, i = load_at(p), node_info(p)
             where = rel(p)
-            if i["kind"] in ("workspace", "task") and d["status"] == "active":
+            if i["kind"] in ("project", "workspace", "task") and d["status"] == "active":
                 bl.append("%s %s is active (%s)" % (i["kind"], i["name"], where))
             bl += ["question %s open in %s" % (q["id"], where) for q in d["open_q"]]
             bl += ["effect %s is %s in %s" % (e["id"], e["state"], where) for e in attention(d)]
         if len(bl) > 20:
             bl = bl[:20] + ["+%d more (list nodes, list questions, list effects show the rest)" % (len(bl) - 20)]
         if bl:
-            die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first")
+            die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first (a begun effect: ./awt effect mark ID sent|not-sent|unknown)")
     emit("status", status=a.value)
     out("status " + a.value)
 
 
 # ---------- effects ----------
-def eff_plan(a):
+def lock():
     fcntl.flock(os.open(P(".awt", "events.jsonl"), os.O_RDONLY | os.O_CREAT, 0o644), fcntl.LOCK_EX)  # held to exit: check-then-write must not interleave
+
+
+def body_changed(e):
+    try:
+        with open(P(e["body"]), "rb") as g:
+            return sha(g.read()) != e.get("body_sha")
+    except OSError:
+        return True
+
+
+def eff_plan(a):
+    lock()
     D = load()
-    if not a.body and not a.run:
-        die("need --body or --run", "add --body outbox/x.md and/or --run CMD", 2)
     body = bsha = None
     if a.body:
         p = inside(a.body)
@@ -1698,38 +1739,79 @@ def eff_plan(a):
         body = rel(p)
         with open(p, "rb") as g:
             bsha = sha(g.read())
-    if a.cls == "overwrite" and not a.snapshot:
-        die("overwrite effects need --snapshot", "add --snapshot 'CMD that prints the current content'")
     for x in a.after or []:
         get_eff(D, x)
     nonce = os.urandom(8).hex() if a.again else ""
-    key = sha(json.dumps([a.target, a.run or "", bsha or "", a.cls, nonce]).encode())
+    key = sha(json.dumps([a.target, bsha or "", nonce]).encode())
     for e in D["eff"].values():
-        if e["key"] == key:
+        # rows written before v2 carry `class` and were keyed with run and class too
+        old = sha(json.dumps([a.target, e.get("run") or "", bsha or "", e.get("class") or "additive", nonce]).encode())
+        if e["key"] == key or "class" in e and e["key"] == old:
             if e["state"] == "dropped":
                 die("%s was dropped" % e["id"], "plan it again with --again")
+            if e["state"] == "sent":
+                return out("%s is already sent (nothing written); to send again use --again, or plan a narrower --target" % e["id"])
             return out("%s %s (already planned, nothing written)" % (e["id"], e["state"]))
     if not a.again:
         for e in D["eff"].values():
-            if e["target"] == a.target and e["state"] in ("unknown", "conflict"):
-                die("%s on %s is %s; it may already have been sent" % (e["id"], a.target, e["state"]),
+            if e["target"] == a.target and e["state"] == "unknown":
+                die("%s on %s is unknown; it may already have been sent" % (e["id"], a.target),
                     "check with a person, ./awt effect mark %s sent|not-sent, or plan with --again" % e["id"])
     i = new_id("e")
-    emit("effect", id=i, step="planned", attempt=1, target=a.target, key=key, body=body, body_sha=bsha, run=a.run,
-         **{"class": a.cls}, snapshot=a.snapshot, verify=a.verify, after=a.after, why=a.why)
-    nxt = "./awt effect apply %s --target %s" % (i, shlex.quote(a.target)) if a.run else \
-        "send %s by hand, then ./awt effect mark %s sent" % (body, i)
-    out(c("%s planned; next: %s" % (i, nxt)))
+    emit("effect", id=i, step="planned", attempt=1, target=a.target, key=key, body=body, body_sha=bsha, how=a.how, after=a.after, why=a.why)
+    out(c("%s planned; next: ./awt effect begin %s, send it yourself, then ./awt effect mark %s sent" % (i, i, i)))
+
+
+def eff_begin(a):
+    lock()
+    D = load()
+    e = get_eff(D, a.id)
+    if e["state"] != "planned":
+        die("%s is %s, not planned" % (a.id, e["state"]), "only a planned effect can begin; see ./awt effect show %s" % a.id)
+    for x in e.get("after") or []:
+        if D["eff"].get(x, {}).get("state") != "sent":
+            die("prerequisite %s is not sent" % x, "send %s first" % x)
+    if e.get("body") and body_changed(e):
+        die("body changed since planning", "plan again: ./awt effect plan --target %s --body %s ..." % (shlex.quote(e["target"]), e["body"]))
+    os.makedirs(P(".awt", "claims"), exist_ok=True)
+    try:
+        os.close(os.open(claim_path(e), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+    except FileExistsError:
+        die("someone else is sending %s" % a.id, "check ./awt effect show " + a.id)
+    emit("effect", id=a.id, step="begun", attempt=e["attempt"])
+    out("%s begun (attempt %d)" % (a.id, e["attempt"]))
+    if e.get("body"):
+        out("body: " + e["body"])
+    if e.get("how") or e.get("run"):
+        out("how: " + (e.get("how") or e["run"]))
+    out("send it yourself, then ./awt effect mark %s sent [--ref URL] | not-sent --why T | unknown --why T" % a.id)
 
 
 def eff_show(a):
     e = get_eff(load(), a.id)
+    old = ("class", "snapshot", "verify")
     for k, v in e.items():
-        if k not in ("hist", "claims", "chost", "manual"):
+        if k not in ("hist", "run", "how", "claims") + old:
             out("%s: %s" % (k, v))
+    if e.get("how") or e.get("run"):
+        out("how: %s" % (e.get("how") or e["run"]))
+    for k in old:
+        if k in e:
+            out("legacy %s: %s" % (k, e[k]))
     out("history:")
     for r in e["hist"]:
         out("  %s %s attempt=%s %s" % (r["ts"], r["step"], r.get("attempt", 1), r.get("reason") or r.get("ref") or r.get("why") or ""))
+    if e["claims"] > 1:
+        out("legacy conflict: may have been sent twice")
+    for sub in ("runs", "blobs"):
+        if sub == "blobs" and not e.get("snapshot"):
+            continue  # blobs are named by content hash, so they cannot be tied to one effect
+        try:
+            names = sorted(n for n in os.listdir(P(".awt", sub)) if sub == "blobs" or n.startswith(a.id + "."))
+        except OSError:
+            continue
+        for n in names[:20]:
+            out("legacy file: .awt/%s/%s%s" % (sub, n, " (tree-wide)" if sub == "blobs" else ""))
     if e.get("body"):
         out("body path: " + e["body"])
         try:
@@ -1739,93 +1821,19 @@ def eff_show(a):
             out("(body unreadable)")
 
 
-def sh(cmd, env, logf, timeout):
-    p = subprocess.Popen(["sh", "-c", cmd], cwd=ROOT, env=env, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
-    try:
-        return p.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        p.wait()
-        return "timeout"
-
-
-def eff_apply(a):
-    if a.timeout < 1:
-        die("--timeout must be at least 1", "give a number of seconds, 1 or more", 2)
-    D = load()
-    e = get_eff(D, a.id)
-    if e["state"] != "planned":
-        die("%s is %s, not planned" % (a.id, e["state"]), "never resend an unknown effect; ask a person, then ./awt effect mark %s sent|not-sent" % a.id)
-    if not e.get("run"):
-        die("%s is manual; no command to run (body: %s)" % (a.id, e.get("body")), "send it by hand, then ./awt effect mark %s sent" % a.id)
-    if a.target != e["target"]:
-        die("--target does not match the planned target", "use --target " + shlex.quote(e["target"]))
-    for x in e.get("after") or []:
-        if D["eff"].get(x, {}).get("state") != "sent":
-            die("prerequisite %s is not sent" % x, "send %s first" % x)
-    bpath = ""
-    if e.get("body"):
-        bpath = P(e["body"])
-        try:
-            with open(bpath, "rb") as g:
-                ok = sha(g.read()) == e.get("body_sha")
-        except OSError:
-            ok = False
-        if not ok:
-            die("body changed since planning", "plan again: ./awt effect plan --target %s --body %s ..." % (shlex.quote(e["target"]), e["body"]))
-    env = dict(os.environ, AWT_BODY=bpath, AWT_TARGET=e["target"])
-    for d in ("blobs", "runs", "claims"):
-        os.makedirs(P(".awt", d), exist_ok=True)
-    if e.get("snapshot"):
-        try:
-            r = subprocess.run(["sh", "-c", e["snapshot"]], cwd=ROOT, env=env, capture_output=True, timeout=a.timeout)
-        except subprocess.TimeoutExpired:
-            die("snapshot timed out after %ss; nothing was consumed" % a.timeout, "fix the --snapshot command and plan again")
-        if r.returncode or not r.stdout:
-            die("snapshot failed or printed nothing; nothing was consumed", "fix the --snapshot command and plan again")
-        with open(P(".awt", "blobs", sha(r.stdout)), "wb") as g:
-            g.write(r.stdout)
-    e2 = load()["eff"][a.id]
-    if (e2["step"], e2["attempt"]) != ("planned", e["attempt"]):
-        die("%s changed while it was being prepared (now %s)" % (a.id, e2["step"]), "check ./awt effect show " + a.id)
-    try:
-        os.close(os.open(claim_path(e), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
-    except FileExistsError:
-        die("someone else is sending %s" % a.id, "check ./awt effect show " + a.id)
-    emit("effect", id=a.id, step="claimed", attempt=e["attempt"], pid=os.getpid(), timeout=a.timeout * (2 if e.get("verify") else 1))
-    log = P(".awt", "runs", "%s.%s.log" % (a.id, e["attempt"]))
-    with open(log, "wb") as lg:
-        rc = sh(e["run"], env, lg, a.timeout)
-        reason = None
-        if rc == "timeout":
-            reason = "timeout after %ss" % a.timeout
-        elif rc != 0:
-            reason = "exit code %s" % rc
-        elif e.get("verify"):
-            vr = sh(e["verify"], env, lg, a.timeout)
-            if vr != 0:
-                reason = "verify failed (%s)" % vr
-    if reason:
-        emit("effect", id=a.id, step="unknown", attempt=e["attempt"], reason=reason)
-        die("%s is unknown: %s (log %s)" % (a.id, reason, rel(log)), "it may have been sent; ask a person, then ./awt effect mark %s sent|not-sent" % a.id)
-    emit("effect", id=a.id, step="sent", attempt=e["attempt"], via="apply")
-    out("%s sent (log %s)" % (a.id, rel(log)))
-
-
 def eff_mark(a):
+    lock()
     e = get_eff(load(), a.id)
     st, n = e["state"], e["attempt"]
-    if st == "claimed":
-        die("%s is being sent by a live process" % a.id, "wait for it to finish")
-    legal = {"planned": ["sent"] if e["manual"] else [], "unknown": ["sent", "not-sent"], "conflict": ["sent", "not-sent"]}
-    if a.to == "dropped" and st == "planned":
-        pass
-    elif a.to not in legal.get(st, []):
-        die("cannot mark %s %s from %s" % (a.id, a.to, st), "legal marks from %s: %s" % (st, ", ".join(legal.get(st, []) + (["dropped"] if st == "planned" else [])) or "none (terminal)"))
+    legal = {"planned": ["sent", "dropped"], "begun": ["sent", "not-sent", "unknown"], "unknown": ["sent", "not-sent"]}.get(st, [])
+    if a.to not in legal:
+        die("cannot mark %s %s from %s" % (a.id, a.to, st), "legal marks from %s: %s" % (st, ", ".join(legal) or "none (terminal)"))
+    if a.to in ("not-sent", "unknown") and not a.why:
+        die("mark %s needs --why" % a.to, "say what you know, e.g. --why 'the command timed out'", 2)
     if a.to == "not-sent":
         emit("effect", id=a.id, step="planned", attempt=n + 1, why=a.why)
     else:
-        emit("effect", id=a.id, step=a.to, attempt=n, ref=a.ref, why=a.why, via="mark")
+        emit("effect", id=a.id, step=a.to, attempt=n, ref=a.ref, why=a.why)
     out("%s %s" % (a.id, a.to))
 
 
@@ -1852,6 +1860,7 @@ def tree_problems(root):
     keys = {}
     for node in nodes:
         pk, key = node_info(node)["kind"], node_info(node)["key"]
+        has_projects = pk == "root" and any(node_info(c)["kind"] == "project" for c in children(node))
         if key:
             if key in keys:
                 probs.append(("fail", "duplicate key %s: %s and %s" % (key, os.path.relpath(keys[key], root), os.path.relpath(node, root))))
@@ -1883,6 +1892,8 @@ def tree_problems(root):
                         probs.append(("warn", "%s: a %s sits in %s/, which does not match its node row" % (where, i["kind"], plural)))
                     if i["kind"] not in LEGAL.get(pk, ()):
                         probs.append(("fail", "%s: a %s does not belong in a %s" % (where, i["kind"], pk)))
+                    elif pk == "root" and i["kind"] == "workspace" and has_projects:
+                        probs.append(("warn", "%s: a workspace directly under the root is the legacy placement; run migrate-paseo, or move it under a project" % where))
                 else:
                     probs.append(("warn", "%s is not a node; reserved directories hold nodes only" % where))
         seen = 0
@@ -1902,9 +1913,109 @@ def tree_problems(root):
                 break
         if load_at(node)["status"] == "done":
             for p in children(node):
-                if node_info(p)["kind"] in ("workspace", "task") and load_at(p)["status"] == "active":
+                if node_info(p)["kind"] in ("project", "workspace", "task") and load_at(p)["status"] == "active":
                     probs.append(("warn", "%s is done but %s is still active" % (os.path.relpath(node, root) if node != root else ".", os.path.relpath(p, root))))
     return probs
+
+
+def store_checks(line):
+    """Store path, modes, ingest freshness and Claude retention. Never creates anything."""
+    try:
+        store = store_dir()
+        if os.path.isdir(store):
+            mode = stat.S_IMODE(os.stat(store).st_mode)
+            line("ok" if not mode & 0o077 else "warn", "store mode %o (%s)" % (mode, store) if not mode & 0o077 else
+                 "store %s has mode %o, expected 700 (chmod 700 it; it holds full conversation text)" % (store, mode))
+            allf = [os.stat(os.path.join(dp, f)) for dp, _, fns in os.walk(store) for f in fns]
+            loose = [os.path.join(dp, f) for dp, _, fns in os.walk(store) for f in fns if os.stat(os.path.join(dp, f)).st_mode & 0o077]
+            size = float(sum(x.st_size for x in allf))
+            for unit in ("B", "KB", "MB", "GB"):
+                if size < 1024 or unit == "GB":
+                    break
+                size /= 1024
+            line("ok", "store size %s %s in %d files (awt never deletes; remove old months by hand)" % (("%d" % size) if unit == "B" else "%.1f" % size, unit, len(allf)))
+            if loose:
+                line("warn", "%d store files are readable by others, expected 600 (chmod 600 %s)" % (len(loose), loose[0]))
+            top = os.path.realpath(store)
+        else:
+            line("ok", "store %s not created yet" % store)
+            top = os.path.realpath(os.path.dirname(store))
+        sync = [m for m in ("iCloud", "Dropbox", "OneDrive", "Google Drive", "Mobile Documents") if m in store or m in top]
+        if sync or netmount(top):
+            line("warn", "store is in a sync folder or network mount; it holds full conversation text (set AWT_STORE elsewhere)")
+        d = top
+        while d and not os.path.exists(os.path.join(d, ".git")) and d != os.path.dirname(d):
+            d = os.path.dirname(d)
+        if os.path.exists(os.path.join(d, ".git")):
+            try:
+                target = os.path.join(top if os.path.isdir(store) else os.path.join(top, os.path.basename(store)), "")  # trailing slash: a directory, also before it exists
+                ign = subprocess.run(["git", "-C", d, "check-ignore", "-q", target], capture_output=True).returncode == 0
+            except OSError:
+                ign = False
+            if not ign:
+                line("warn", "store is inside a git work tree (%s) and not git-ignored; it holds full conversation text and could be committed" % d)
+        try:
+            with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
+                st = json.load(g)
+            last, errs = st.get("last_run"), st.get("errors")
+            errs = errs if isinstance(errs, dict) else {}
+        except (OSError, ValueError, AttributeError):
+            last, errs = None, {}
+        for k in sorted(errs)[:5]:
+            line("warn", "ingest error for %s: %s (fix it, then awt ingest --source claude)" % (k, errs[k]))
+        if len(errs) > 5:
+            line("warn", "%d more ingest errors in %s" % (len(errs) - 5, os.path.join(store, "ingest", "claude.offsets.json")))
+        age = (time.time() - epoch(last)) / 86400 if last else None
+        if last is None:
+            line("warn", "claude ingest has never run (awt ingest --source claude; init's SessionEnd hook runs it)")
+        elif age > STALE_DAYS:
+            line("warn", "claude ingest last ran %d days ago (awt ingest --source claude)" % age)
+        else:
+            line("ok", "claude ingest ran %s" % ago(last))
+        keep = 30
+        try:
+            with open(os.environ.get("AWT_CLAUDE_SETTINGS") or os.path.join(claude_home(), "settings.json"), encoding="utf-8") as g:
+                v = json.load(g).get("cleanupPeriodDays")
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                keep = v
+        except (OSError, ValueError, AttributeError):
+            pass
+        root = claude_dir()
+        old = min([os.stat(p).st_mtime for p, _, _ in claude_sessions(root)] or [None]) if os.path.isdir(root) else None
+        if old is not None:
+            days = int((time.time() - old) / 86400)
+            risk = days > keep - STALE_DAYS and (age is None or age > 1)
+            line("warn" if risk else "ok", "oldest Claude transcript is %d days old; Claude deletes at %d days%s" % (
+                days, keep, " and ingest is not current (awt ingest --source claude)" if risk else ""))
+    except Exception as x:
+        line("warn", "store check failed: %s" % x)
+
+
+def doctor_staged(a):
+    """Secret scan of the staged blobs of the git repo at --dir (default: cwd). For a pre-commit hook."""
+    d = a.dir or os.getcwd()
+
+    def g(*x):
+        try:
+            return subprocess.run(["git", "-C", d] + list(x), capture_output=True)
+        except FileNotFoundError:
+            die("git is not installed or not on PATH", "install git; awt never installs it")
+    if g("rev-parse", "--show-toplevel").returncode:
+        die("not a git repo: " + d, "run awt doctor --staged inside a git work tree")
+    held = []
+    for f in [x.decode("utf-8", "replace") for x in g("diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z").stdout.split(b"\0") if x]:
+        r = g("cat-file", "blob", ":" + f)
+        b = r.stdout
+        if r.returncode or len(b) > K["big"] or b"\0" in b:
+            continue
+        n = secret(b.decode("utf-8", "replace"))
+        if n:
+            held.append("%s (%s)" % (f, n))
+    if held:
+        for h in held:
+            print("error: staged file looks like it holds a secret: " + h, file=sys.stderr)
+        die("%d staged file(s) look like secrets" % len(held), "git restore --staged FILE, remove the secret, and commit again")
+    out("ok no secrets in staged files")
 
 
 def cmd_doctor(a):
@@ -1916,6 +2027,8 @@ def cmd_doctor(a):
         out("%s %s" % (level, msg))
 
     line("ok" if sys.version_info >= (3, 9) else "fail", "python %d.%d" % sys.version_info[:2])
+    line("ok" if fts_ok() else "fail", "sqlite %s has FTS5" % sqlite3.sqlite_version if fts_ok() else "sqlite %s has no FTS5; find --like and the store need it (use a Python built with it)" % sqlite3.sqlite_version)
+    store_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
         line("fail", "no task root (./awt init)")
@@ -1947,7 +2060,8 @@ def cmd_doctor(a):
     has = has_block(ROOT) or (intree and any(has_block(p) for p in ancestors(ROOT)))
     line("ok" if has else "fail", "AGENTS.md has the awt block" if has else "AGENTS.md lacks the awt block (./awt init)")
     try:
-        r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30,
+                           env=dict(os.environ, AWT_NO_BRIEF="1"))  # a check must not write
         line("ok" if r.returncode == 0 and r.stdout.strip() else "fail", "resume --hook prints a brief")
     except Exception as x:
         line("fail", "resume --hook did not run: %s" % x)
@@ -1962,10 +2076,10 @@ def cmd_doctor(a):
         try:
             with open(P(".claude", "settings.json"), encoding="utf-8") as g:
                 st = g.read()
-            good = "awt resume --hook" in st and "awt effect apply" in st
+            good = "awt resume --hook" in st
         except OSError:
             good = False
-        line("ok" if good else "warn", "settings has the awt hook and ask rule" if good else ".claude/settings.json lacks the awt hook or ask rule")
+        line("ok" if good else "warn", "settings has the awt hook" if good else ".claude/settings.json lacks the awt hook")
         x = os.access(P("awt"), os.X_OK)
         line("ok" if x else "warn", "awt is executable" if x else "awt is not executable here (chmod +x awt)")
     if intree or children(ROOT):
@@ -1981,53 +2095,546 @@ def cmd_doctor(a):
     except Exception:
         rem = []
     line("warn" if rem else "ok", "git remote %s: task data would be pushed if committed; check it is private" % rem[0] if rem else "no git remote")
-    bad = [e["id"] for e in D["eff"].values() if e["state"] in ("unknown", "conflict")]
-    line("warn" if bad else "ok", "open unknown/conflict effects: " + " ".join(bad) if bad else "no unknown effects")
+    try:
+        with open(P(".claude", "settings.json"), encoding="utf-8", errors="replace") as g:
+            old = ["line %d: %s" % (n, x.strip()) for n, x in enumerate(g.read().splitlines(), 1) if "awt effect apply" in x]
+    except OSError:
+        old = []
+    for x in old:
+        line("warn", "obsolete ask rule for 'effect apply' in .claude/settings.json; remove %s (awt does not edit it)" % x)
+    bad = [e["id"] for e in D["eff"].values() if e["state"] in ("begun", "unknown")]
+    line("warn" if bad else "ok", "open begun/unknown effects: " + " ".join(bad) if bad else "no begun or unknown effects")
     sys.exit(1 if "fail" in res else 0)
 
 
-def cmd_save(a):
-    def g(*x):
+# ---------- ingest ----------
+# Canonical raw store (docs/adr/0003-canonical-raw-jsonl.md). Rows are never redacted or cut; secret matches are only counted.
+ADAPTER = 1
+STALE_DAYS = 7
+
+
+def store_dir():
+    return os.environ.get("AWT_STORE") or os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "awt-store")
+
+
+def claude_home():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+
+def claude_dir():
+    return os.environ.get("AWT_CLAUDE_PROJECTS") or os.path.join(claude_home(), "projects")
+
+
+def private_dir(path, top=None):
+    """Create path mode 700 and the missing directories between top (the store, default path) and it.
+    Missing parents of top get the default mode; an existing directory is never chmodded (doctor warns instead)."""
+    top = top or path
+    if os.path.isdir(path):
+        return
+    if path == top:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    else:
+        private_dir(os.path.dirname(path), top)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    os.chmod(path, 0o700)
+
+
+def secret_flags(o):
+    if isinstance(o, str):
+        return sum(len(rx.findall(o)) for _, rx in SECRETS)
+    if isinstance(o, dict):
+        return sum(secret_flags(k) + secret_flags(v) for k, v in o.items())
+    if isinstance(o, list):
+        return sum(secret_flags(v) for v in o)
+    return 0
+
+
+def canon(o):
+    return sha(json.dumps(o, sort_keys=True).encode())
+
+
+def tail_rows(path):
+    """(last good seq or -1, torn) for a canonical file; heals a torn tail by ending it with a newline."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return -1, False
+    try:
+        size, torn = os.fstat(fd).st_size, False
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            os.pwrite(fd, b"\n", size)
+            torn = True
+        blk = 1 << 20
+        while True:
+            start = max(0, size - blk)
+            chunk = os.pread(fd, size - start + 1, start)
+            lines = chunk.split(b"\n")
+            if start:
+                lines = lines[1:]
+            for ln in reversed(lines):
+                try:
+                    return int(json.loads(ln)["seq"]), torn
+                except Exception:
+                    continue
+            if not start:
+                return -1, torn
+            blk *= 4
+    finally:
+        os.close(fd)
+
+
+def claude_sessions(root):
+    """(path, relpath, session name) for every transcript below root. Read-only; symlinks are not followed."""
+    for dp, dns, fns in os.walk(root):
+        dns.sort()
+        for f in sorted(fns):
+            p = os.path.join(dp, f)
+            if f.endswith(".jsonl") and os.path.isfile(p) and not os.path.islink(p):
+                r = os.path.relpath(p, root)
+                parts = r.split(os.sep)
+                name = f[:-6]
+                if len(parts) >= 4 and parts[-2] == "subagents":
+                    name = parts[-3] + "." + name
+                yield p, r, name
+
+
+def first_month(path, rows):
+    for r in rows:
+        ts = r.get("timestamp") if isinstance(r, dict) else None
+        if isinstance(ts, str) and re.match(r"\d{4}-\d\d", ts):
+            return ts[:7]
+    return datetime.datetime.fromtimestamp(os.stat(path).st_mtime, datetime.timezone.utc).strftime("%Y-%m")
+
+
+def ingest_claude(store):
+    """Append new source lines as canonical rows. Returns (rows written, files seen, files that failed).
+    A file that fails is recorded under `errors` in the offsets file and the rest are still ingested."""
+    root = claude_dir()
+    private_dir(os.path.join(store, "ingest"), store)
+    private_dir(os.path.join(store, "log", "claude"), store)
+    lock = os.open(os.path.join(store, "ingest", "claude.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        offp = os.path.join(store, "ingest", "claude.offsets.json")
         try:
-            return subprocess.run(["git", "-C", ROOT] + list(x), capture_output=True, text=True)
-        except FileNotFoundError:
-            die("git is not installed or not on PATH", "install git; awt never installs it")
-    r = g("rev-parse", "--show-toplevel")
-    if r.returncode:
-        die("not a git repo", "git init  (in %s; awt never runs it)" % ROOT)
-    if os.path.realpath(r.stdout.strip()) != ROOT:
-        die("task sits inside another repo (%s)" % r.stdout.strip(), "git init  (in %s)" % ROOT)
-    nested = []
-    for dp, dns, fns in os.walk(ROOT):
-        dns[:] = [d for d in dns if d != ".git"]
-        if dp != ROOT and (".git" in os.listdir(dp) or is_node_dir(dp)):
-            nested.append(rel(dp))
-            dns[:] = []
-    if g("add", "-A", "--", ".", *[":(exclude)" + n for n in nested]).returncode:
-        die("git add failed", "run git status in " + ROOT)
-    held = []
-    for f in [x for x in g("diff", "--cached", "--name-only", "-z").stdout.split("\0") if x]:
-        try:
-            if os.path.getsize(P(f)) > K["big"]:
+            with open(offp, encoding="utf-8") as g:
+                state = json.load(g)
+            files = state["files"]
+            errors = state.get("errors")
+            errors = errors if isinstance(errors, dict) else {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            files, errors = {}, {}
+        used = {v.get("out") for v in files.values()}
+        total, seen = 0, 0
+        for path, rel_, name in claude_sessions(root) if os.path.isdir(root) else ():
+            seen += 1
+            try:
+                st = os.stat(path)
+                e = files.get(rel_)
+                reset = e is not None and (e["inode"] != st.st_ino or st.st_size < e["offset"] or not head_ok(path, e))
+                e = dict(e or dict(inode=st.st_ino, offset=0, seq=0, out=None, month=None))
+                if reset:
+                    e.update(inode=st.st_ino, offset=0, head=None)
+                if e["offset"] == st.st_size and not reset:
+                    errors.pop(rel_, None)
+                    continue
+                n, e2 = ingest_one(store, path, rel_, name, e, reset, used)
+                total += n
+                if e2 != files.get(rel_) or rel_ in errors:
+                    files[rel_] = e2
+                    errors.pop(rel_, None)
+                    save_offsets(offp, files, errors)
+            except FileNotFoundError:
                 continue
-            with open(P(f), "rb") as fh:
-                b = fh.read()
-        except OSError:
+            except Exception as x:
+                errors[rel_] = "%s: %s" % (type(x).__name__, str(x)[:200])
+        save_offsets(offp, files, errors, now())
+        return total, seen, len(errors)
+    finally:
+        os.close(lock)
+
+
+HEAD = 64
+
+
+def head_of(path, offset):
+    """Short hash of the (up to) 64 source bytes just before offset: tells a rewrite in place from an append."""
+    with open(path, "rb") as g:
+        g.seek(max(0, offset - HEAD))
+        return sha(g.read(min(HEAD, offset)))[:16]
+
+
+def head_ok(path, e):
+    if not e.get("head") or not e["offset"]:
+        return True  # nothing to compare (entry from before the check, or nothing read yet)
+    try:
+        return head_of(path, e["offset"]) == e["head"]
+    except OSError:
+        return True
+
+
+def save_offsets(offp, files, errors, last=None):
+    prev = None
+    if last is None:
+        try:
+            with open(offp, encoding="utf-8") as g:
+                prev = json.load(g).get("last_run")
+        except (OSError, ValueError, AttributeError):
+            pass
+    tmp = "%s.%d.tmp" % (offp, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as g:
+        json.dump(dict(adapter=ADAPTER, last_run=last or prev, files=files, errors=errors), g)
+    os.rename(tmp, offp)
+
+
+def row_bytes(row):
+    """One canonical line. UTF-8 as is; a record with a lone surrogate (not encodable) is written with \\u escapes
+    instead, so the file stays valid UTF-8 and valid JSON and the parsed raw is unchanged."""
+    try:
+        return json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+    except UnicodeEncodeError:
+        return json.dumps(row, ensure_ascii=True, separators=(",", ":")).encode() + b"\n"
+
+
+def ingest_one(store, path, rel_, name, e, reset, used):
+    batch, pos, lineno = [], e["offset"], 0 if reset else e.get("lines", 0)
+    try:
+        with open(path, "rb") as g:
+            g.seek(pos)
+            for raw in g:
+                txt = raw.decode("utf-8", "replace").strip()
+                if not raw.endswith(b"\n"):
+                    try:
+                        ok = isinstance(json.loads(txt), dict)
+                    except ValueError:
+                        ok = False
+                    if not ok:
+                        break  # a record still being written: wait for it
+                pos += len(raw)
+                lineno += 1
+                if txt:
+                    try:
+                        batch.append((lineno - 1, json.loads(txt)))
+                    except ValueError:
+                        batch.append((lineno - 1, {"_unparsed": txt}))
+            e["head"] = head_of(path, pos) if pos else None
+    except OSError:
+        return 0, e  # the source vanished or is unreadable; the store is untouched
+    if e["out"] is None:
+        month = first_month(path, [r for _, r in batch])
+        out = name
+        if out + ".jsonl" in {os.path.basename(u or "") for u in used}:
+            out = "%s~%s" % (name, sha(rel_.encode())[:8])
+        e["out"] = os.path.join("log", "claude", month, out + ".jsonl")
+        used.add(e["out"])
+    outp = os.path.join(store, e["out"])
+    last, _ = tail_rows(outp)
+    skip = {}
+    if reset and last >= 0:
+        with open(outp, "rb") as g:
+            for ln in g:
+                try:
+                    h = canon(json.loads(ln)["raw"])
+                    skip[h] = skip.get(h, 0) + 1
+                except Exception:
+                    pass
+    rows, seq = [], last + 1 if reset else e["seq"]
+    ts = now()
+    for ref, r in batch:
+        if reset and skip.get(canon(r)):
+            skip[canon(r)] -= 1
             continue
-        n = None if b"\0" in b else secret(b.decode("utf-8", "replace"))
-        if n:
-            g("reset", "-q", "--", f)
-            held.append("%s (%s)" % (f, n))
-    for n in nested:
-        print("note: nested %s not saved: %s" % ("git repo" if os.path.exists(P(n, ".git")) else "node", n), file=sys.stderr)
-    for h in held:
-        print("note: unstaged, looks like a secret: " + h, file=sys.stderr)
-    if g("diff", "--cached", "--quiet").returncode == 0:
-        return out("nothing to commit")
-    r = g("commit", "--no-gpg-sign", "-q", "-m", a.message)
-    if r.returncode:
-        die("git commit failed: " + (r.stderr or r.stdout).strip(), "set git user.name and user.email")
-    out("saved %s" % g("rev-parse", "--short", "HEAD").stdout.strip())
+        if seq <= last:
+            seq += 1  # written by a run that died before saving its offset
+            continue
+        rows.append(row_bytes(dict(v=1, src="claude", adapter=ADAPTER, session=name, seq=seq, ingested=ts,
+                                   src_ref="%s:%d" % (rel_, ref), secret_flags=secret_flags(r), raw=r)))
+        seq += 1
+    if rows:
+        private_dir(os.path.dirname(outp), store)
+        fd = os.open(outp, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            for b in rows:
+                os.write(fd, b)  # one append per row
+        finally:
+            os.close(fd)
+    e.update(offset=pos, seq=seq, lines=lineno)
+    return len(rows), e
+
+
+def cmd_ingest(a):
+    try:
+        store = store_dir()
+        private_dir(store)
+        n, f, bad = (None, None, 0) if a.rebuild else ingest_claude(store)
+        private_dir(os.path.join(store, "ingest"))
+        built = sync_store(store, find_root(a.dir), a.rebuild)
+    except BaseException as x:
+        if isinstance(x, KeyboardInterrupt):
+            raise
+        if a.hook:
+            return
+        if isinstance(x, SystemExit):
+            raise
+        die("ingest failed: %s: %s" % (type(x).__name__, x), "check that %s is writable (AWT_STORE overrides it) and run: awt ingest --source claude" % store_dir())
+    if not a.hook:
+        if n is not None:
+            out("ingested %d rows from %d claude files into %s%s" % (n, f, store, "; %d files failed (awt doctor shows which)" % bad if bad else ""))
+        if built:
+            out("%s store.db: %d sessions, %d messages, %d records" % ("rebuilt" if a.rebuild else "updated", built["sessions"], built["messages"], built["records"]))
+
+
+# ---------- store.db ----------
+# Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 1, "1.37.0", 262144, 4096
+DDL = """
+CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
+CREATE TABLE nodes(node_id TEXT PRIMARY KEY, kind TEXT, name TEXT, path TEXT, parent_id TEXT, project_id TEXT, status TEXT, goal TEXT);
+CREATE TABLE sessions(session_id TEXT PRIMARY KEY, provider_name TEXT, conversation_id TEXT, node_id TEXT, join_confidence TEXT, cwd TEXT, request_model TEXT, started_at TEXT, ended_at TEXT, source TEXT, adapter INTEGER);
+CREATE TABLE turns(turn_id TEXT PRIMARY KEY, session_id TEXT, seq INTEGER, started_at TEXT, ended_at TEXT, outcome TEXT, paseo_turn INTEGER);
+CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGER, role TEXT, ts TEXT, text TEXT, parent_id TEXT, response_finish_reasons TEXT, PRIMARY KEY(session_id, message_id));
+CREATE TABLE tool_calls(tool_call_id TEXT, message_id TEXT, session_id TEXT, tool_name TEXT, args TEXT, result_excerpt TEXT, result_sha256 TEXT, is_error INTEGER, started_at TEXT, ended_at TEXT, PRIMARY KEY(session_id, tool_call_id));
+CREATE TABLE records(record_id TEXT PRIMARY KEY, node_id TEXT, type TEXT, ts TEXT, by TEXT, fields TEXT, session_id TEXT, origin TEXT);
+CREATE TABLE effects(effect_id TEXT PRIMARY KEY, node_id TEXT, target TEXT, key TEXT, state TEXT, attempt INTEGER, origin TEXT, rule TEXT, begun_by TEXT, begun_at TEXT, sent_ref TEXT, tool_call_id TEXT);
+CREATE TABLE ingest_sources(source TEXT, path TEXT, inode INTEGER, offset INTEGER, adapter INTEGER, last_run TEXT, errors INTEGER, PRIMARY KEY(source, path));
+CREATE TABLE canonical(src TEXT, session TEXT, seq INTEGER, file TEXT, raw TEXT, PRIMARY KEY(src, file, seq));
+CREATE VIRTUAL TABLE fts_text USING fts5(text, kind UNINDEXED, ref UNINDEXED);
+"""
+
+
+def store_inputs(store, root):
+    """[(kind, path, size)] sorted: the canonical files and node logs a build reads. Sizes only, so the list is a function of the inputs' content (the logs are append-only)."""
+    res = []
+    for dp, dns, fns in os.walk(os.path.join(store, "log")):
+        dns.sort()
+        res += [("canonical", os.path.join(dp, f), os.path.getsize(os.path.join(dp, f))) for f in sorted(fns) if f.endswith(".jsonl")]
+    for p in node_paths(root):
+        try:
+            res.append(("node", os.path.join(p, ".awt", "events.jsonl"), os.path.getsize(os.path.join(p, ".awt", "events.jsonl"))))
+        except OSError:
+            pass
+    return res
+
+
+def node_paths(root):
+    if not root:
+        return []
+    top = tree_top(root)
+    return [top] + [p for p, _ in descendants(top)[0]]
+
+
+def fingerprint(store, root):
+    top = os.path.realpath(tree_top(root)) if root else ""
+    return sha(json.dumps([(k, os.path.relpath(p, store if k == "canonical" else top), n) for k, p, n in store_inputs(store, root)]).encode())
+
+
+def store_fresh(store, root):
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.join(store, "store.db")), uri=True)
+        try:
+            m = dict(db.execute("SELECT key, value FROM schema_meta"))
+        finally:
+            db.close()
+        return m.get("schema_version") == str(SCHEMA_VERSION) and m.get("inputs") == fingerprint(store, root)
+    except sqlite3.Error:
+        return False
+
+
+def u(s):
+    """s as text SQLite can hold: lone surrogates (valid in JSON, not in UTF-8) become ?."""
+    return s.encode("utf-8", "replace").decode("utf-8") if isinstance(s, str) else s
+
+
+def blocks_of(content):
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def block_text(c):
+    if isinstance(c, str):
+        return c
+    return "\n".join(b["text"] for b in c if isinstance(b, dict) and isinstance(b.get("text"), str)) if isinstance(c, list) else ""
+
+
+def derive_claude(db, sid, rows, join):
+    """messages, turns, tool_calls and the session row of one canonical claude file. A turn starts at each user message that carries text (not only tool results)."""
+    def fts(text, kind, cur):
+        if text and cur.rowcount == 1:
+            db.execute("INSERT INTO fts_text(text, kind, ref) VALUES (?, ?, ?)", (text[:FTS_CAP], kind, cur.lastrowid))
+    conv = cwd_ = model = first = last = None
+    turns, calls, turn = [], {}, -1
+    for seq, r in rows:
+        if not isinstance(r, dict):
+            continue
+        ts = r.get("timestamp") if isinstance(r.get("timestamp"), str) else None
+        conv, cwd_ = conv or r.get("sessionId"), cwd_ or r.get("cwd")
+        first = first or ts
+        last = max(last, ts) if last and ts else last or ts
+        m = r.get("message")
+        if r.get("type") not in ("user", "assistant") or not isinstance(m, dict):
+            continue
+        bl = blocks_of(m.get("content"))
+        text = u("\n".join(b["text"] for b in bl if b.get("type") == "text" and isinstance(b.get("text"), str)))
+        if r["type"] == "user" and not r.get("isMeta") and any(b.get("type") == "text" for b in bl):
+            turn += 1
+            turns.append([sid + ":%d" % turn, turn, ts, ts])
+        if turns and ts:
+            turns[-1][3] = max(turns[-1][3] or ts, ts)
+        if r["type"] == "assistant":
+            model = model or m.get("model")
+        mid = r.get("uuid") or "%s#%d" % (sid, seq)
+        stop = m.get("stop_reason")
+        cur = db.execute("INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, m.get("role") or r["type"], ts,
+                         text, r.get("parentUuid"), json.dumps([stop]) if isinstance(stop, str) else None))
+        fts(text, "message", cur)
+        for b in bl:
+            if b.get("type") == "tool_use" and isinstance(b.get("id"), str):
+                args = u(json.dumps(b.get("input"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                cur = db.execute("INSERT OR IGNORE INTO tool_calls VALUES (?,?,?,?,?,NULL,NULL,NULL,?,NULL)", (b["id"], mid, sid, b.get("name"), args, ts))
+                calls[b["id"]] = cur.lastrowid if cur.rowcount == 1 else None
+                fts(args, "tool_call", cur)
+            elif b.get("type") == "tool_result" and calls.get(b.get("tool_use_id")):
+                t = u(block_text(b.get("content")))
+                db.execute("UPDATE tool_calls SET result_excerpt=?, result_sha256=?, is_error=?, ended_at=? WHERE rowid=?",
+                           (t[:EXCERPT], sha(t.encode("utf-8")), 1 if b.get("is_error") else 0, ts, calls[b["tool_use_id"]]))
+    db.executemany("INSERT INTO turns VALUES (?,?,?,?,?,NULL,0)", [(t[0], sid, t[1], t[2], t[3]) for t in turns])
+    node = join.get(cwd_) if cwd_ else None
+    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", (sid, "claude_code", conv or sid, node, "cwd" if node else None, cwd_, model, first, last, "claude", ADAPTER))
+
+
+def derive_nodes(db, root):
+    """nodes, projects, records and effects from the node logs of the whole tree; returns {realpath: node_id} for the session join (unique paths only)."""
+    seen, join, rids = set(), {}, set()
+    top = os.path.realpath(tree_top(root)) if root else None
+    paths = [os.path.realpath(p) for p in node_paths(root)]
+    ids = {}
+    for p in paths:
+        key = node_info(p)["key"]
+        i = key if key and key not in seen else "path:" + os.path.relpath(p, top)
+        seen.add(i)
+        ids[p] = i
+    pid = {}
+    db.execute("INSERT INTO projects(project_id, name) VALUES ('unassigned', 'unassigned')")
+    for p in paths:
+        info, D = node_info(p), load_at(p)
+        par = parent(p)
+        par = ids.get(os.path.realpath(par)) if par and p != top else None
+        proj = pid.get(par, "unassigned") if par else "unassigned"
+        i = ids[p]
+        if info["kind"] == "project":
+            proj = i
+            db.execute("INSERT INTO projects VALUES (?,?,?,?,NULL,'project',?,?,NULL)", (i, i, info["name"], info["key"], D["rows"][0]["ts"] if D["rows"] else None, D["rows"][-1]["ts"] if D["rows"] else None))
+        pid[i] = proj
+        db.execute("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)", (i, info["kind"], info["name"], os.path.relpath(p, top), par, proj, D["status"], (D["task"] or {}).get("goal")))
+        join[p] = i
+        for n, r in enumerate(D["rows"]):
+            rid = r.get("id") if r["type"] != "effect" else None
+            rid = rid if rid and rid not in rids else "%s#%d" % (i, n)
+            rids.add(rid)
+            origin = r["by"] if r.get("by") in ("person", "plugin") else "agent"
+            cur = db.execute("INSERT INTO records VALUES (?,?,?,?,?,?,NULL,?)", (rid, i, r["type"], r["ts"], r.get("by"), json.dumps(r, sort_keys=True), origin))
+            text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by"))
+            db.execute("INSERT INTO fts_text(text, kind, ref) VALUES (?, 'record', ?)", (u(text[:FTS_CAP]), cur.lastrowid))
+        for e in D["eff"].values():
+            hist = e["hist"]
+            begun = next((h for h in hist if h["step"] in ("begun", "claimed")), None)
+            sent = next((h for h in reversed(hist) if h["step"] == "sent" and h.get("ref")), None)
+            db.execute("INSERT OR IGNORE INTO effects VALUES (?,?,?,?,?,?,'declared',NULL,?,?,?,NULL)", (e["id"], i, e["target"], e["key"], e["state"], e["attempt"],
+                       begun and begun.get("by"), begun and begun["ts"], sent and sent["ref"]))
+    return {p: i for p, i in join.items() if list(join.values()).count(i) == 1}
+
+
+def build_store(store, root):
+    """Rebuild store.db from canonical JSONL and the node logs. Same inputs give the same file: rows are inserted in sorted path and line order, nothing in it is a clock or an id generated at build time."""
+    if not fts_ok():
+        die("this Python's sqlite3 has no FTS5 (sqlite %s)" % sqlite3.sqlite_version, "use a Python whose sqlite3 has FTS5 (python.org builds and Homebrew have it); awt doctor checks this")
+    final = os.path.join(store, "store.db")
+    tmp = "%s.%d.tmp" % (final, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+    db = sqlite3.connect(tmp, isolation_level=None)
+    try:
+        db.executescript("PRAGMA page_size=4096; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; BEGIN;" + DDL)
+        join = derive_nodes(db, root)
+        fp = fingerprint(store, root)
+        errors, files = {}, sorted(p for k, p, _ in store_inputs(store, root) if k == "canonical")
+        for p in files:
+            rows = []
+            with open(p, "rb") as g:
+                for ln in g:
+                    try:
+                        r = json.loads(ln)
+                        rows.append((r["src"], r["session"], int(r["seq"]), r["raw"]))
+                    except (ValueError, KeyError, TypeError):
+                        pass
+            relp = os.path.relpath(p, os.path.join(store, "log"))
+            db.executemany("INSERT OR IGNORE INTO canonical VALUES (?,?,?,?,?)", [(a, b, c, relp, json.dumps(d, separators=(",", ":"))) for a, b, c, d in rows])
+            errors[os.path.splitext(os.path.basename(p))[0]] = sum(1 for r in rows if isinstance(r[3], dict) and "_unparsed" in r[3])
+            if rows and rows[0][0] == "claude":
+                derive_claude(db, os.path.splitext(os.path.basename(p))[0], [(r[2], r[3]) for r in rows], join)
+        try:
+            with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
+                st = json.load(g)
+            for rp, e in sorted(st["files"].items()):
+                db.execute("INSERT INTO ingest_sources VALUES ('claude',?,?,?,?,?,?)", (rp, e.get("inode"), e.get("offset"), st.get("adapter"), st.get("last_run"),
+                           errors.get(os.path.splitext(os.path.basename(e.get("out") or ""))[0], 0)))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        db.executemany("INSERT INTO schema_meta VALUES (?,?)", [("schema_version", str(SCHEMA_VERSION)), ("semconv_version", SEMCONV), ("adapter", str(ADAPTER)), ("inputs", fp)])
+        db.execute("COMMIT")
+        n = {t: db.execute("SELECT count(*) FROM " + t).fetchone()[0] for t in ("sessions", "messages", "records")}
+    except BaseException:
+        db.close()
+        os.unlink(tmp)
+        raise
+    db.close()
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, final)
+    return n
+
+
+def sync_store(store, root, force):
+    """Normal ingest rebuilds store.db when it is missing, unreadable, of another schema, or its inputs changed (their sizes: a stat per file); else it leaves it alone. A full rebuild is the simplest correct update and the same code path as --rebuild."""
+    if force or not store_fresh(store, root):
+        lock = os.open(os.path.join(store, "ingest", "store.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if force or not store_fresh(store, root):
+                return build_store(store, root)
+        finally:
+            os.close(lock)
+
+
+def session_hits(term, limit):
+    """None when there is no usable store.db, else message and tool-call lines ranked by FTS5 bm25."""
+    path = os.path.join(store_dir(), "store.db")
+    if not os.path.isfile(path):
+        return None
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True)
+        try:
+            res = []
+            phrase = '"%s"' % term.replace('"', '""')
+            for kind, ref in db.execute("SELECT kind, ref FROM fts_text WHERE fts_text MATCH ? AND kind IN ('message', 'tool_call') ORDER BY bm25(fts_text), rowid LIMIT ?", (phrase, limit)):
+                if kind == "message":
+                    sid, mid, seq, role, text = db.execute("SELECT session_id, message_id, seq, role, text FROM messages WHERE rowid=?", (ref,)).fetchone()
+                    head = "message:%s#%d [%s]" % (sid, seq, role)
+                else:
+                    sid, tid, name, text = db.execute("SELECT session_id, tool_call_id, tool_name, args FROM tool_calls WHERE rowid=?", (ref,)).fetchone()
+                    head = "tool_call:%s:%s [%s]" % (sid, tid, name)
+                i = max(text.lower().find(term.lower()), 0)
+                res.append("%s: %s" % (head, text[max(0, i - 40):i + 80].replace("\n", " ")))
+            return res
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
 
 
 # ---------- main ----------
@@ -2051,7 +2658,7 @@ def build():
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
     V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
-    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int))])
+    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F)])
     V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])
     V(sp, "note", [("text", T)])
     V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append")), (("--related",), dict(type=int))])
@@ -2061,15 +2668,18 @@ def build():
     V(sp, "capture", [("file", dict(nargs="?"))], [(("--from",), dict(required=True, dest="from_")), (("--title",), dict(required=True)), (("--ref",), T)])
     V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
     V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
-    V(sp, "doctor")
-    V(sp, "save", [("message", T)])
+    V(sp, "doctor", opt=[(("--staged",), F)])
+    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
-    V(es, "plan", opt=[(("--target",), dict(required=True)), (("--body",), T), (("--run",), T), (("--class",), dict(dest="cls", choices=["additive", "overwrite"], default="additive")),
-                       (("--snapshot",), T), (("--verify",), T), (("--after",), dict(action="append")), (("--again",), F), (("--why",), T)])
+    V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing
+    V(es, "plan", opt=[(("--target",), dict(required=True)), (("--body",), T), (("--how",), T), (("--after",), dict(action="append")), (("--again",), F), (("--why",), T)])
+    V(es, "begin", [("id", T)])
     V(es, "show", [("id", T)])
-    V(es, "apply", [("id", T)], [(("--target",), dict(required=True)), (("--timeout",), dict(type=int, default=K["timeout"]))])
-    V(es, "mark", [("id", T), ("to", dict(choices=["sent", "not-sent", "dropped"]))], [(("--ref",), T), (("--why",), T)])
+    V(es, "mark", [("id", T), ("to", dict(choices=["sent", "not-sent", "unknown", "dropped"]))], [(("--ref",), T), (("--why",), T)])
+    for q in list(es.choices.values()):  # removed flags: hidden, accepted, refused after parsing so option values are never mistaken for them
+        for f in REMOVED_FLAGS:
+            q.add_argument(f, dest="gone", nargs="?", action="append", help=argparse.SUPPRESS)
     return p
 
 
@@ -2102,7 +2712,13 @@ def main(argv):
         return out(AGENT_REF)
     if not rest or rest[0] in ("help", "--help", "-h"):
         return out(USAGE)
+    if rest[:1] == ["save"]:
+        die("save was removed: git does the commit, and doctor --staged does the secret check",
+            "git add -A && awt doctor --staged && git commit -m MESSAGE   (put awt doctor --staged in .git/hooks/pre-commit to run it on every commit)", 2)
     a = build().parse_args(rest)
+    if a.verb == "effect" and (a.eop == "apply" or getattr(a, "gone", None) is not None):
+        die("effect apply, --run, --snapshot, --verify, --class and --timeout were removed: awt never runs commands",
+            "send it yourself; ./awt effect plan --target T [--body FILE] [--how TEXT], ./awt effect begin ID, then ./awt effect mark ID sent", 2)
     a.dir = d
     if a.verb is None or (a.verb == "effect" and not a.eop):
         die("missing verb", USAGE.splitlines()[0], 2)
@@ -2112,6 +2728,10 @@ def main(argv):
         return cmd_init(a)
     if a.verb == "resume" and a.hook:
         return cmd_resume(a)
+    if a.verb == "ingest":
+        return cmd_ingest(a)
+    if a.verb == "doctor" and a.staged:
+        return doctor_staged(a)
     ROOT = find_root(d)
     set_cmd()
     if not ROOT:
@@ -2119,6 +2739,8 @@ def main(argv):
             return cmd_doctor(a)
         die("no task found", "./awt init", 4)
     globals()[("eff_" + a.eop) if a.verb == "effect" else ("cmd_" + a.verb)](a)
+    if a.verb in WRITES or (a.verb == "effect" and a.eop != "show"):
+        refresh_briefs(ROOT)
 
 
 if __name__ == "__main__":

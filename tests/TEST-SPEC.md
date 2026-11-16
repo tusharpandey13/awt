@@ -49,6 +49,23 @@ Every test and every chaos run ends by checking the ones that apply.
 | I7 | Re-running any idempotent operation (`init --key`, `migrate-paseo`) writes no row and changes no file in the tree, apart from rewriting `legacy/paseo-migration.md` |
 | I8 | Existing standalone tests produce byte-identical output to before the change |
 
+## Declared effects (`test_awt.py` TestEffects, TestLegacyEffects; `test_gaps.py` DoctorAskRule; chaos `effect-*`)
+
+awt never executes commands (SPEC, Effects). Tests run the real verbs and check exit codes, rows and files.
+
+- E1 Flow: `plan` (with `--body`, `--how`), `begin` (prints body, `--how`, the `mark` command; creates `.awt/claims/<key>.1`), `mark sent --ref`. Terminal states refuse every mark and `begin`. A repeated plan with the same key writes nothing.
+- E2 A person can `mark sent` straight from `planned`. From `planned` only `sent` and `dropped` are legal; `not-sent` and `unknown` are refused. `dropped` re-plan needs `--again`.
+- E3 `begin` wins once: 6 to 24 concurrent begins give one exit 0 and the rest exit 1, one `begun` row (chaos `effect-race-begin`). Begin racing `mark dropped` never does both (`effect-begin-vs-drop`). Concurrent marks leave no quarantined row (`effect-mark-race`).
+- E4 `not-sent` (needs `--why`, else exit 2) returns to `planned` with `attempt+1`; the next `begin` creates `<key>.2`. `unknown` needs `--why`, resolves only to `sent` or `not-sent`, is not retried, and blocks a plan on the same target without `--again`.
+- E5 `--after` ids must exist (exit 4) and be `sent` before `begin`. A changed body refuses `begin` with fix `plan again`.
+- E6 Removed: `effect apply` and `--run`, `--snapshot`, `--verify`, `--class`, `--timeout` (also `--flag=value`; an option value such as `--why=--timeout` is not refused, `test_option_values_that_look_like_removed_flags_are_not_refused`) exit 2 with a `fix:` naming plan, begin and mark, write no row, and create no `.awt/runs/` or `.awt/blobs/`.
+- E7 `status done` is refused while an effect is `planned` or `begun`, and passes once marked. `resume` lists `begun` and `unknown` effects; the `begun` line says to send only if you ran `begin` this session, else ask a person. A re-plan of a `sent` effect says it is already sent and names `--again`.
+- E8 Crash semantics: a claim file with no `begun` row reads `begun`, refuses `begin` and `dropped`, and leaves `not-sent` and `sent` (`effect-crash-gap`). A `begin` killed at a random moment leaves `planned` or `begun`, never anything else, and a legal way out exists (`effect-kill-during-begin`). A month-old `begun` is still `begun` (`effect-begun-never-expires`). An `unknown` effect is never begun again (`effect-unknown-never-retried`).
+- E9 Never executes: a command in `--how`, `--why`, a body or `--ref` is never run (`effect-never-executes`, canary files); static: no function reachable from an `eff_*` verb names `subprocess`, `os.system`, `os.exec*`, `os.spawn*` or `os.popen` (`test_no_code_path_runs_a_subprocess_for_an_effect`); dynamic: each verb (`begin`, `show`, `mark`, `plan`) runs in a child python under `sys.addaudithook` that fails on `subprocess.Popen`, `os.system`, `os.exec`, `os.posix_spawn`, `os.fork`, `os.spawn` (`test_effect_verbs_start_no_process_at_runtime`). The `git` calls of other verbs are not on these paths.
+- E10a Quarantine (`test_second_begun_row_for_the_same_attempt_is_quarantined`, `test_quarantine_counts_for_illegal_transitions`, `test_illegal_rows_are_quarantined`): a second `begun` row, `sent` to `begun` or `unknown`, `dropped` to `begun` or `sent`, `unknown` to `begun` or `dropped`, a row for an unknown id, each counted in `resume` and `doctor`; state is unchanged.
+- E10 Old trees (`TestLegacyEffects`): `claimed` reads `begun`; `unknown` stays; `show` prints `run` as `how`, `legacy class|snapshot|verify:` and `legacy file:` lines for `.awt/runs/<id>.*` and `.awt/blobs/*`; `list effects --json` has `how`; blobs are listed (tree-wide) only for an effect with `snapshot`; a re-plan of an old effect with the same target and body finds it by its legacy key (already sent, nothing written); two `claimed` rows read `begun` with `legacy conflict` in `show` and the brief; a planned `run` effect begins and marks like any other; reads and marks never rewrite earlier bytes of `events.jsonl` and never delete `runs/` or `blobs/`.
+- E11 `init` writes no `ask` rule and no outbox/effect paragraph. `doctor` warns (exit 0) for an old `ask` rule, one line per matching settings line with its number and text, and never edits the file. A fresh `init` has nothing to warn about.
+
 ## Node tree (`test_tree.py`)
 
 Names are scenario ids.
@@ -97,11 +114,22 @@ Names are scenario ids.
 - T50 Two agents write to their own nodes in parallel (20 processes, 50 writes each): no row lost, no row crosses nodes, each node's log is valid JSON lines (I3).
 - T51 `AWT_BY` is stamped on every row written under it.
 
+**Project level** (`test_tree.py` Projects)
+- PT1 `init --kind project --name N --key K` under a root makes `projects/<slug>/` with a `project` node row, `context/`, `docs/`, `misc/`; lineage of a node below it reads root, project, workspace, task; `list tree` shows it; `doctor` passes.
+- PT2 Legal pairs: a project holds only workspaces; a project inside a project, workspace, task or agent is refused (exit 1, a fix naming what the parent may contain); a task or agent directly in a project is refused.
+- PT3 A project key is found from anywhere in the tree and `init --key` is idempotent for it (no row written, no second directory).
+- PT4 A workspace directly under the root still resolves, lists and takes tasks. `doctor` warns about it only when the root also holds a project, and never fails on it.
+- PT5 `status done` on a project is refused while a workspace below is active (the refusal names it), and so is `status done` on the root while a project is active; once the workspace is done, the project can be done.
+- PT6 `doctor` warns when a done project still has an active workspace.
+- PT7 A project in `workspaces/` is a warning (it does not match its node row), not a failure.
+- PT8 A workspace moved by `rename` under a project: a `ref kind=node` made before the move still resolves, and `init --key` for the workspace returns the moved path.
+- PT9 `--kind project` needs `--name` (exit 2).
+
 ## Active recall (`test_recall.py`)
 
 Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across nodes, Paseo plugin).
 
-- T-R1a `find --like` ranks a rare shared word above a common one; ties go to the newest row.
+- T-R1a `find --like` ranks a rare shared word above a common one (FTS5 bm25, in memory, no store needed); ties go to the newest row.
 - T-R1b Superseded decisions and `auto` states never match.
 - T-R1c Hits from a sibling workspace carry the right node prefix from an agent node and from a cwd outside the tree.
 - T-R1d `rule` decisions get the x1.5 boost.
@@ -118,10 +146,70 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R2e A corrupt events file in another node does not fail the write.
 - T-R2f A simulated exceeded budget (`AWT_RELATED_MS`): the write stands, the stop line prints.
 - T-R2g The 200-character cut of a `related:` line includes its prefix.
-- T-R3a The task `AGENTS.md` template has the `find --like` line.
-- T-R3b The plugin block is at most 700 characters and names `find --like`.
+- T-R3a `awt help agents` has the `find --like` line; the task `AGENTS.md` template no longer does (it shrank to about 250 chars; `decide` and `ask` print related records anyway).
+- T-R3b The plugin block is at most 260 characters and names `BRIEF.md` and `awt_resume`; `find --like` moved to `help agents`.
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
+
+## Ingest (`test_ingest.py`; chaos `ingest-*`, `save-removed-and-staged-scan`)
+
+Fictional `parsekit` transcripts written by hand into a temp `AWT_CLAUDE_PROJECTS`; `AWT_STORE` and `AWT_CLAUDE_SETTINGS` point into the temp dir. Token-shaped strings are built at runtime.
+
+- N1 Round trip: every source line becomes one row; `raw` equals the parsed line; `v`, `src`, `adapter`, `session`, contiguous `seq`, `src_ref`, month directory.
+- N2 Modes: store dirs 700 and files 600, also under `umask 000`.
+- N3 Idempotent: a rerun writes no rows and leaves every canonical file byte- and mtime-identical. Appended source lines add only the new rows.
+- N4 Secrets: matches are counted in `secret_flags` and the text is unchanged; a 600 KB string is stored whole.
+- N5 Read-only: the transcript's hash, mtime and inode are unchanged; no file appears beside it.
+- N6 Torn source tail (partial last line) waits for its newline. Torn canonical tail is healed. Offsets file lost after rows were appended: no duplicates.
+- N7 Truncated source: nothing duplicated and later rows continue the `seq`. Rotated source (new inode) with the same content writes nothing; with new content appends.
+- N8 Subagent transcripts and several sessions land in separate files. A non-JSON line is kept as `_unparsed`.
+- N9 Concurrent ingests (8 processes, growing source, SIGKILLed runs): seqs are exactly 0..n-1.
+- N10 `--hook` prints nothing and exits 0 even when the store cannot be created; without it that is exit 1 with a `fix:`. `--source pi` exits 2. A missing source directory is not an error. Store location follows `AWT_STORE`, `XDG_DATA_HOME`, then `~/.local/share`.
+- N11 `save` exits 2 naming `git commit` and `awt doctor --staged`; the parser has `ingest`, no `save`, at most 16 verbs. `init` writes a `SessionEnd` hook running `ingest --source claude --hook`.
+- N12 `doctor`: never-run and stale ingest warn; fresh is ok; store mode, loose file mode, git work tree and sync folder warn; oldest transcript age against `cleanupPeriodDays` (default 30, read from the settings file); doctor never creates the store.
+- N14 Robustness: a record with a lone surrogate (built at runtime) is stored (escaped, file valid UTF-8) and later files are still ingested; a file whose append fails is recorded under `errors`, the rest ingested, `last_run` saved, doctor warns, and the error clears when the file works again.
+- N15 `src_ref` is the physical line (blank lines counted) while `seq` stays dense. A same-inode in-place rewrite longer than the offset is rescanned (head hash).
+- N16 `CLAUDE_CONFIG_DIR` is the default source and settings dir. Missing parents of the store keep the default mode, the store and its subdirectories are 700, an existing loose store dir is not chmodded. `doctor` reports store size and files; a git-ignored store in a work tree does not warn.
+- N13 `doctor --staged`: clean index ok; a staged secret exits 1 naming file and pattern but not the secret; a type change is scanned and a textconv filter does not hide a secret; the staged blob counts, not the working copy; runs from a hook with no `--dir`; outside a repo exits 1 with a `fix:`.
+
+## Store (`test_store.py`)
+
+Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing reads real data.
+
+- S1 `ingest` builds `store.db` (mode 600) with every table and `schema_meta`; sessions, turns (a `tool_result` record is not a boundary), messages, tool calls (args, result excerpt and sha256, error flag, times) are exactly the fixture's.
+- S2 `canonical.raw` equals each source record; a token-shaped string is not redacted; a 300,000-character message is whole in `messages.text` and `canonical.raw`, while FTS finds its start and not its tail (the cap is only in the index).
+- S3 `fts_text` finds message text and tool-call arguments with the right `kind`.
+- S4 Records, effects (one row per effect folded from its steps), nodes and projects come from the node logs; record ids are unique.
+- S5 A session joins a node only on an exact `cwd`, with `join_confidence = 'cwd'`; otherwise null.
+- S6 Unparsed canonical rows count in `ingest_sources.errors`; no canonical files still builds an empty db.
+- S7 `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone; a from-scratch rebuild equals the incrementally built file.
+- S8 A garbage `store.db` is replaced by `--rebuild` and by a normal `ingest`; no temp files remain.
+- S9 A normal `ingest` with nothing new leaves `store.db` untouched (mtime); a new node record or new canonical rows update it.
+- S10 `--rebuild` prints a `rebuilt store.db` line and no provider line; with `--hook` it is silent.
+- S11 `find TERM` stays literal and never lists messages; `find --sessions TERM` adds `message:` and `tool_call:` hits; with no usable store it prints the one-line note and keeps the record hits; `--sessions` without a TERM or with `--like` is exit 2.
+- S12 `find --like` output is identical with and without a store.
+- S13 `doctor` is ok with FTS5 and exits 1 with `fail ... FTS5` when `AWT_TEST_NO_FTS5` simulates its absence; `ingest --rebuild` then exits 1 with a `fix:`.
+
+## BRIEF.md and the short prompt (`test_brief.py`; plugin P2, P2b)
+
+| ID | Proves |
+|---|---|
+| B1 | `init` writes `BRIEF.md` equal to `resume` plus the trailing `Generated` line |
+| B2 | Every write verb (`note decide ask state ref status`) regenerates it |
+| B3 | `list`, `find`, `resume` do not touch it (same inode, same text) |
+| B4 | Written by rename: new inode, no temp left in the node or `.awt/` |
+| B5 | Never read back: a forged `BRIEF.md` changes nothing in `resume`; `list` and `list misc` do not show it |
+| B6 | It is not a "file newer than state" |
+| B7 | `BRIEF.md` is in `.gitignore` |
+| B8 | A directory named `BRIEF.md` does not fail the write |
+| B9, B10 | `resume --hook` refreshes it; outside a node it prints and writes nothing |
+| B11 | Agent fixture with no `AGENTS.md`: running the `SessionStart` command from its `settings.json` (as the host would) prints the brief, and `BRIEF.md` matches |
+| B12 | The settings template has `SessionStart` with no `matcher` (runs after compaction) |
+| B13 | The standalone AGENTS block is short, names `BRIEF.md`, `decide`, `ask`, the subagent line, and has no handoff line |
+| B14 to B16 | Tree: every node kind gets a brief at creation; a child write refreshes the parent; a task write refreshes the agents below it |
+| B17 | The tree block names `$AWT_DIR/BRIEF.md` and `$AWT_DIR/out.md` |
+| P2 | The plugin block is at most 260 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `decide`, `ask`; no `state`, no `find --like` |
+| P2b | An agent opened through the plugin has `BRIEF.md` in `AWT_DIR` before any tool call, refreshed by an awt write |
 
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
 
@@ -175,13 +263,41 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 - M11 (gated, `paseo-plugin/test/daemon.test.ts`): the on-disk store written by a real daemon in a temp `--home` (1 workspace, 2 agents made with the scripted agent) is read by `migrate-paseo --home`; every workspace and agent key is present, and a second run leaves the node count unchanged. It does not compare against an expected tree. Skipped unless `AWT_E2E_PASEO=1`.
 - M12 A secret-shaped string (built at runtime) in a workspace name, cwd, provider, model, title, workspace id or agent id appears in no file under ROOT and in no output, including `--dry-run`, and drops no workspace. A user's `status` survives a rerun. Created and already-present counts are separate. A killed run leaves a "run in progress" report.
 
+**Project level** (`test_migrate_paseo.py` ProjectLevel; chaos `migrate-kill-mid-move`)
+- MP1 A fixture with two projects (`parsekit`, `docs-site`) and an unassigned workspace migrates to `projects/parsekit`, `projects/docs-site` and `projects/unassigned` (key `paseo:project/unassigned`), each workspace under its project's `workspaces/`; a rerun changes nothing (I7) and says `0 projects created, 0 workspaces moved`.
+- MP2 A project node has the name `customName ?? displayName` (`projects.json` through `--home`), key `paseo:project/<id>`, and `ref`s to `rootPath` and to its own key.
+- MP3 `customName` wins over `displayName`, in the project name and its directory.
+- MP4 A tree in the earlier layout (workspaces directly under the root) is moved: project from the workspace's `ref paseo:project/<id>`, else `workspaces.json`, else `unassigned`; each subtree moves whole (its records are byte-identical); a workspace made by hand with no key stays; the output counts the moves.
+- MP5 A rerun after the move moves and creates nothing.
+- MP6 A `ref kind=node` to a moved workspace resolves to the new place.
+- MP7 A name taken in the project's `workspaces/` gets a numeric suffix; the existing node is not replaced.
+- MP8 A run that left the project made and one node moved is finished by the next run; keys stay unique; the second run changes nothing.
+- MP9 Archived project: `done`, or `paused` when a workspace below is still active (the report notes it).
+- MP10 Archive is applied on a later run, not only the first. A paused (archived) project becomes `done` on the run after its last open work closes, and stays paused until then.
+- MP11 `--dry-run` on a legacy tree writes nothing and prints each move and project.
+- MP12 `--dry-run` without a root names the projects.
+- MP13 Hostile project rows (secret in id, duplicate id, non-object, null id, secret in name and path): no secret in output, report or tree; one node per key.
+- C24 *Kill mid-move.* A pre-project tree is migrated while the process is SIGKILLed over and over; after every kill each workspace key exists once, and after the final run the tree equals an uninterrupted run, no workspace is left in `workspaces/`, and a further rerun changes nothing.
+
 ## Plugin (`paseo-plugin/test`)
 
 Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by the installed `@getpaseo/plugin` SDK (so `tsc` catches drift, P11; recordings from a real daemon come with tier 2), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
 
 - P1 `workspace.create.after`: workspace node exists with key and refs (working directory, project, workspace) and a `main` task; the project's display name labels the workspace (P13); replay adds nothing.
-- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars, naming `find --like`; no brief text enters the prompt.
+- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 260 chars, naming `$AWT_DIR/BRIEF.md`; no brief text enters the prompt.
 - P3 `agent.open.before` for a workspace with no task: task `main` is created once, even for several simultaneous agents.
+- PJ1 `workspace.create.after` creates the project node from `workspace.projectId` (key `paseo:project/<id>`, refs to the root path and to its own key) and the workspace under it.
+- PJ2 Two workspaces of one project share one project node, also under concurrent and replayed hooks and after a plugin restart.
+- PJ3 The project name is `customName ?? displayName` from `projects.json`, which beats the SDK listing.
+- PJ4 A workspace with no `projectId` goes under project `unassigned`; an agent with no workspace goes to `unassigned--<cwd>` under it.
+- PJ5 An agent opened before its workspace exists still gets a workspace under the right project.
+- PJ6 `workspace.archive.after`: when `projects.json` has `archivedAt` for the workspace's project, the project is `done`, or `paused` while work below is open; without `archivedAt` it stays active.
+- PJ7 Project `done` when nothing below is open.
+- PJ8 A missing, malformed, wrong-shaped or deeply nested `projects.json` gives no archive information and no log line of failure.
+- PJ9 A symlinked `projects.json` is ignored.
+- PJ10 A workspace moved under a project by `migrate-paseo` while the plugin runs: cached paths that are gone are dropped, the agent's next open finds the moved node by key, and nothing is duplicated.
+- PJ11 A workspace still directly under the root is found and used; no copy is made.
+- PJ12 Hostile project names and root paths never escape the tree or reach disk as secrets.
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node, the parent read from `parentAgentId` or the label `paseo.parent-agent-id`; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
 - P6 `awt_resume` takes no input and returns the brief of the node found for the calling agent's key; an agent id with no node errors. A key on two nodes resolves to nothing (C36).
@@ -228,6 +344,204 @@ New scenarios in `tests/agentic/scenarios.py`, each run with a real agent in a g
 - `switch-task`: two tasks in one workspace; the agent writes to the right one after `AWT_DIR` changes.
 
 Pass criteria are checked on the files, not on the agent's words.
+
+## Provider journeys (E-P)
+
+Gaps and sources: `docs/e2e-provider-gaps.md`. These journeys prove awt's real interaction with Paseo and with each provider (Claude Code `claude`, opencode `opencode`, pi `pi`). They reuse the isolation rules, universal checks U1-U3, the cleanup and the D0 fixture of `docs/e2e-active-recall.md` §0. Fixtures use the fictional `parsekit` project and made-up ids. No credential or token-shaped literal appears in a fixture, a prompt or this file; a secret probe is built at runtime.
+
+Tiers:
+
+| Tier | Runs | Gate |
+|---|---|---|
+| deterministic-fake | `npm test` (harness rows) or `npm run test:daemon` (daemon rows) in `paseo-plugin/`, or `unittest` for fixture rows | daemon rows: `AWT_E2E_PASEO=1`, Paseo 0.15.4 or later on `PATH`; no tokens |
+| isolated-daemon-real-provider (paid) | `tests/agentic/paseo_run.py --only E-P…` (new) | `AWT_E2E_PAID=1` **and the owner's approval for each run batch**, because it spends tokens. One pilot session per journey first; report its measured cost, then ask before the batch |
+| manual | a person, following the steps | none; read-only |
+
+**Isolation for paid journeys.** They run **only against an isolated daemon home**:
+- `paseo --home $T/home`, with `PASEO_*` stripped and relay, dictation and auto-update off. Never `~/.paseo`; the pre-flight fails if `realpath($T/home)` equals `realpath(~/.paseo)` or if any `PASEO_HOME` is set.
+- Every process runs with `HOME=$T`.
+- Provider state lives under `$T`: `CLAUDE_CONFIG_DIR=$T/claude`; `XDG_DATA_HOME=$T/xdg/data` and `XDG_CONFIG_HOME=$T/xdg/config` for opencode; `PI_CODING_AGENT_DIR=$T/pi`.
+- Credentials are supplied by the owner at run time through the provider's environment variable. The harness never copies `~/.claude`, `~/.local/share/opencode`, `~/.pi/agent/auth.json` or any other credential or state file. Check for a pending macOS SecurityAgent prompt first.
+- Post-flight: the size and mtime of `~/.paseo`, `~/.claude/projects`, `~/.local/share/opencode/opencode.db` and `~/.pi/agent/sessions` are unchanged (U3). If opencode ignores `XDG_DATA_HOME`, this check fails the journey before any result counts.
+
+Use the cheapest model of each provider, at most 10 turns and 300 s per session. Judge from files, hook logs and timelines, never from the agent's words.
+
+**Harness additions (test code only, never product code).**
+- **H5 hook recorder.** A second plugin, `paseo-plugin/test/fake/recorder/`, installed beside awt in the temp daemon. It appends `{hook, ts, payload}` as one JSON line to `$AWT_HOOK_LOG` for every hook in `PluginHookEvents` and `PluginHookRequests`, returns requests unchanged, and redacts nothing (the data is fictional).
+- **H6 fake ACP extensions** in `fake/acp_agent.py`:
+  - it writes every inbound line to `$AWT_FAKE_WIRE` (H1 of active recall);
+  - `MCP: list` and `MCP: call <tool> <json>` run JSON-RPC `tools/list` / `tools/call` against the `paseo` server URL and headers it received in `session/new` `mcpServers`, and reply with the result;
+  - `PERMIT: <kind> <path>` sends `session/request_permission` with `toolCall {kind, locations:[{path}]}` and replies with the outcome it received, or `no answer` after 10 s.
+- **H7 shim**: `awt` first on `PATH` appends `{argv, AWT_DIR, AWT_BY, cwd}` to `$T/argv.jsonl` and execs the real `awt`.
+
+### Deterministic-fake
+
+**E-P1 `awt_resume` is delivered and callable** (paseo-common, gap 3). Setup: D0 with `daemon.mcp.injectIntoAgents: true`, plus H6.
+1. `id=run("tool1", "MCP: list")` → the reply lists `awt_resume`; `session/new` in the wire has an `mcpServers` entry named `paseo` whose URL carries `callerAgentId=<id>`.
+2. `paseo send <id> 'MCP: call awt_resume {}'` → the result text starts with the brief header of the node keyed `paseo:agent/<id>`; `isError` is absent.
+3. A second agent `tool2` calls it → it gets `tool2`'s brief, never `tool1`'s.
+4. Restart the daemon with `injectIntoAgents: false`; new agent `tool3`, `MCP: list` → no `paseo` server in `session/new`. The journey records this as the documented default and asserts that `doctor` or the plugin log names it (see the follow-up in `docs/e2e-provider-gaps.md`).
+
+Pass: steps 1-3 exact; step 4 recorded; U1-U3.
+
+**E-P2 ACP permission to the agent's own node** (paseo-common, gap 2). Setup: D0 + H6.
+0. Probe: `PERMIT: edit $AWT_DIR/scratch/notes.md` with the H5 recorder on → record the `request.detail` that `agent.permission.before` received. If it has no `filePath`, the journey states that ACP edits are not auto-allowed and steps 1-2 become a red test of the mapping.
+1. The same request → outcome `selected` with the allow option, within 5 s.
+2. `PERMIT: edit $T/parsekit/../outside.md` and `PERMIT: edit <sibling agent's AWT_DIR>/x.md` → `no answer` both times; `paseo permit ls` (or the client) shows them pending.
+
+Pass: 1-2 exact; the plugin never sends a deny.
+
+**E-P3 Hook sequence, `turnId` and parent** (paseo-common, gap 1). Setup: D0 + H5.
+1. `run("seq1", "ping")`, `send seq1 "ping"`, a child with `--label paseo.parent-agent-id=<seq1>`, then `paseo agent archive <child>` and `paseo workspace archive W1` on a second workspace.
+2. Read `$AWT_HOOK_LOG`.
+
+Pass:
+- per agent, `agent.create.before` comes first; the relative order of `agent.open.before` and `agent.create.after` is recorded (this settles `SPEC.md` "hook order unverified");
+- every turn has exactly one `turn.before` and one `turn.after` with the same `turnId`, and that `turnId` is not null;
+- the child's payload `agent.parentAgentId` equals `seq1` (or is null; record which; fact 2 of the gaps doc);
+- `agent.archive.after` and `workspace.archive.after` each arrive once, with `archivedAt` set.
+
+The payloads, with ids rewritten to the fictional ones, replace the hand-written files in `test/payloads/` (P11 becomes "recorded").
+
+**E-P4 Archive in a daemon** (paseo-common, gap 8; today's E5). Setup: D0.
+1. Agent `arch1` with a turn, then `paseo agent archive arch1` → node `done`.
+2. Agent `arch2` runs `RUN: awt ask "who owns the parsekit tokenizer?"`; archive it → `paused`.
+3. Archive workspace W1 → the workspace node is `paused` (`arch2` has an open question), and nothing under it is deleted (file count unchanged).
+
+Pass: statuses exact; `doctor` shows `0 quarantined`.
+
+**E-P5 Project `archivedAt`** (paseo-common, gap 8; decision 16). Tier: deterministic-fake (unittest + harness).
+1. `fixtures/paseo-v0/home/projects/projects.json` gains project `prj_0002` `ledgerline`, `archivedAt: "2026-02-01T00:00:00.000Z"`, with one active and one archived workspace. `migrate-paseo --home` → project node `paused` (an active workspace below); once both workspaces are archived, `done`.
+2. A second run is idempotent (I7), and a status the user set survives.
+3. Plugin harness: `workspace.archive.after` for the last workspace of an archived project → the project node goes `done`. Because `projects.list` has no `archivedAt` in 0.15.4, the test pins the source the plugin uses and fails if it is the SDK list.
+
+Pass: red until the project kind lands (phase 1), then green.
+
+**E-P6 Permission shapes per provider** (claude, opencode, pi; gap 2). Tier: deterministic-fake (harness `hooks.test.ts`).
+- Claude: `detail.type` of `read`, `edit` and `write` with `filePath` inside the node → allowed. `Bash` with `detail.type: "shell"` running `awt note x` → untouched.
+- opencode legacy: `external_directory` with `input.patterns` → as P8. opencode 2.x: `name: "external_directory"`, no `input`, `description` listing `<node>/*` → today untouched (red). Decide the 2.x rule (parse `description`, or ask Paseo for structured resources) and make it green.
+- pi: `kind: "question"`, name `Pi confirm` → untouched; nothing is answered.
+
+Pass: `r.answered` exactly as listed; no log lines.
+
+**E-P7 Transcript shape pins** (claude, opencode, pi; gap 7). Tier: deterministic-fake (unittest). Fixtures `fixtures/transcripts/{claude,opencode,pi}/` hold fictional `parsekit` sessions written from the key sets in the gaps doc (facts 12-14):
+- Claude: a main file, a `subagents/agent-<id>.jsonl` with `isSidechain`, and a `compact_boundary` + `isCompactSummary` pair.
+- opencode: an SQLite file created by the test from the 1.19.3 columns, with a child session (`parent_id`) and a `compaction` part.
+- pi: a `version: 3` file with a `compaction` entry and a `toolCall`/`toolResult` pair.
+
+A Paseo `agents/*.json` fixture per provider carries `persistence.sessionId`/`nativeHandle` that join to them. Phase 1 and phase 4 adapters must map each fixture to the same table rows, and the join to the agent node must be exact (`join_confidence` exact). A missing required key is a refusal naming the key, never a guess.
+
+### Isolated-daemon-real-provider (paid; isolated home only; owner approval required)
+
+Common setup for E-P8 to E-P16: the isolation rules above; D0, but with the real provider enabled instead of `fake`, `injectIntoAgents: true`, H5 and H7; workspace W1 on `$T/parsekit` (a git repo with one file `tokenizer.py`). Prompts name exact commands, so the judge reads files, not words.
+
+**E-P8 Claude Code: env, tool, permissions, receipts** (claude; gaps 1-4).
+1. `paseo run --provider claude --workspace W1 --title cc1 "Call the awt_resume tool, then run the shell command: awt note \"cc probe\". Then write the file \$AWT_DIR/scratch/plan.md with one line. Reply DONE."`
+2. Within 120 s, no permission is pending for `awt_resume` or the `plan.md` write. A pending `Bash(awt …)` request is recorded as a finding (unverified fact 1), answered once by the harness, and the journey still continues.
+
+Pass:
+- H5 shows `create.before`, `open.before` and one `turn.before`/`turn.after` pair, `provider: "claude"`;
+- the timeline has a tool call named `mcp__paseo__awt_resume` (or `awt_resume`) with a non-error result;
+- `argv.jsonl` has `note` with `AWT_DIR` equal to the node keyed `paseo:agent/<cc1>` and `AWT_BY=<cc1>`;
+- `plan.md` exists in that node;
+- exactly 1 receipt with `counts.note == 1`.
+
+**E-P9 Claude Code: native subagent** (claude; gap 5). Agent `cc2`: "Use the Task tool to start a subagent that runs: awt note \"from the subagent\". Then run: awt note \"from the parent\"."
+
+Pass:
+- H5 shows no `agent.create.*` for the subagent;
+- the timeline has a `sub_agent` item;
+- `argv.jsonl` shows both notes; record the `AWT_DIR`/`AWT_BY` the subagent used (expected: the parent's);
+- `$CLAUDE_CONFIG_DIR/projects/*/<persistence.sessionId>/subagents/agent-*.jsonl` exists with `isSidechain: true`.
+
+The finding decides whether native subagents need their own node (spec change), and the journey then pins the chosen behaviour.
+
+**E-P10 Claude Code: compaction and transcript** (claude; gaps 6-7). Agent `cc3`: one turn running `awt note "before compact"`; then `paseo send cc3 "/compact"`; then `paseo send cc3 "Continue the parsekit task."`.
+
+Pass:
+- a `compaction` timeline item with `status: completed`;
+- after it, an `awt_resume` call (or `awt resume` in `argv.jsonl`) before any other awt-backed write, in at least 4 of 5 runs (prompt-line path);
+- the transcript `<persistence.sessionId>.jsonl` under `$CLAUDE_CONFIG_DIR/projects/<encoded $T/parsekit>/` has a `system`/`compact_boundary` row and an `isCompactSummary` row;
+- no row anywhere in the transcript contains `awt.receipt` (E-R17 step 3).
+
+**E-P11 opencode: env, tool, permissions, receipts** (opencode; gaps 1-4). As E-P8 with `--provider opencode`, plus: count `opencode serve` processes whose argv contains `$T` before and after starting 3 agents (fact: `AWT_DIR` forces a dedicated server). Record the count; more than agents + 1 fails.
+
+Pass: as E-P8. The `plan.md` write is auto-allowed through `external_directory`; record whether Paseo took the legacy or the 2.x path (from the shape of `request` in H5) and the opencode version.
+
+**E-P12 opencode: child session** (opencode; gap 5). Agent `oc2`: "Use the task tool to have a subagent run: awt note \"from the child\"."
+
+Pass:
+- no `agent.create.*` for the child;
+- a `sub_agent` item;
+- `$T/xdg/data/opencode/opencode.db` has a `session` row whose `parent_id` is the agent's `persistence.sessionId`;
+- record which node the child's note landed in, and whether any child permission request reached `agent.permission.before` with the parent as `agent`.
+
+**E-P13 opencode: compaction and transcript** (opencode; gaps 6-7). As E-P10 with opencode's `/compact`.
+
+Pass:
+- a `compaction` timeline item;
+- a `part` with `data.type = "compaction"` and a set `session.time_compacting` for the agent's session;
+- the brief comes back as in E-P10, at least 4 of 5 runs;
+- record whether the plugin prompt block is still in the `system` of the next request (from the opencode request log, if one exists; otherwise SKIP with the reason).
+
+**E-P14 pi: env, tool, permissions, receipts** (pi; gaps 1-4). Run twice: arm A, pi with no MCP adapter; arm B, pi with the `pi-mcp-adapter` extension installed under `$T/pi`.
+
+Pass, both arms:
+- `AWT_DIR`/`AWT_BY` reach the shell (`argv.jsonl`);
+- no `agent.permission.before` fires for awt-backed writes;
+- 1 receipt per turn.
+
+Arm A: `awt_resume` is absent from the tool list and the agent falls back to `awt resume` (record which). Arm B: `awt_resume` is called and succeeds.
+
+**E-P15 pi: subagent** (pi; gap 5). Only if a subagent extension is installed in `$T/pi` (otherwise SKIP with the reason). Ask the agent to delegate `awt note "from the pi child"`.
+
+Pass:
+- a `sub_agent` item;
+- no `agent.create.*` for the child;
+- record where the note landed;
+- the child transcript named by `Output file:` exists under `$T`.
+
+**E-P16 pi: compaction and transcript** (pi; gaps 6-7). As E-P10, using pi's manual compaction command.
+
+Pass:
+- `compaction` timeline items (start, then completed);
+- the session file at `persistence.nativeHandle` (under `$T/pi/sessions/`) has a `compaction` entry with `firstKeptEntryId` and `tokensBefore`;
+- the header `id` equals `persistence.sessionId`;
+- the brief comes back as in E-P10;
+- the plugin prompt block is present after compaction (it is re-appended each turn; check in the next turn's `system` message if pi records one).
+
+**E-P17 Paseo-level subagent started by a real agent** (claude; gap 5; closes the E3 caveat). Agent `cc4`: "Use the Paseo create_agent tool to start a subagent in this workspace that runs: awt note \"kid via paseo\"."
+
+Pass:
+- the child is a Paseo agent with label `paseo.parent-agent-id=<cc4>`;
+- its node sits under `cc4`'s node;
+- the child's receipt has `counts.note == 1` and `counts.state == 0`;
+- `cc4`'s next receipt counts it (E-R13).
+
+### Manual
+
+**E-P18 Store shape probe after a provider upgrade** (claude, opencode, pi, paseo; gap 7). A person runs a read-only script that prints **key names, types and counts only**, never values:
+- for the newest 30 Claude transcripts;
+- for `opencode.db`: `pragma_table_info` of `session`, `message` and `part`, plus `part.data.type` counts;
+- for pi session files: entry types and `version`;
+- for `~/.paseo/agents/*/*.json` `persistence`.
+
+They compare the output with facts 10-14 in `docs/e2e-provider-gaps.md` and update E-P7's fixtures when anything changed. This journey reads real stores, so its output is reviewed before it is committed, and no value is ever copied into the repo.
+
+**E-P19 Receipts and subagent cards render per provider** (claude, opencode, pi). The Paseo app is connected to the E-P8, E-P11 and E-P14 daemons only, never the owner's daemon. One screenshot per provider shows the receipt line and a `sub_agent` card, stored in the run dir.
+
+### Traceability
+
+| Gap (`docs/e2e-provider-gaps.md`) | Journeys |
+|---|---|
+| 1 hooks | E-P3, E-P8, E-P11, E-P14 |
+| 2 permissions | E-P2, E-P6, E-P8, E-P11, E-P14 |
+| 3 env and `awt_resume` | E-P1, E-P8, E-P11, E-P14 |
+| 4 receipts | E-P8, E-P11, E-P14, E-P17 (+ E-R10 to E-R15) |
+| 5 subagents | E-P9, E-P12, E-P15, E-P17 |
+| 6 compaction | E-P10, E-P13, E-P16 |
+| 7 transcripts | E-P7, E-P10, E-P13, E-P16, E-P18 |
+| 8 archive | E-P3, E-P4, E-P5 |
 
 ## CI
 

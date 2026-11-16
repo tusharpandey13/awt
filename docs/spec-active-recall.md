@@ -43,7 +43,7 @@ A new flag on the existing `find` verb. It matches records by meaning-bearing wo
   - refs (title and why);
   - `main`-scope states.
   `auto` states, effects and node rows are excluded.
-- **Score:** each distinct shared word adds `log(1 + N/df)`, where N is the number of candidates and df is the number of candidates containing that word. Rare words count for more.
+- **Score:** SQLite FTS5 `bm25` over an in-memory index of the candidates, queried with the OR of the words; rare words count for more (phase 2 replaced the hand-rolled `log(1 + N/df)`; `docs/adr/0004-fts5-over-custom-scoring.md`).
   - A candidate qualifies when it shares at least 2 words, or 1 word when TEXT has at most 2 words.
   - `rule` decisions get a ×1.5 boost.
   - Ties go to the newest row.

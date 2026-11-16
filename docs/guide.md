@@ -49,7 +49,7 @@ Record a decision:
 ./awt decide "Cap parsekit retries at 3" --why "Thread shows retries amplify the outage" --tag rule
 ```
 
-The agent now works. It writes `outbox/update-eng.md` and runs `./awt effect plan --target "slack:#eng" --body outbox/update-eng.md`. That prints an effect id and the next command. There is no `--run`, so it is manual: nothing can send it but you.
+The agent now works. It writes `outbox/update-eng.md` and runs `./awt effect plan --target "slack:#eng" --body outbox/update-eng.md`. That prints an effect id and the next command. The tool never sends anything: you (or the agent, with its own tools) do.
 
 Read the draft, post it in Slack, then:
 
@@ -57,29 +57,30 @@ Read the draft, post it in Slack, then:
 ./awt effect mark e-1a2b3c4d sent --ref https://example.slack.com/archives/C02XYZ/p1700000500
 ```
 
-The id is the one `plan` printed. `./awt list effects` shows it as `sent`. Finish with `./awt status done`, which is refused while a question is unanswered or an effect is `planned`, `claimed` or `unknown`. The refusal lists them.
+The id is the one `plan` printed. `./awt list effects` shows it as `sent`. Finish with `./awt status done`, which is refused while a question is unanswered or an effect is `planned`, `begun` or `unknown`. The refusal lists them.
 
 ## 3. Sending things
 
-**Manual effect** (no `--run`): `./awt effect apply` refuses and prints the body path and the `mark` command. You send it yourself, then `mark ... sent`. Use this for Slack and anything the agent has no access to.
+The tool never runs a command. You or the agent send with your own tools, so Claude Code, opencode or Paseo see and gate the real command. It keeps the ledger.
 
-**Effect with `--run`**: `plan` records a shell command, and `apply` runs it:
+**The declared path** (when a blind retry is costly):
 
 ```sh
-./awt effect plan --target "jira:PK-142" --body outbox/comment.md --run 'post-jira-comment "$AWT_TARGET" "$AWT_BODY"'
-./awt effect show e-1a2b3c4d
-./awt effect apply e-1a2b3c4d --target "jira:PK-142"
+./awt effect plan --target "jira:PK-142" --body outbox/comment.md --how 'post-jira-comment PK-142 < outbox/comment.md'
+./awt effect begin e-1a2b3c4d      # claims it once; prints the body path and the mark command
+# send it yourself
+./awt effect mark e-1a2b3c4d sent --ref https://example.atlassian.net/browse/PK-142
 ```
 
-(`post-jira-comment` is your own command.) Run `effect show` first. It prints the command, the body and the history.
+(`post-jira-comment` is your own command.) `--how` is only text for people to read; it is never run. If you sent it by hand without `begin`, `mark ... sent` works straight from `planned`. `begin` on an effect that is not `planned` is refused.
 
-**The approval prompt.** In Claude Code, `init` adds a rule so `./awt effect apply` asks you first. The prompt shows the `apply` command line: the id and target. It does not show the `--run` command or the body. Read those with `effect show` before you approve. The rule only works in Claude Code, only with `.claude/settings.json` in place, and only for commands it can match as text. An agent that runs a script around it isn't stopped. See Limits in the README.
+**A send that went wrong.** `./awt effect mark e-1a2b3c4d not-sent --why "gateway refused"` returns it to `planned` for another attempt. `./awt effect mark e-1a2b3c4d unknown --why "timed out"` says you cannot tell. A `begun` effect with no mark stays `begun` and blocks `status done`: only the sender knows what happened.
 
-**`unknown`.** The send may have happened. Causes: the command failed, timed out, failed its `--verify`, or the process crashed. `awt` never retries. Check the real destination, then:
+**`unknown`.** The send may have happened. The tool never retries. Check the real destination, then:
 
 ```sh
 ./awt effect mark e-1a2b3c4d sent        # it went out
-./awt effect mark e-1a2b3c4d not-sent    # it did not; goes back to planned for another apply
+./awt effect mark e-1a2b3c4d not-sent --why "checked, nothing there"   # back to planned for another attempt
 ```
 
 A new plan on a target with an open `unknown` effect is refused unless you pass `--again`. `dropped` is allowed only from `planned`.
@@ -102,11 +103,11 @@ If the last session recorded no handoff, the brief says so and shows what change
 
 **Quarantined rows.** A malformed or illegal row is skipped and counted, never fatal. `doctor` warns, and the brief's inventory line shows the count. Don't hand-edit `.awt/`. Rows are skipped, not deleted, so nothing is lost; the spec has no command to list which rows were skipped.
 
-**`save` refused.** It needs this directory to be the root of its own git repo. If it isn't a repo, or sits inside another one, run `git init` here yourself. Files that match the secret scan are unstaged and reported. It never pushes.
+**`save` is gone.** Use `git add -A && awt doctor --staged && git commit -m "message"`. `doctor --staged` refuses when a staged file matches the secret scan; put it in `.git/hooks/pre-commit` to run on every commit.
 
 ## 6. Backups and privacy
 
-`./awt save "message"` commits the directory locally. `scratch/`, `.awt/claims/`, `.awt/blobs/` and `.awt/runs/` are git-ignored, so snapshots and run logs are not in commits. Back up the directory itself if you need those.
+Commit the directory locally with `git commit`. `scratch/`, `.awt/claims/`, `.awt/blobs/` and `.awt/runs/` are git-ignored, so snapshots and run logs are not in commits. Back up the directory itself if you need those.
 
 The directory holds internal chats and docs. If you add a git remote, make it private; `doctor` warns when one exists. Avoid iCloud, Dropbox and network folders: `doctor` warns there too.
 

@@ -640,6 +640,11 @@ class ER20(Cli):
         v("ref", "https://example.invalid/solo", "--title", "Solo ref", "--why", "context", dir=solo)
 
         # 1: pre-feature awt and this awt give identical output on every node and on solo
+        # v2 phase 2 writes BRIEF.md in every node; the pre-feature awt would grep it as an ordinary file, so compare without them
+        for top in (R, solo):
+            for dp, _, fns in os.walk(top):
+                if "BRIEF.md" in fns:
+                    os.unlink(os.path.join(dp, "BRIEF.md"))
         before = tree_hash(R), tree_hash(solo)
         targets = list(nodes.values()) + [R, solo]
         cmds = [("resume",), ("resume", "--json"), ("list", "nodes", "--all", "--json")] + [("list", s, "--json") for s in SECTIONS] \
@@ -652,7 +657,10 @@ class ER20(Cli):
             return job, a, b
         with cf.ThreadPoolExecutor(8) as ex:
             for job, a, b in ex.map(both, jobs):
-                self.assertEqual((b.returncode, b.stdout, b.stderr), (a.returncode, a.stdout, a.stderr), job)
+                if job[1] == ("doctor",):  # v2 phase 0 changes doctor's effect and settings checks on purpose
+                    self.assertEqual(b.returncode, a.returncode, job)
+                else:
+                    self.assertEqual((b.returncode, b.stdout, b.stderr), (a.returncode, a.stdout, a.stderr), job)
                 if job[1] == ("doctor",):
                     self.assertIn("0 quarantined", b.stdout)
         # 2: solo resume, v0.2.0 vs now
@@ -669,7 +677,8 @@ class ER20(Cli):
         r = self.run_awt("decide", "Quillwort sweep cadence", "--why", "quillwort runs nightly", cwd=T, AWT_DIR=ag2)
         self.assertEqual(len(r.stdout.splitlines()), 1, r.stdout)
         self.assertTrue(r.stdout.endswith("decided\n"))
-        self.assertEqual(len(tree_hash(R)), len(before[0]))
+        # the write also creates the agent's and its task's BRIEF.md (v2 phase 2); no other file appears
+        self.assertEqual({k for k in tree_hash(R) if not k.endswith("BRIEF.md")}, set(before[0]))
         # 7: auto rows appear in list --since with scope auto
         oldest = min(x["ts"] for x in self.rows(R))
         rows = json.loads(self.run_awt("list", "--since", oldest, "--down", "--json", dir=R).stdout)
