@@ -105,7 +105,7 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `doctor [--staged]` | Below. |
 | `ingest [--source claude\|pi\|opencode\|paseo\|all] [--hook] [--stdin] [--rebuild]` | Below. |
 
-`help` and `--help` print usage and do not count as verbs. `help agents` prints the embedded agent reference. `--version` prints the version.
+`help` and `--help` print usage and do not count as verbs. `awt --help` and `awt VERB --help` come from one table in `awt` (`CLI_HELP`), and `tools/gen_docs.py` generates `docs/awt.1` and `docs/reference/` from it; `tests/test_docs.py` fails when they disagree. `help agents` prints the embedded agent reference. `--version` prints the version.
 
 ## Resume brief
 

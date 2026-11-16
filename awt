@@ -214,17 +214,77 @@ If `./relay` exists and the work splits into parts, do not run them all in one s
 - Using `--again` or a fresh `plan` to get around an `unknown` effect.
 - Re-asking or re-researching without `./awt find` first.'''
 
-USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
-  init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
-  init --kind root|project|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
-  state --now T --next T      note T                   decide C --why T         ask T
-  find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
-  answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
-  supersede OLD NEW           status active|paused|done
-  effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|pi|opencode|paseo|ccusage|all] [--hook] [--stdin] [--event]
-  ui [--port N]
-exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
-agent reference: awt help agents"""
+USAGE_HEAD = "awt VERB ...   (global: --dir PATH, --by NAME, --model ID)"
+# One source for `awt --help`, `awt VERB --help`, awt.1 and docs/reference/ (tools/gen_docs.py writes the last two).
+# Key: a verb ("find") or "effect plan"; value: (summary, {argument: help}).
+CLI_HELP = {
+    "init": ("Create a task directory, or a node of the tree with --kind.", {
+        "--goal": "what this task is for (250 characters)", "--done": "what finished looks like (250 characters)",
+        "--kind": "make a node of this kind under the nearest enclosing node (see SPEC.md, Node tree)",
+        "--name": "directory name of the new node", "--key": "stable key of the new node, such as paseo:agent/ID"}),
+    "resume": ("Print the brief: goal, state, open questions and effects, what changed since the last handoff.", {
+        "--hook": "print nothing and exit 0 when there is no task or on any error (for a session-start hook)",
+        "--scope": "show the state of this scope only", "--json": "machine-readable output"}),
+    "list": ("List what is known about the task, one section or all.", {
+        "section": "one section: refs, context, docs, outbox, misc, decisions, questions, effects, notes, state, nodes or tree",
+        "--all": "include superseded, answered and finished items", "--json": "machine-readable output",
+        "--since": "only records after this ISO 8601 time", "--down": "include the nodes below this one"}),
+    "find": ("Search records and files; --like ranks related records from the whole tree.", {
+        "term": "text to look for (case-insensitive, literal)", "--up": "search ancestors", "--down": "search descendants",
+        "--tree": "search the whole tree under the nearest root", "--like": "rank related decisions, answers and notes for this sentence",
+        "--limit": "most results to print", "--sessions": "also search ingested session text (needs store.db)"}),
+    "state": ("Leave the handoff: where things stand and what comes next.", {
+        "--now": "where things stand", "--next": "what the next session should do", "--scope": "name of a sub-unit of work"}),
+    "note": ("Record a small fact for later.", {"text": "the fact"}),
+    "decide": ("Record a choice and its reason.", {
+        "choice": "the choice", "--why": "the reason (required)", "--supersedes": "id of the earlier decision this replaces",
+        "--tag": "tag the decision; `rule` binds every later agent (repeatable)", "--related": "related records to print after writing (0 turns it off)"}),
+    "ask": ("Record a question for a person.", {"text": "the question", "--related": "related records to print after writing (0 turns it off)"}),
+    "answer": ("Answer a question.", {"id": "question id, such as q-1a2b3c4d", "text": "the answer"}),
+    "ref": ("Record a link instead of copying its content.", {
+        "target": "URL or path", "--title": "short title (required)", "--why": "why it matters", "--kind": "override the guessed kind",
+        "--no-access": "mark a link the agent cannot open, so it asks a person to paste it"}),
+    "capture": ("Save pasted text that cannot be linked into context/.", {
+        "file": "file to read; stdin when absent or -", "--from": "where it came from, such as slack (required)",
+        "--title": "short title (required)", "--ref": "URL of the original"}),
+    "supersede": ("Move a doc replaced by a better one to docs/_superseded/.", {
+        "old": "the old doc under docs/", "new": "the new doc under docs/", "--why": "the reason"}),
+    "status": ("Set the task status; done is refused while questions or effects are open.", {"value": "active, paused or done"}),
+    "doctor": ("Check the task: layout, git, disk, settings, store. Prints ok, warn or fail per check.", {
+        "--staged": "scan staged git changes for secrets (for .git/hooks/pre-commit)"}),
+    "ingest": ("Copy agent transcripts into the store and update store.db; with --event, record one tool call.", {
+        "--source": "claude, pi, opencode, paseo, ccusage (usage totals) or all; default claude",
+        "--hook": "silent, exit 0 on any error (for a hook)", "--rebuild": "delete store.db and build it again from the stored logs",
+        "--stdin": "read plugin events from stdin (with --source paseo)",
+        "--event": "read one tool-call event on stdin and record a detected effect"}),
+    "ui": ("Browse store.db in a read-only web page (needs datasette).", {
+        "--port": "port on 127.0.0.1 (default 8777)", "--print-metadata": "print the page metadata and exit"}),
+    "help": ("Print this summary; help agents prints the agent reference.", {}),
+    "effect": ("Declare an outbound send so it is made once: plan, begin, mark, show.", {}),
+    "effect plan": ("Declare a send before it happens.", {
+        "--target": "where it goes, such as slack:#eng (required)", "--body": "file holding the text to send",
+        "--how": "the command you will run (text only; awt never runs it)", "--after": "id of an effect that must be sent first (repeatable)",
+        "--again": "plan a send of something already sent", "--why": "the reason"}),
+    "effect begin": ("Claim a planned send; send it yourself after this.", {"id": "effect id, such as e-3c91d0aa"}),
+    "effect show": ("Print one effect: state, attempts, how, body.", {"id": "effect id"}),
+    "effect mark": ("Record how a send ended.", {
+        "id": "effect id", "to": "sent, not-sent (needs --why), unknown (needs --why) or dropped",
+        "--ref": "link to the sent item", "--why": "the reason"}),
+}
+GLOBAL_HELP = (("--dir PATH", "use the node at PATH instead of the current directory"), ("--by NAME", "who is writing (default $AWT_BY, else agent)"),
+               ("--model ID", "model that produced this write (default $AWT_MODEL, else unknown:unset)"), ("--version", "print the version"))
+EXIT_HELP = "exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id"
+
+
+def usage():
+    """awt --help, generated from CLI_HELP so it cannot drift from the verbs."""
+    rows = [(v, h[0]) for v, h in CLI_HELP.items() if " " not in v]
+    w = max(len(v) for v, _ in rows)
+    lines = [USAGE_HEAD, ""] + ["  %-*s  %s" % (w, v, t) for v, t in rows]
+    lines += ["", "global:"] + ["  %-*s  %s" % (w + 6, f, t) for f, t in GLOBAL_HELP]
+    lines += ["", "`awt VERB --help` lists a verb's flags.", EXIT_HELP, "agent reference: awt help agents"]
+    return "\n".join(lines)
+
 
 
 # ---------- basics ----------
@@ -4181,11 +4241,12 @@ def build():
     sp = p.add_subparsers(dest="verb")
 
     def V(parent, name, pos=(), opt=()):
-        q = parent.add_parser(name)
+        h = CLI_HELP.get(("" if parent is sp else "effect ") + name)  # none for the removed `effect apply`
+        q = parent.add_parser(name, help=h[0], description=h[0]) if h else parent.add_parser(name)
         for n, kw in pos:
-            q.add_argument(n, **kw)
+            q.add_argument(n, help=h[1][n] if h else argparse.SUPPRESS, **kw)
         for fl, kw in opt:
-            q.add_argument(*fl, **kw)
+            q.add_argument(*fl, help=h[1][fl[0]] if h else argparse.SUPPRESS, **kw)
         return q
     T, F = {}, dict(action="store_true")
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
@@ -4205,7 +4266,7 @@ def build():
     V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "pi", "opencode", "paseo", "ccusage", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F), (("--stdin",), F), (("--event",), F)])
     V(sp, "ui", opt=[(("--port",), dict(type=int, default=8777)), (("--print-metadata",), F)])
     V(sp, "help")
-    es = V(sp, "effect").add_subparsers(dest="eop")
+    es = V(sp, "effect").add_subparsers(dest="eop", metavar="{plan,begin,show,mark}")
     V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing
     V(es, "plan", opt=[(("--target",), dict(required=True)), (("--body",), T), (("--how",), T), (("--after",), dict(action="append")), (("--again",), F), (("--why",), T)])
     V(es, "begin", [("id", T)])
@@ -4252,7 +4313,7 @@ def main(argv):
     if rest[:2] == ["help", "agents"]:
         return out(AGENT_REF)
     if not rest or rest[0] in ("help", "--help", "-h"):
-        return out(USAGE)
+        return out(usage())
     if rest[:1] == ["save"]:
         die("save was removed: git does the commit, and doctor --staged does the secret check",
             "git add -A && awt doctor --staged && git commit -m MESSAGE   (put awt doctor --staged in .git/hooks/pre-commit to run it on every commit)", 2)
@@ -4262,9 +4323,9 @@ def main(argv):
             "send it yourself; ./awt effect plan --target T [--body FILE] [--how TEXT], ./awt effect begin ID, then ./awt effect mark ID sent", 2)
     a.dir = d
     if a.verb is None or (a.verb == "effect" and not a.eop):
-        die("missing verb", USAGE.splitlines()[0], 2)
+        die("missing verb", USAGE_HEAD, 2)
     if a.verb == "help":
-        return out(USAGE)
+        return out(usage())
     if a.verb == "init":
         return cmd_init(a)
     if a.verb == "resume" and a.hook:

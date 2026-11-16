@@ -86,7 +86,16 @@ awt effect mark e-3c91d0aa sent --ref https://example.slack.com/archives/C1/p1
 
 **Committing:** `git commit` the task directory only when a person asks, and run `awt doctor --staged` first. Never push.
 
+**Detected sends.** Outbound tool calls (`git push`, `gh pr comment`, `curl -X POST`, writing MCP tools) are recorded for you by the hooks `init` writes or by the Paseo plugin; you don't declare them. They show in `awt list effects` with `origin: detected`. This labels a call; it never blocks one. If the host asks before a send, a person is being shown that the same send already went out.
+
 The full lookup table, every refusal and what to do about it, and the subagent rules are in `awt help agents`.
+
+## Models, ingest and the UI
+
+- **Model.** Every record names the model that wrote it. Set `AWT_MODEL` in the agent's environment, or pass `--model ID` on any verb; with neither it is `unknown:unset`. A person writing with `--by person` ignores `AWT_MODEL`. The Paseo plugin sets it for you.
+- **Ingest.** `awt ingest --source claude|pi|opencode|paseo|ccusage|all` copies agent transcripts, read-only, into the store (`${AWT_STORE:-${XDG_DATA_HOME:-~/.local/share}/awt-store}`) and updates `store.db`. The default is `claude`; `all` runs every source, and a source that is missing is zero rows, not an error. `init` adds an `awt ingest --source claude --hook` to the `SessionEnd` hook in `.claude/settings.json`. Run `awt ingest --rebuild` to rebuild `store.db` from the stored logs. The store holds whole conversations: keep it out of git and synced folders.
+- **UI.** `awt ui [--port N]` serves `store.db` read-only on `127.0.0.1` (default port 8777). It needs `datasette`: `pipx install datasette` or `uv tool install datasette`. Run `awt ingest` first.
+- Queries: [docs/recipes/](docs/recipes/), tables: [docs/schema.md](docs/schema.md), words: [docs/concepts.md](docs/concepts.md).
 
 ## Big work: the node tree
 
@@ -109,7 +118,7 @@ The contract is [SPEC.md](SPEC.md#node-tree).
 
 ## Paseo plugin
 
-The plugin keeps one tree for everything in Paseo: a workspace node per Paseo workspace with a `main` task, an agent node per agent chat, and subagents under their parent agent. Each agent gets `AWT_DIR` and `AWT_BY` in its environment, an `awt_resume` tool and a short instruction block. Archiving marks nodes done, or paused when work is open. If `awt` fails, the agent starts without it; the plugin never blocks an agent.
+The plugin keeps one tree for everything in Paseo: a workspace node per Paseo workspace with a `main` task, an agent node per agent chat, and subagents under their parent agent. Each agent gets `AWT_DIR`, `AWT_BY` and `AWT_MODEL` in its environment, an `awt_resume` tool and a short instruction block. Archiving marks nodes done, or paused when work is open. If `awt` fails, the agent starts without it; the plugin never blocks an agent.
 
 Install, on the machine running the Paseo daemon (Paseo 0.15.4 or later):
 
@@ -187,6 +196,7 @@ This repository is the source of the tool. The `AGENTS.md` that users get is a t
 - `awt` is a Python 3.9+ executable. It prefers the standard library; a third-party dependency needs a stated reason in its PR and must keep the documented install working. `migrate-wt` is a separate one-off.
 - Complexity is debt. The verb limit in `SPEC.md` is real: a new verb means removing one.
 - A rule belongs in a script or test, not in prompt text.
+- The man page and `docs/reference/` are generated: after changing help text in `awt` (the `CLI_HELP` table), run `python3 tools/gen_docs.py`. `tests/test_docs.py` fails if help, man page and reference disagree, or if this file or the README names a verb or flag that does not exist.
 - Run before committing: `python3 -m unittest discover -s tests -p 'test_*.py' && python3 tests/chaos.py`.
 - `tests/agentic/run.py` spends real tokens. Run it when `AGENTS.md` text or a verb's interface changes.
 - Fixtures use the fictional `parsekit` project. Never add real task data or token-shaped strings to this repository.
