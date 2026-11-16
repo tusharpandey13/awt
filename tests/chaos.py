@@ -1327,8 +1327,8 @@ def a_secrets(c):
     open(d2.p(".claude", "settings.json"), "w").write("{}")
     d2.run("init", "--goal", "g", "--done", "d")
 
-    def tree():
-        return {os.path.relpath(os.path.join(a, f), d2.dir): open(os.path.join(a, f), "rb").read() for a, _, fs in os.walk(d2.dir) for f in fs if f != "awt"}
+    def tree():  # the brief's "Generated <second>" stamp is the clock, not state: a second boundary between two inits must not fail this
+        return {os.path.relpath(os.path.join(a, f), d2.dir): re.sub(rb"Generated [\d:T-]+;", b"Generated T;", open(os.path.join(a, f), "rb").read()) for a, _, fs in os.walk(d2.dir) for f in fs if f != "awt"}
     s1 = tree()
     d2.run("init", "--goal", "g", "--done", "d")
     d2.run("init")
