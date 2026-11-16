@@ -2482,7 +2482,8 @@ def ingest_opencode(store):
         total, ts = 0, now()
         errors.pop("opencode.db", None)
         try:
-            db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True)
+            # a WAL database without its -wal file is idle: immutable=1 stops sqlite creating -wal and -shm beside the user's file; with them present opencode is live, so mode=ro only
+            db = sqlite3.connect("file:%s?mode=ro%s" % (urllib.parse.quote(path), "" if os.path.exists(path + "-wal") else "&immutable=1"), uri=True)
         except sqlite3.Error as x:
             errors["opencode.db"] = "%s: %s" % (type(x).__name__, str(x)[:200])
             return 0, 0
@@ -2599,10 +2600,10 @@ def ingest_paseo_events(store, text):
             seen += 1
             try:
                 e = json.loads(ln)
-                if not isinstance(e, dict) or e.get("event") not in PASEO_EVENTS or not all(isinstance(e.get(k), str) and e[k] for k in ("eid", "agentId")):
+                if not isinstance(e, dict) or not isinstance(e.get("event"), str) or e["event"] not in PASEO_EVENTS or not all(isinstance(e.get(k), str) and e[k] for k in ("eid", "agentId")):
                     raise ValueError("not a paseo event")
                 by.setdefault(e["agentId"], []).append({k: e[k] for k in PASEO_EVENT_KEYS if isinstance(e.get(k), str)})
-            except ValueError as x:
+            except (ValueError, TypeError, RecursionError) as x:
                 errors["stdin"] = "%s: %s (line %d of the last piped input)" % (type(x).__name__, str(x)[:100], seen)
         for aid, evs in sorted(by.items()):
             out = os.path.join("log", "paseo", safe_name(aid) + ".jsonl")
@@ -3011,7 +3012,7 @@ def paseo_join(agents):
 
 def apply_paseo(db, agents, events):
     """Paseo's own record of what happened, laid over the sessions the transcripts gave. Idempotent: it first undoes its earlier pass, so it can run after any change.
-    A `turn` event marks the first not yet claimed session turn that began within 5 s before its start and before the next turn's start: `outcome`, `paseo_turn` 1,
+    A `turn` event marks the first not yet claimed session turn that began within 5 s before its start and before the next event's start (no offset: the provider writes the user message after Paseo starts the turn): `outcome`, `paseo_turn` 1,
     and `request_model` when the transcript gave none (paseo_fill remembers which). A `permission` event is a row; `permission_resolved` with the same agent and request id fills decision and decider."""
     db.execute("UPDATE turns SET request_model=NULL WHERE turn_id IN (SELECT turn_id FROM paseo_fill)")
     db.execute("UPDATE turns SET outcome=NULL, paseo_turn=0 WHERE paseo_turn=1")
@@ -3035,7 +3036,7 @@ def apply_paseo(db, agents, events):
         free = [(t, epoch(st or "")) for t, st in db.execute("SELECT turn_id, started_at FROM turns WHERE session_id=? ORDER BY seq", (sess[aid][0],))]
         for i, e in enumerate(es):
             lo = epoch(e.get("startedAt") or "") - 5
-            hi = epoch(es[i + 1].get("startedAt") or "") - 5 if i + 1 < len(es) else float("inf")
+            hi = epoch(es[i + 1].get("startedAt") or "") if i + 1 < len(es) else float("inf")
             hit = next(((t, x) for t, x in free if lo <= x < hi), None)
             if hit:
                 free.remove(hit)

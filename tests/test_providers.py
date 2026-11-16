@@ -24,6 +24,7 @@ def build_db(path, drop=None, extra=None):
     if os.path.exists(path):
         os.unlink(path)
     db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=WAL")  # like real opencode: a read-only open of a WAL database creates -wal and -shm
     db.executescript(OC_DDL)
     s = fx["session"]
     db.execute("INSERT INTO session(%s) VALUES (%s)" % (",".join(s), ",".join("?" * len(s))), list(s.values()))
