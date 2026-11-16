@@ -2,7 +2,12 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, sqlite3, stat, subprocess, time, urllib.parse
+import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
+import math
+try:
+    import sqlite3
+except ImportError:  # no _sqlite3: every verb but find --like, ingest and doctor's store line still works
+    sqlite3 = None
 
 VERSION = "0.2.0"
 HOST = socket.gethostname()
@@ -803,7 +808,7 @@ def repo_refs(nodes):
     return res
 
 
-def brief(scope=None):
+def brief(scope=None, git_section=True):
     D, o, info = load(), [], node_info(ROOT)
     anc, kids = ancestors(ROOT), children(ROOT)
     AD = [load_at(p) for p in anc]
@@ -834,7 +839,7 @@ def brief(scope=None):
         nf = newer_files(since)
         if nf:
             ch += ["%d files newer than state:" % len(nf)] + ["  " + cut(x) for x in nf[:K["newer"]]]
-        for r in repo_refs([D] + AD):
+        for r in (repo_refs([D] + AD) if git_section else []):
             try:
                 lg = git(r["path"], "log", "--since=%d" % int(since), "--format=%s", "-n", "5")
                 dirty = git(r["path"], "status", "--porcelain")
@@ -963,7 +968,7 @@ FANOUT = 20  # most agents below a task whose briefs a task write refreshes
 WRITES = {"state", "note", "decide", "ask", "answer", "ref", "capture", "supersede", "status"}
 
 
-def write_brief(path):
+def write_brief(path, git_section=True):
     """Regenerate path/BRIEF.md from the log: temp file in .awt/, then rename. Nothing reads it back; any failure is silent."""
     global ROOT, A
     old, tmp = (ROOT, A), os.path.join(path, ".awt", "BRIEF.%d.tmp" % os.getpid())
@@ -972,7 +977,8 @@ def write_brief(path):
             return
         ROOT = path
         A = "awt" if (not node_info(path)["legacy"] or parent(path)) else "./awt"
-        text = brief() + "Generated %s; ages above are as of then.\n" % now()[:19]
+        ensure_gitignore(True)
+        text = brief(git_section=git_section) + "Generated %s; ages above are as of then.\n" % now()[:19]
         with open(tmp, "w", encoding="utf-8") as g:
             g.write(text)
         os.replace(tmp, os.path.join(path, "BRIEF.md"))
@@ -987,16 +993,16 @@ def write_brief(path):
 
 def refresh_briefs(path):
     """After a write at path: its own brief, its parent's (children section) and, for a task, every agent below (task section)."""
-    write_brief(path)
+    write_brief(path)  # only this one runs git; the others' repo lines wait for their own write or hook
     p = parent(path)
     if p:
-        write_brief(p)
+        write_brief(p, False)
     try:
         if node_info(path)["kind"] == "task":
             agents = [q for q, _ in descendants(path)[0] if node_info(q)["kind"] == "agent"]
             if len(agents) <= FANOUT:  # a big fan-out would make every task write cost one file per agent; their next write or hook refreshes them
                 for q in agents:
-                    write_brief(q)
+                    write_brief(q, False)
     except (Exception, SystemExit):
         pass
 
@@ -1026,8 +1032,11 @@ def slugify(name):
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50].strip("-") or "node"
 
 
-def ensure_gitignore():
+def ensure_gitignore(existing_only=False):
+    """Append the missing IGNORE lines; existing_only: only to a .gitignore that is already there (a pre-phase-2 node)."""
     gi = P(".gitignore")
+    if existing_only and not os.path.exists(gi):
+        return
     have = open(gi, encoding="utf-8", errors="replace").read() if os.path.exists(gi) else ""
     miss = [x for x in IGNORE if x not in have.splitlines()]
     if miss:
@@ -1123,6 +1132,8 @@ def init_child(a):
         if a.key:
             p = find_key(top, a.key)
             if p:
+                if not os.environ.get("AWT_NO_BRIEF"):
+                    write_brief(p)  # a re-opened or pre-phase-2 agent gets a current brief
                 return out("init %s %s" % (os.path.relpath(p, ROOT), node_info(p)["kind"]))
         tmp = os.path.join(base, ".new-" + os.urandom(4).hex())
         os.mkdir(tmp)
@@ -1380,7 +1391,7 @@ def words(text):
 
 def fts_ok():
     """Whether the running sqlite3 has FTS5 (AWT_TEST_NO_FTS5 is a test hook)."""
-    if os.environ.get("AWT_TEST_NO_FTS5"):
+    if sqlite3 is None or os.environ.get("AWT_TEST_NO_FTS5"):
         return False
     try:
         sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x)")
@@ -1393,6 +1404,10 @@ def bm25_scores(docs, ws):
     """{index into docs: score, higher is better} for docs matching any word of ws. An in-memory FTS5 index over docs only, so the result depends on nothing but its inputs."""
     if not ws or not docs:
         return {}
+    if not fts_ok():  # no FTS5: the same words, scored by inverse document frequency (rarer words count more)
+        toks = [set(words(d)) for d in docs]
+        df = {w: sum(w in t for t in toks) for w in ws}
+        return {i: sum(math.log(1 + len(docs) / df[w]) for w in ws if w in t) for i, t in enumerate(toks) if any(w in t for w in ws)}
     db = sqlite3.connect(":memory:")
     db.execute("CREATE VIRTUAL TABLE d USING fts5(t)")
     db.executemany("INSERT INTO d(rowid, t) VALUES (?, ?)", enumerate(docs, 1))
@@ -1941,6 +1956,9 @@ def store_checks(line):
             if loose:
                 line("warn", "%d store files are readable by others, expected 600 (chmod 600 %s)" % (len(loose), loose[0]))
             top = os.path.realpath(store)
+            left = stale_tmp(store)
+            if left:
+                line("warn", "%d leftover temp file(s) from a killed build, e.g. %s (the next awt ingest that builds deletes them)" % (len(left), os.path.join(store, left[0])))
         else:
             line("ok", "store %s not created yet" % store)
             top = os.path.realpath(os.path.dirname(store))
@@ -2031,7 +2049,7 @@ def cmd_doctor(a):
         out("%s %s" % (level, msg))
 
     line("ok" if sys.version_info >= (3, 9) else "fail", "python %d.%d" % sys.version_info[:2])
-    line("ok" if fts_ok() else "fail", "sqlite %s has FTS5" % sqlite3.sqlite_version if fts_ok() else "sqlite %s has no FTS5; find --like and the store need it (use a Python built with it)" % sqlite3.sqlite_version)
+    line("ok" if fts_ok() else "fail", "sqlite %s has FTS5" % sqlite3.sqlite_version if fts_ok() else "sqlite %s has no FTS5; the store and find --sessions need it (find --like falls back to a plain ranking); use a Python built with it" % (sqlite3.sqlite_version if sqlite3 else "is missing:"))
     store_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
@@ -2386,7 +2404,7 @@ def cmd_ingest(a):
         private_dir(store)
         n, f, bad = (None, None, 0) if a.rebuild else ingest_claude(store)
         private_dir(os.path.join(store, "ingest"))
-        built = sync_store(store, find_root(a.dir), a.rebuild)
+        built = sync_store(store, ingest_tree(store, a.dir), a.rebuild)
     except BaseException as x:
         if isinstance(x, KeyboardInterrupt):
             raise
@@ -2404,7 +2422,7 @@ def cmd_ingest(a):
 
 # ---------- store.db ----------
 # Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
-SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 2, "1.37.0", 262144, 4096
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 3, "1.37.0", 262144, 4096
 DDL = """
 CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
@@ -2417,7 +2435,20 @@ CREATE TABLE records(record_id TEXT PRIMARY KEY, node_id TEXT, type TEXT, ts TEX
 CREATE TABLE effects(effect_id TEXT PRIMARY KEY, node_id TEXT, target TEXT, key TEXT, state TEXT, attempt INTEGER, origin TEXT, rule TEXT, begun_by TEXT, begun_at TEXT, sent_ref TEXT, tool_call_id TEXT);
 CREATE TABLE ingest_sources(source TEXT, path TEXT, inode INTEGER, offset INTEGER, adapter INTEGER, last_run TEXT, errors INTEGER, PRIMARY KEY(source, path));
 CREATE TABLE canonical(src TEXT, session TEXT, seq INTEGER, file TEXT, raw TEXT, PRIMARY KEY(src, file, seq));
-CREATE VIRTUAL TABLE fts_text USING fts5(text, kind UNINDEXED, ref UNINDEXED);
+CREATE TABLE build_state(kind TEXT, path TEXT, size INTEGER, errors INTEGER, PRIMARY KEY(kind, path));
+CREATE TABLE fts_ref(id INTEGER PRIMARY KEY, kind TEXT, ref INTEGER);
+CREATE VIRTUAL TABLE fts_text USING fts5(text, content='', tokenize='unicode61');
+"""
+INDEXES = """
+CREATE INDEX ix_sessions_node ON sessions(node_id);
+CREATE INDEX ix_turns_session ON turns(session_id, seq);
+CREATE INDEX ix_messages_turn ON messages(turn_id);
+CREATE INDEX ix_tool_calls_message ON tool_calls(message_id);
+CREATE INDEX ix_records_node ON records(node_id, type);
+CREATE INDEX ix_records_session ON records(session_id);
+CREATE INDEX ix_effects_node ON effects(node_id);
+CREATE INDEX ix_canonical_file ON canonical(file);
+CREATE INDEX ix_fts_ref ON fts_ref(kind, ref);
 """
 
 
@@ -2442,9 +2473,44 @@ def node_paths(root):
     return [top] + [p for p, _ in descendants(top)[0]]
 
 
-def fingerprint(store, root):
-    top = os.path.realpath(tree_top(root)) if root else ""
-    return sha(json.dumps([(k, os.path.relpath(p, store if k == "canonical" else top), n) for k, p, n in store_inputs(store, root)]).encode())
+def top_of(root):
+    return os.path.realpath(tree_top(root)) if root else ""
+
+
+def input_keys(store, root, inputs):
+    """{(kind, path relative to the store or the tree top): size}: what a build records and what freshness compares."""
+    top = top_of(root)
+    return {(k, os.path.relpath(p, store if k == "canonical" else top)): n for k, p, n in inputs}
+
+
+def fingerprint(store, root, inputs=None):
+    keys = input_keys(store, root, store_inputs(store, root) if inputs is None else inputs)
+    return sha(json.dumps([top_of(root)] + [(k, p, n) for (k, p), n in sorted(keys.items())]).encode())
+
+
+def ingest_tree(store, explicit):
+    """The node whose tree store.db indexes. AWT_ROOT, then --dir, then the tree recorded by the last ingest (so cron, a bare directory or a second tree do not change
+    what store.db holds), then the caller's own tree. A tree named by AWT_ROOT or --dir, or the first one found, is recorded in ingest/tree."""
+    mark = os.path.join(store, "ingest", "tree")
+    want = os.environ.get("AWT_ROOT") or explicit
+    root = find_root(want) if want else None
+    try:
+        with open(mark, encoding="utf-8") as g:
+            cur = g.read().strip()
+    except OSError:
+        cur = None
+    if not root and cur:
+        root = find_root(cur)
+    root = root or find_root(None)
+    if root:
+        top = top_of(root)
+        if cur != top and (want or not cur or not os.path.isdir(os.path.join(cur, ".awt"))):
+            private_dir(os.path.join(store, "ingest"), store)
+            tmp = "%s.%d.tmp" % (mark, os.getpid())
+            with open(tmp, "w", encoding="utf-8") as g:
+                g.write(top + "\n")
+            os.replace(tmp, mark)
+    return root
 
 
 def store_fresh(store, root):
@@ -2457,6 +2523,25 @@ def store_fresh(store, root):
         return m.get("schema_version") == str(SCHEMA_VERSION) and m.get("inputs") == fingerprint(store, root)
     except sqlite3.Error:
         return False
+
+
+def record_text(fields):
+    """The FTS text of a record, from its stored fields JSON (so a delete can recompute exactly what an insert indexed)."""
+    r = json.loads(fields)
+    text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in sorted(r.items()) if k not in ("v", "ts", "type", "host", "by", "model", "session"))
+    return u(text[:FTS_CAP])
+
+
+def fts_add(db, kind, ref, text):
+    """One contentless FTS row; fts_ref maps its rowid back to the row it indexes."""
+    db.execute("INSERT INTO fts_text(rowid, text) VALUES (?, ?)", (db.execute("INSERT INTO fts_ref(kind, ref) VALUES (?, ?)", (kind, ref)).lastrowid, text))
+
+
+def fts_drop(db, rows):
+    """Remove FTS rows given [(fts rowid, the exact text indexed)]; a contentless table needs the text back."""
+    for i, text in rows:
+        db.execute("INSERT INTO fts_text(fts_text, rowid, text) VALUES ('delete', ?, ?)", (i, text))
+        db.execute("DELETE FROM fts_ref WHERE id=?", (i,))
 
 
 def u(s):
@@ -2480,7 +2565,7 @@ def derive_claude(db, sid, rows, join):
     """messages, turns, tool_calls and the session row of one canonical claude file. A turn starts at each user message that carries text (not only tool results)."""
     def fts(text, kind, cur):
         if text and cur.rowcount == 1:
-            db.execute("INSERT INTO fts_text(text, kind, ref) VALUES (?, ?, ?)", (text[:FTS_CAP], kind, cur.lastrowid))
+            fts_add(db, kind, cur.lastrowid, text[:FTS_CAP])
     conv = cwd_ = model = first = last = None
     real = lambda x: x if isinstance(x, str) and x.strip() and x != "<synthetic>" else None
     turns, calls, turn = [], {}, -1
@@ -2557,9 +2642,9 @@ def derive_nodes(db, root):
             rid = rid if rid and rid not in rids else "%s#%d" % (i, n)
             rids.add(rid)
             origin = r["by"] if r.get("by") in ("person", "plugin") else "agent"
-            cur = db.execute("INSERT INTO records(record_id, node_id, type, ts, by, fields, origin, model) VALUES (?,?,?,?,?,?,?,?)", (rid, i, r["type"], r["ts"], r.get("by"), json.dumps(r, sort_keys=True), origin, r.get("model") or "unknown:legacy"))
-            text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by", "model", "session"))
-            db.execute("INSERT INTO fts_text(text, kind, ref) VALUES (?, 'record', ?)", (u(text[:FTS_CAP]), cur.lastrowid))
+            fj = json.dumps(r, sort_keys=True)
+            cur = db.execute("INSERT INTO records(record_id, node_id, type, ts, by, fields, origin, model) VALUES (?,?,?,?,?,?,?,?)", (rid, i, r["type"], r["ts"], r.get("by"), fj, origin, r.get("model") or "unknown:legacy"))
+            fts_add(db, "record", cur.lastrowid, record_text(fj))
         for e in D["eff"].values():
             hist = e["hist"]
             begun = next((h for h in hist if h["step"] in ("begun", "claimed")), None)
@@ -2579,6 +2664,7 @@ def join_records(db):
     for sid, tid, a in db.execute("SELECT session_id, turn_id, started_at FROM turns ORDER BY session_id, seq"):
         turns.setdefault(sid, []).append((a or "", tid))
     ups = []
+    db.execute("UPDATE records SET session_id=NULL, turn_id=NULL WHERE session_id IS NOT NULL OR turn_id IS NOT NULL")
     for rid, ts, by, fields in db.execute("SELECT record_id, ts, by, fields FROM records ORDER BY rowid").fetchall():
         try:
             key = json.loads(fields).get("session") or by
@@ -2594,10 +2680,83 @@ def join_records(db):
     db.executemany("UPDATE records SET session_id=?, turn_id=? WHERE record_id=?", ups)
 
 
-def build_store(store, root):
+def read_upto(path, size):
+    """The first size bytes of a canonical file as lines (it only grows; bytes past size belong to the next build)."""
+    with open(path, "rb") as g:
+        return g.read(size).splitlines(True)
+
+
+def drop_file(db, rel):
+    """Remove everything derived from one canonical file (its session id is the file's name)."""
+    sid = os.path.splitext(os.path.basename(rel))[0]
+    fts_drop(db, db.execute("SELECT r.id, substr(m.text, 1, ?) FROM messages m JOIN fts_ref r ON r.kind='message' AND r.ref=m.rowid WHERE m.session_id=? AND m.text != ''", (FTS_CAP, sid)).fetchall())
+    fts_drop(db, db.execute("SELECT r.id, substr(t.args, 1, ?) FROM tool_calls t JOIN fts_ref r ON r.kind='tool_call' AND r.ref=t.rowid WHERE t.session_id=? AND t.args != ''", (FTS_CAP, sid)).fetchall())
+    for t in ("messages", "tool_calls", "turns", "sessions"):
+        db.execute("DELETE FROM %s WHERE session_id=?" % t, (sid,))
+    db.execute("DELETE FROM canonical WHERE file=?", (rel,))
+
+
+def drop_nodes(db):
+    fts_drop(db, [(i, record_text(f)) for i, f in db.execute("SELECT r.id, x.fields FROM records x JOIN fts_ref r ON r.kind='record' AND r.ref=x.rowid").fetchall()])
+    for t in ("records", "effects", "nodes", "projects"):
+        db.execute("DELETE FROM " + t)
+
+
+def sync_into(db, store, root, inputs, fresh):
+    """Bring db in line with inputs (taken before anything was read). Canonical-derived tables are re-derived per changed file; records, nodes, projects and effects
+    (the small node-log tables) when any node log changed. fresh: db is empty, so everything is new."""
+    keys = input_keys(store, root, inputs)
+    top = top_of(root)
+    prev = {} if fresh else {(k, p): (n, e) for k, p, n, e in db.execute("SELECT kind, path, size, errors FROM build_state")}
+    path_of = {(k, os.path.relpath(p, store if k == "canonical" else top)): p for k, p, _ in inputs}
+    nodes_changed = fresh or any(prev.get(k, (None,))[0] != n for k, n in keys.items() if k[0] == "node") or any(k[0] == "node" and k not in keys for k in prev)
+    changed = [k for k, n in keys.items() if k[0] == "canonical" and prev.get(k, (None,))[0] != n]
+    for k in sorted(prev):
+        if k[0] == "canonical" and (k not in keys or k in changed):
+            drop_file(db, k[1])
+    if nodes_changed:
+        drop_nodes(db)
+        join = derive_nodes(db, root)
+    else:
+        join = {os.path.join(top, p) if p != "." else top: i for i, p in db.execute("SELECT node_id, path FROM nodes")}
+    if os.environ.get("AWT_TEST_BUILD_SLEEP"):
+        time.sleep(float(os.environ["AWT_TEST_BUILD_SLEEP"]))  # test hook: a build that takes a while
+    errors = {k: prev[k][1] for k in keys if k in prev and k not in changed and k[0] == "canonical"}
+    for k in sorted(changed):
+        rows = []
+        for ln in read_upto(path_of[k], keys[k]):
+            try:
+                r = json.loads(ln)
+                rows.append((r["src"], r["session"], int(r["seq"]), r["raw"]))
+            except (ValueError, KeyError, TypeError):
+                pass
+        db.executemany("INSERT OR IGNORE INTO canonical VALUES (?,?,?,?,?)", [(a, b, c, k[1], json.dumps(d, separators=(",", ":"))) for a, b, c, d in rows])
+        errors[k] = sum(1 for r in rows if isinstance(r[3], dict) and "_unparsed" in r[3])
+        if rows and rows[0][0] == "claude":
+            derive_claude(db, os.path.splitext(os.path.basename(k[1]))[0], [(r[2], r[3]) for r in rows], join)
+    if nodes_changed and not fresh:
+        db.executemany("UPDATE sessions SET node_id=?, join_confidence=? WHERE session_id=?",
+                       [(join.get(cwd_), "cwd" if join.get(cwd_) else None, sid) for sid, cwd_ in db.execute("SELECT session_id, cwd FROM sessions").fetchall()])
+    if nodes_changed or changed or any(k[0] == "canonical" and k not in keys for k in prev):
+        join_records(db)
+    db.execute("DELETE FROM ingest_sources")
+    try:
+        with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
+            st = json.load(g)
+        for rp, e in sorted(st["files"].items()):
+            who = os.path.splitext(os.path.basename(e.get("out") or ""))[0]
+            db.execute("INSERT INTO ingest_sources VALUES ('claude',?,?,?,?,?,?)", (rp, e.get("inode"), e.get("offset"), st.get("adapter"), st.get("last_run"),
+                       sum(v or 0 for k, v in errors.items() if os.path.splitext(os.path.basename(k[1]))[0] == who)))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    db.execute("DELETE FROM build_state")
+    db.executemany("INSERT INTO build_state VALUES (?,?,?,?)", [(k, p, n, errors.get((k, p), 0)) for (k, p), n in sorted(keys.items())])
+    db.executemany("INSERT OR REPLACE INTO schema_meta VALUES (?,?)", [("schema_version", str(SCHEMA_VERSION)), ("semconv_version", SEMCONV), ("adapter", str(ADAPTER)),
+                                                                          ("tree", top), ("inputs", fingerprint(store, root, inputs))])
+
+
+def build_store(store, root, inputs):
     """Rebuild store.db from canonical JSONL and the node logs. Same inputs give the same file: rows are inserted in sorted path and line order, nothing in it is a clock or an id generated at build time."""
-    if not fts_ok():
-        die("this Python's sqlite3 has no FTS5 (sqlite %s)" % sqlite3.sqlite_version, "use a Python whose sqlite3 has FTS5 (python.org builds and Homebrew have it); awt doctor checks this")
     final = os.path.join(store, "store.db")
     tmp = "%s.%d.tmp" % (final, os.getpid())
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -2605,53 +2764,76 @@ def build_store(store, root):
     db = sqlite3.connect(tmp, isolation_level=None)
     try:
         db.executescript("PRAGMA page_size=4096; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; BEGIN;" + DDL)
-        join = derive_nodes(db, root)
-        fp = fingerprint(store, root)
-        errors, files = {}, sorted(p for k, p, _ in store_inputs(store, root) if k == "canonical")
-        for p in files:
-            rows = []
-            with open(p, "rb") as g:
-                for ln in g:
-                    try:
-                        r = json.loads(ln)
-                        rows.append((r["src"], r["session"], int(r["seq"]), r["raw"]))
-                    except (ValueError, KeyError, TypeError):
-                        pass
-            relp = os.path.relpath(p, os.path.join(store, "log"))
-            db.executemany("INSERT OR IGNORE INTO canonical VALUES (?,?,?,?,?)", [(a, b, c, relp, json.dumps(d, separators=(",", ":"))) for a, b, c, d in rows])
-            errors[os.path.splitext(os.path.basename(p))[0]] = sum(1 for r in rows if isinstance(r[3], dict) and "_unparsed" in r[3])
-            if rows and rows[0][0] == "claude":
-                derive_claude(db, os.path.splitext(os.path.basename(p))[0], [(r[2], r[3]) for r in rows], join)
-        join_records(db)
-        try:
-            with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
-                st = json.load(g)
-            for rp, e in sorted(st["files"].items()):
-                db.execute("INSERT INTO ingest_sources VALUES ('claude',?,?,?,?,?,?)", (rp, e.get("inode"), e.get("offset"), st.get("adapter"), st.get("last_run"),
-                           errors.get(os.path.splitext(os.path.basename(e.get("out") or ""))[0], 0)))
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            pass
-        db.executemany("INSERT INTO schema_meta VALUES (?,?)", [("schema_version", str(SCHEMA_VERSION)), ("semconv_version", SEMCONV), ("adapter", str(ADAPTER)), ("inputs", fp)])
+        sync_into(db, store, root, inputs, True)
+        for q in INDEXES.split(";"):
+            if q.strip():
+                db.execute(q)
         db.execute("COMMIT")
-        n = {t: db.execute("SELECT count(*) FROM " + t).fetchone()[0] for t in ("sessions", "messages", "records")}
+        return counts(db)
     except BaseException:
         db.close()
         os.unlink(tmp)
         raise
-    db.close()
-    os.chmod(tmp, 0o600)
-    os.rename(tmp, final)
-    return n
+    finally:
+        try:
+            db.close()
+        except sqlite3.Error:
+            pass
+        if os.path.exists(tmp):
+            os.chmod(tmp, 0o600)
+            os.rename(tmp, final)
+
+
+def counts(db):
+    return {t: db.execute("SELECT count(*) FROM " + t).fetchone()[0] for t in ("sessions", "messages", "records")}
+
+
+def update_store(store, root, inputs):
+    """Update store.db in place, or None when it cannot be (missing, unreadable, another schema or tree): then the caller rebuilds."""
+    top = top_of(root)
+    try:
+        db = sqlite3.connect(os.path.join(store, "store.db"), isolation_level=None, timeout=30)
+    except sqlite3.Error:
+        return None
+    try:
+        m = dict(db.execute("SELECT key, value FROM schema_meta"))
+        if m.get("schema_version") != str(SCHEMA_VERSION) or m.get("tree") != top or m.get("adapter") != str(ADAPTER):
+            return None
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            sync_into(db, store, root, inputs, False)
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        return counts(db)
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+
+
+def stale_tmp(store):
+    return sorted(f for f in os.listdir(store) if f.startswith("store.db.") and f.endswith(".tmp")) if os.path.isdir(store) else []
 
 
 def sync_store(store, root, force):
-    """Normal ingest rebuilds store.db when it is missing, unreadable, of another schema, or its inputs changed (their sizes: a stat per file); else it leaves it alone. A full rebuild is the simplest correct update and the same code path as --rebuild."""
+    """Normal ingest brings store.db up to date when it is missing, unreadable, of another schema or tree, or its inputs changed (their sizes: a stat per file); else it leaves
+    it alone. Only changed files are re-derived. --rebuild (force) is a full build into a temp file, the same code on an empty db."""
+    if not fts_ok():
+        die("this Python's sqlite3 has no FTS5 (sqlite %s)" % (sqlite3.sqlite_version if sqlite3 else "missing"), "use a Python whose sqlite3 has FTS5 (python.org builds and Homebrew have it); awt doctor checks this")
     if force or not store_fresh(store, root):
         lock = os.open(os.path.join(store, "ingest", "store.lock"), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            for f in stale_tmp(store):  # a killed build leaves its temp file; the lock is held, so none is live
+                try:
+                    os.unlink(os.path.join(store, f))
+                except OSError:
+                    pass
             if force or not store_fresh(store, root):
-                return build_store(store, root)
+                inputs = store_inputs(store, root)  # before anything is read: a write that lands mid-build leaves the fingerprint stale, never fresh
+                return (None if force else update_store(store, root, inputs)) or build_store(store, root, inputs)
         finally:
             os.close(lock)
 
@@ -2659,14 +2841,14 @@ def sync_store(store, root, force):
 def session_hits(term, limit):
     """None when there is no usable store.db, else message and tool-call lines ranked by FTS5 bm25."""
     path = os.path.join(store_dir(), "store.db")
-    if not os.path.isfile(path):
+    if sqlite3 is None or not os.path.isfile(path):
         return None
     try:
         db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True)
         try:
             res = []
             phrase = '"%s"' % term.replace('"', '""')
-            for kind, ref in db.execute("SELECT kind, ref FROM fts_text WHERE fts_text MATCH ? AND kind IN ('message', 'tool_call') ORDER BY bm25(fts_text), rowid LIMIT ?", (phrase, limit)):
+            for kind, ref in db.execute("SELECT r.kind, r.ref FROM fts_text JOIN fts_ref r ON r.id = fts_text.rowid WHERE fts_text MATCH ? AND r.kind IN ('message', 'tool_call') ORDER BY bm25(fts_text), fts_text.rowid LIMIT ?", (phrase, limit)):
                 if kind == "message":
                     sid, mid, seq, role, text = db.execute("SELECT session_id, message_id, seq, role, text FROM messages WHERE rowid=?", (ref,)).fetchone()
                     head = "message:%s#%d [%s]" % (sid, seq, role)

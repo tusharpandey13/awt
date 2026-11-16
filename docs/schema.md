@@ -11,7 +11,10 @@
 ## Tables
 
 ### schema_meta (key, value)
-`schema_version`, `semconv_version`, `adapter` (claude adapter version), `inputs` (SHA-256 of the sorted list of input files and sizes; `awt ingest` rebuilds when it changes). No build clock, so a rebuild is byte-identical.
+`schema_version`, `semconv_version`, `adapter` (claude adapter version), `inputs` (SHA-256 of the tree top and the sorted list of input files and sizes; `awt ingest` updates the store when it changes), `tree` (real path of the tree top the store indexes). No build clock, so a rebuild is byte-identical.
+
+### build_state (kind, path, size, errors)
+The input sizes the last build saw (`kind` `canonical` or `node`, `path` relative to the store or tree top) and, for canonical files, the count of rows that were not JSON. An update re-derives the files whose size differs.
 
 ### projects (L1)
 | column | note |
@@ -60,12 +63,12 @@ A snapshot of `ingest/claude.offsets.json` taken at each build: `source`, `path`
 ### canonical
 `src`, `session`, `seq`, `file` (path under `log/`), `raw` (the provider record as compact JSON, verbatim). Primary key `(src, file, seq)`. Any field the tables lack is `json_extract(raw, '$.path')` away.
 
-### fts_text (FTS5)
-`text` is indexed; `kind` and `ref` are not. `kind` is `message`, `tool_call` or `record`; `ref` is the `rowid` in `messages`, `tool_calls` or `records`. Default `unicode61` tokenizer. Rank with `bm25(fts_text)` (lower is better):
+### fts_text (FTS5, contentless) and fts_ref
+`fts_text(text)` indexes the text and stores none (it is already in `messages.text`, `tool_calls.args` and `records.fields`), so `snippet()` and reading `text` from it do not work; read the text from the table `fts_ref` points at. `fts_ref(id, kind, ref)`: `id` is the FTS rowid, `kind` is `message`, `tool_call` or `record`, `ref` is the `rowid` in `messages`, `tool_calls` or `records`. Default `unicode61` tokenizer. Rank with `bm25(fts_text)` (lower is better):
 
 ```sql
-SELECT m.session_id, m.seq, snippet(fts_text, 0, '[', ']', '...', 12)
-FROM fts_text f JOIN messages m ON m.rowid = f.ref
+SELECT m.session_id, m.seq, substr(m.text, 1, 80)
+FROM fts_text JOIN fts_ref f ON f.id = fts_text.rowid JOIN messages m ON m.rowid = f.ref
 WHERE fts_text MATCH '"tokenizer"' AND f.kind = 'message'
 ORDER BY bm25(fts_text) LIMIT 10;
 ```

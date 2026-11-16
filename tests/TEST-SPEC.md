@@ -182,7 +182,7 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 - S4 Records, effects (one row per effect folded from its steps), nodes and projects come from the node logs; record ids are unique.
 - S5 A session joins a node only on an exact `cwd`, with `join_confidence = 'cwd'`; otherwise null.
 - S6 Unparsed canonical rows count in `ingest_sources.errors`; no canonical files still builds an empty db.
-- S7 `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone; a from-scratch rebuild equals the incrementally built file.
+- S7 an in-place update equals a rebuild (same rows and search hits; rowids may differ), and `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone. Review fixes (tests/test_p2fix.py): H1 a bare-directory or other-tree ingest keeps the records; H2 a node-log change leaves canonical tables alone and a canonical change re-derives only that file; H3 a SIGKILLed build's temp file is swept and `doctor` warns; M1 a write during a build is not marked fresh; M2 a write runs git once; M3 a re-opened agent gets a brief; M5 contentless FTS and indexes; M6 `find --like` and `decide` work without FTS5; M7 a pre-phase-2 node gets the `.gitignore` line.
 - S8 A garbage `store.db` is replaced by `--rebuild` and by a normal `ingest`; no temp files remain.
 - S9 A normal `ingest` with nothing new leaves `store.db` untouched (mtime); a new node record or new canonical rows update it.
 - S10 `--rebuild` prints a `rebuilt store.db` line and no provider line; with `--hook` it is silent.
