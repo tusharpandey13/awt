@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
+import argparse, datetime, signal, tempfile, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
 import math
 try:
     import sqlite3
@@ -221,7 +221,8 @@ USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
   supersede OLD NEW           status active|paused|done
-  effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|pi|opencode|paseo|all] [--hook] [--stdin] [--event]
+  effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|pi|opencode|paseo|ccusage|all] [--hook] [--stdin] [--event]
+  ui [--port N]
 exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
 agent reference: awt help agents"""
 
@@ -3147,7 +3148,60 @@ def ingest_paseo_all(store, piped=None):
     return (a[0] + b[0], a[1] + b[1], b[2])
 
 
-SOURCES = (("claude", ingest_claude, "claude files"), ("pi", ingest_pi, "pi files"), ("opencode", ingest_opencode, "opencode sessions"), ("paseo", ingest_paseo, "paseo files"))
+CCUSAGE_KEYS = ("inputTokens", "outputTokens", "cacheCreationTokens", "cacheReadTokens", "cost", "modelName")
+
+
+def ccusage_cmd():
+    return os.environ.get("AWT_CCUSAGE") or "ccusage"
+
+
+def ingest_ccusage(store):
+    """`ccusage session --json` (run with no shell and no network of awt's own; ccusage reads the provider logs itself) as canonical rows: one per (agent, session), raw = its
+    per-model token counts and cost. Only a changed session is appended again; the store keeps the last row. Not part of `all`: it runs another program over every provider log."""
+    exe = shutil.which(ccusage_cmd())
+    if not exe:
+        die("ccusage not found (looked for %s)" % ccusage_cmd(), "install it with: npm install -g ccusage (or set AWT_CCUSAGE to its path), then: awt ingest --source ccusage")
+    try:
+        r = subprocess.run([exe, "session", "--json"], capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            raise ValueError("exit %d: %s" % (r.returncode, (r.stderr or "").strip()[:200]))
+        data = json.loads(r.stdout)
+        sessions = data["session"]
+        if not isinstance(sessions, list):
+            raise ValueError("`session` is not a list")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as x:
+        die("ccusage output not usable: %s: %s" % (type(x).__name__, str(x)[:200]), "run `ccusage session --json` yourself; awt reads the `session` list (agent, period, modelBreakdowns)")
+
+    def work(files, errors, save):
+        total, seen, ts = 0, 0, now()
+        for sess in sessions:
+            seen += 1
+            try:
+                if not isinstance(sess, dict) or not all(isinstance(sess.get(k), str) and sess[k] for k in ("agent", "period")) or not isinstance(sess.get("modelBreakdowns"), list):
+                    raise ValueError("not a ccusage session")
+                bd = [{k: b[k] for k in CCUSAGE_KEYS if k in b} for b in sess["modelBreakdowns"] if isinstance(b, dict) and isinstance(b.get("modelName"), str)]
+                raw = {"agent": sess["agent"], "period": sess["period"], "modelBreakdowns": sorted(bd, key=lambda b: b["modelName"])}
+                if isinstance(sess.get("totalCost"), (int, float)):
+                    raw["totalCost"] = sess["totalCost"]
+                if isinstance(sess.get("metadata"), dict) and isinstance(sess["metadata"].get("lastActivity"), str):
+                    raw["lastActivity"] = sess["metadata"]["lastActivity"]
+                key = safe_name("%s_%s" % (raw["agent"], raw["period"]))
+                h = canon(raw)
+                if (files.get(key) or {}).get("hash") == h:
+                    continue
+                out = os.path.join("log", "ccusage", key + ".jsonl")
+                total += append_rows(store, out, "ccusage", key, [raw], lambda r: "ccusage:" + key, ts)
+                files[key] = dict(hash=h, out=out)
+                errors.pop(key, None)
+                save()
+            except ValueError as x:
+                errors["session#%d" % seen] = "%s: %s" % (type(x).__name__, str(x)[:100])
+        return total, seen
+    return run_source(store, "ccusage", work)
+
+
+SOURCES = (("claude", ingest_claude, "claude files"), ("pi", ingest_pi, "pi files"), ("opencode", ingest_opencode, "opencode sessions"), ("paseo", ingest_paseo, "paseo files"),
+           ("ccusage", ingest_ccusage, "ccusage sessions"))
 
 
 def cmd_ingest(a):
@@ -3173,7 +3227,7 @@ def cmd_ingest(a):
             for name, fn, what in SOURCES:
                 if name == "paseo" and piped is not None:
                     fn = lambda st, piped=piped: ingest_paseo_all(st, piped)
-                if a.source in (name, "all"):
+                if a.source == name or (a.source == "all" and name != "ccusage"):
                     try:
                         res.append((fn(store), what))
                     except Exception as x:
@@ -3197,9 +3251,81 @@ def cmd_ingest(a):
             out("%s store.db: %d sessions, %d messages, %d records" % ("rebuilt" if a.rebuild else "updated", built["sessions"], built["messages"], built["records"]))
 
 
+# ---------- ui ----------
+# Datasette over store.db (ARCHITECTURE-v2 section 4, ADR 0005). Nothing is vendored: awt writes a metadata file from docs/recipes and starts datasette when it is installed.
+def recipe_dir():
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), "docs", "recipes")
+
+
+def read_recipes():
+    """[(name, header dict, sql)] for every docs/recipes/*.sql that is a SQLite recipe, sorted by name."""
+    res = []
+    d = recipe_dir()
+    for f in sorted(os.listdir(d)) if os.path.isdir(d) else ():
+        if not f.endswith(".sql"):
+            continue
+        with open(os.path.join(d, f), encoding="utf-8") as g:
+            sql = g.read()
+        h = {}
+        for ln in sql.splitlines():
+            m = re.match(r"-- (\w+): (.*)$", ln)
+            if not m:
+                break
+            h[m.group(1)] = m.group(2)
+        if h.get("kind") != "duckdb":
+            res.append((f[:-4], h, sql))
+    return res
+
+
+def ui_metadata():
+    qs = {}
+    for name, h, sql in read_recipes():
+        flag = {"stub": "[needs data] ", "partial": "[partial] "}.get(h.get("status"), "")
+        desc = " ".join(x for x in (h.get("notes"), ("Needs data: " + h["needs"]) if h.get("needs") else None, "Tables: " + h["tables"] if h.get("tables") else None) if x)
+        qs[name.replace("-", "_")] = {"title": flag + h.get("question", name), "description": desc, "sql": sql}
+    return {"title": "awt store (read-only, local)", "description": "Derived from the canonical logs by awt ingest; docs/schema.md describes the tables. Nothing here can change the store.",
+            "databases": {"store": {"queries": qs, "tables": {"records": {"facets": ["type", "origin", "model"]}, "sessions": {"facets": ["provider_name", "request_model"]},
+                                                              "usage": {"facets": ["grain", "cost_source", "response_model"]}, "turns": {"facets": ["outcome"]}}}}}
+
+
+def cmd_ui(a):
+    db = os.path.join(store_dir(), "store.db")
+    if a.print_metadata:
+        return out(json.dumps(ui_metadata(), indent=1))
+    if not os.path.isfile(db):
+        die("no store.db at %s" % db, "awt ingest --source claude (AWT_STORE overrides the location)")
+    exe = shutil.which(os.environ.get("AWT_DATASETTE") or "datasette")
+    if not exe:
+        die("datasette is not installed", "pipx install datasette (or: uv tool install datasette), then: awt ui")
+    tmp = tempfile.mkdtemp(prefix="awt-ui-")
+    os.chmod(tmp, 0o700)
+    meta = os.path.join(tmp, "metadata.json")
+    with open(meta, "w", encoding="utf-8") as g:
+        json.dump(ui_metadata(), g)
+    cmd = [exe, "serve", "-i", db, "-h", "127.0.0.1", "-p", str(a.port), "-m", meta, "--setting", "default_page_size", "100", "--setting", "sql_time_limit_ms", "10000"]
+    out("awt ui: http://127.0.0.1:%d/  (read-only; Ctrl-C stops it)" % a.port)
+    sys.stdout.flush()
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    try:
+        code = proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait()
+        code = 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if code:
+        die("datasette exited with %d" % code, "run it by hand: %s" % " ".join(shlex.quote(c) for c in cmd))
+
+
 # ---------- store.db ----------
 # Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
-SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 4, "1.37.0", 262144, 4096
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 5, "1.37.0", 262144, 4096
 DDL = """
 CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
@@ -3215,6 +3341,12 @@ CREATE TABLE ingest_sources(source TEXT, path TEXT, inode INTEGER, offset INTEGE
 CREATE TABLE canonical(src TEXT, session TEXT, seq INTEGER, file TEXT, raw TEXT, PRIMARY KEY(src, file, seq));
 CREATE TABLE build_state(kind TEXT, path TEXT, size INTEGER, errors INTEGER, PRIMARY KEY(kind, path));
 CREATE TABLE paseo_fill(turn_id TEXT PRIMARY KEY);
+CREATE TABLE usage(usage_id TEXT PRIMARY KEY, grain TEXT, session_id TEXT, conversation_id TEXT, provider_name TEXT, message_id TEXT, turn_id TEXT, request_model TEXT, response_model TEXT, usage_input_tokens INTEGER, usage_output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, cost_usd REAL, cost_source TEXT, latency_ms INTEGER);
+CREATE VIEW usage_best AS
+SELECT session_id, provider_name, response_model, usage_input_tokens, usage_output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, cost_source FROM usage WHERE grain='session_model' AND session_id IS NOT NULL
+UNION ALL
+SELECT session_id, provider_name, response_model, sum(usage_input_tokens), sum(usage_output_tokens), sum(cache_read_tokens), sum(cache_write_tokens), sum(cost_usd), CASE WHEN count(cost_usd) > 0 THEN 'computed' END
+FROM usage WHERE grain='message' AND session_id NOT IN (SELECT session_id FROM usage WHERE grain='session_model' AND session_id IS NOT NULL) GROUP BY session_id, provider_name, response_model;
 CREATE TABLE fts_ref(id INTEGER PRIMARY KEY, kind TEXT, ref INTEGER);
 CREATE VIRTUAL TABLE fts_text USING fts5(text, content='', tokenize='unicode61');
 """
@@ -3227,6 +3359,8 @@ CREATE INDEX ix_records_node ON records(node_id, type);
 CREATE INDEX ix_records_session ON records(session_id);
 CREATE INDEX ix_effects_node ON effects(node_id);
 CREATE INDEX ix_canonical_file ON canonical(file);
+CREATE INDEX ix_usage_session ON usage(session_id, grain);
+CREATE INDEX ix_usage_conv ON usage(conversation_id, provider_name);
 CREATE INDEX ix_fts_ref ON fts_ref(kind, ref);
 """
 
@@ -3346,6 +3480,23 @@ def block_text(c):
     return "\n".join(b["text"] for b in c if isinstance(b, dict) and isinstance(b.get("text"), str)) if isinstance(c, list) else ""
 
 
+def ms_between(a, b):
+    """Milliseconds from ISO time a to b, or None."""
+    try:
+        f = lambda x: datetime.datetime.fromisoformat(x.replace("Z", "+00:00"))
+        return int(round((f(b) - f(a)).total_seconds() * 1000))
+    except (AttributeError, ValueError, TypeError):
+        return None
+
+
+def put_usage(db, sid, provider, mid, turn, resp, inp, out, cr, cw, cost, lat):
+    """One usage row for an assistant message (grain `message`). Counts are kept only when they are integers; cost only when the transcript carried one (cost_source computed)."""
+    n = lambda x: x if isinstance(x, int) and not isinstance(x, bool) else None
+    cost = cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+    db.execute("INSERT OR REPLACE INTO usage VALUES (?,'message',?,NULL,?,?,?,NULL,?,?,?,?,?,?,?,?)", ("m:%s:%s" % (sid, mid), sid, provider, mid, turn, resp, n(inp), n(out), n(cr), n(cw),
+               cost, "computed" if cost is not None else None, lat))
+
+
 def derive_claude(db, sid, rows, place):
     """messages, turns, tool_calls and the session row of one canonical claude file. A turn starts at each user message that carries text (not only tool results)."""
     def fts(text, kind, cur):
@@ -3354,10 +3505,12 @@ def derive_claude(db, sid, rows, place):
     conv = cwd_ = model = first = last = None
     real = lambda x: x if isinstance(x, str) and x.strip() and x != "<synthetic>" else None
     turns, calls, turn = [], {}, -1
+    uses, tsof = {}, {}  # uses: API message id -> its last record's usage (a streamed message is written as several records that repeat it)
     for seq, r in rows:
         if not isinstance(r, dict):
             continue
         ts = r.get("timestamp") if isinstance(r.get("timestamp"), str) else None
+        tsof[r.get("uuid")] = ts
         conv, cwd_ = conv or r.get("sessionId"), cwd_ or r.get("cwd")
         first = first or ts
         last = max(last, ts) if last and ts else last or ts
@@ -3382,6 +3535,8 @@ def derive_claude(db, sid, rows, place):
         cur = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model) VALUES (?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, m.get("role") or r["type"], ts,
                          text, r.get("parentUuid"), json.dumps([stop]) if isinstance(stop, str) else None, rm))
         fts(text, "message", cur)
+        if r["type"] == "assistant" and isinstance(m.get("usage"), dict):
+            uses[m["id"] if isinstance(m.get("id"), str) else mid] = (mid, turns[-1][0] if turns else None, real(rm), m["usage"], ms_between(tsof.get(r.get("parentUuid")), ts) if ts and tsof.get(r.get("parentUuid")) else None)
         for b in bl:
             if b.get("type") == "tool_use" and isinstance(b.get("id"), str):
                 args = u(json.dumps(b.get("input"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -3393,6 +3548,8 @@ def derive_claude(db, sid, rows, place):
                 db.execute("UPDATE tool_calls SET result_excerpt=?, result_sha256=?, is_error=?, ended_at=? WHERE rowid=?",
                            (t[:EXCERPT], sha(t.encode("utf-8")), 1 if b.get("is_error") else 0, ts, calls[b["tool_use_id"]]))
     db.executemany("INSERT INTO turns VALUES (?,?,?,?,?,NULL,0,?,?)", [(t[0], sid, t[1], t[2], t[3], t[4], t[5]) for t in turns])
+    for mid_, turn_, resp_, us, lat in uses.values():
+        put_usage(db, sid, "claude_code", mid_, turn_, resp_, us.get("input_tokens"), us.get("output_tokens"), us.get("cache_read_input_tokens"), us.get("cache_creation_input_tokens"), None, lat)
     node, conf = place("claude_code", conv or sid, cwd_)
     db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", (sid, "claude_code", conv or sid, node, conf, cwd_, model, first, last, "claude", ADAPTER))
 
@@ -3433,6 +3590,10 @@ def derive_pi(db, sid, rows, place):
         c = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model) VALUES (?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, role, ts, text, r.get("parentId"),
                        json.dumps([stop]) if isinstance(stop, str) else None, resp))
         fts_row(db, "message", c, text)
+        if role == "assistant" and isinstance(m.get("usage"), dict):
+            us = m["usage"]
+            put_usage(db, sid, "pi", mid, turns[-1][0] if turns else None, resp, us.get("input"), us.get("output"), us.get("cacheRead"), us.get("cacheWrite"),
+                      us["cost"].get("total") if isinstance(us.get("cost"), dict) else None, m.get("durationMs") if isinstance(m.get("durationMs"), int) else None)
         for b in bl:
             if role == "assistant" and b.get("type") == "toolCall" and isinstance(b.get("id"), str):
                 args = u(json.dumps(b.get("arguments"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -3488,6 +3649,11 @@ def derive_opencode(db, sid, rows, place):
                        json.dumps([fin]) if isinstance(fin, str) else None, resp))
         seq += 1
         fts_row(db, "message", c, text)
+        if role == "assistant" and isinstance(d.get("tokens"), dict):
+            tk, tm_ = d["tokens"], d.get("time") if isinstance(d.get("time"), dict) else {}
+            ca = tk.get("cache") if isinstance(tk.get("cache"), dict) else {}
+            put_usage(db, sid, "opencode", mid, turns[-1][0] if turns else None, resp, tk.get("input"), tk.get("output"), ca.get("read"), ca.get("write"), d.get("cost"),
+                      int(tm_["completed"] - tm_["created"]) if isinstance(tm_.get("completed"), (int, float)) and isinstance(tm_.get("created"), (int, float)) else None)
         for p in ps:
             pd = p["data"]
             if pd.get("type") != "tool":
@@ -3613,7 +3779,25 @@ def derive_nodes(db, root):
     return {p: i for p, i in join.items() if list(join.values()).count(i) == 1}, set(join.values())
 
 
-DERIVE = {"claude": derive_claude, "pi": derive_pi, "opencode": derive_opencode}
+def derive_ccusage(db, sid, rows, place):
+    """One ccusage session (the last row of the file wins): a usage row per model, grain `session_model`, cost_source `ccusage`. session_id is filled in after all files are read (match_usage)."""
+    raw = next((r for _, r in reversed(rows) if isinstance(r, dict) and isinstance(r.get("modelBreakdowns"), list)), None)
+    if raw is None:
+        return
+    prov = {"claude": "claude_code"}.get(raw.get("agent"), raw.get("agent"))
+    n = lambda x: x if isinstance(x, int) and not isinstance(x, bool) else None
+    for b in raw["modelBreakdowns"]:
+        db.execute("INSERT OR REPLACE INTO usage VALUES (?,'session_model',NULL,?,?,NULL,NULL,NULL,?,?,?,?,?,?,'ccusage',NULL)", ("c:%s:%s" % (sid, b["modelName"]), raw.get("period"), prov, b["modelName"], n(b.get("inputTokens")), n(b.get("outputTokens")),
+                   n(b.get("cacheReadTokens")), n(b.get("cacheCreationTokens")), b["cost"] if isinstance(b.get("cost"), (int, float)) else None))
+
+
+def match_usage(db):
+    """Join ccusage rows to the sessions ingested here (the provider's session id, conversation_id), and give message rows their turn's request model."""
+    db.execute("UPDATE usage SET session_id=(SELECT s.session_id FROM sessions s WHERE s.conversation_id=usage.conversation_id AND s.provider_name=usage.provider_name ORDER BY s.session_id LIMIT 1) WHERE grain='session_model'")
+    db.execute("UPDATE usage SET request_model=(SELECT t.request_model FROM turns t WHERE t.turn_id=usage.turn_id) WHERE grain='message'")
+
+
+DERIVE = {"claude": derive_claude, "pi": derive_pi, "opencode": derive_opencode, "ccusage": derive_ccusage}
 
 
 def join_records(db):
@@ -3656,6 +3840,7 @@ def drop_file(db, rel):
     db.execute("DELETE FROM paseo_fill WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id=?)", (sid,))
     for t in ("messages", "tool_calls", "turns", "sessions"):
         db.execute("DELETE FROM %s WHERE session_id=?" % t, (sid,))
+    db.execute("DELETE FROM usage WHERE (grain='message' AND session_id=?) OR (grain='session_model' AND substr(usage_id, 1, ?)=?)", (sid, len(sid) + 3, "c:%s:" % sid))
     db.execute("DELETE FROM canonical WHERE file=?", (rel,))
 
 
@@ -3722,6 +3907,8 @@ def sync_into(db, store, root, inputs, fresh):
         apply_paseo(db, agents, events)
     if nodes_changed or changed or any(k[0] == "canonical" and k not in keys for k in prev):
         join_records(db)
+    if fresh or changed or gone:
+        match_usage(db)
     db.execute("DELETE FROM ingest_sources")
     for src, _, _ in SOURCES:
         try:
@@ -3880,7 +4067,8 @@ def build():
     V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
     V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
     V(sp, "doctor", opt=[(("--staged",), F)])
-    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "pi", "opencode", "paseo", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F), (("--stdin",), F), (("--event",), F)])
+    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "pi", "opencode", "paseo", "ccusage", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F), (("--stdin",), F), (("--event",), F)])
+    V(sp, "ui", opt=[(("--port",), dict(type=int, default=8777)), (("--print-metadata",), F)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
     V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing
@@ -3948,6 +4136,8 @@ def main(argv):
         return cmd_resume(a)
     if a.verb == "ingest":
         return cmd_ingest(a)
+    if a.verb == "ui":
+        return cmd_ui(a)
     if a.verb == "doctor" and a.staged:
         return doctor_staged(a)
     ROOT = find_root(d)

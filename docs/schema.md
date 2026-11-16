@@ -1,6 +1,6 @@
 # store.db schema
 
-`$AWT_STORE/store.db` is SQLite, derived only: `awt ingest --rebuild` deletes it and builds it again from the canonical JSONL under `$AWT_STORE/log/` and the node logs (`.awt/events.jsonl`). Nothing is written to it that cannot be rebuilt. Read it with `sqlite3 -readonly`, DuckDB `ATTACH ... (TYPE sqlite, READ_ONLY)` or any SQLite client. Schema version 4 (`schema_meta.schema_version`); a version change means a rebuild, never a migration.
+`$AWT_STORE/store.db` is SQLite, derived only: `awt ingest --rebuild` deletes it and builds it again from the canonical JSONL under `$AWT_STORE/log/` and the node logs (`.awt/events.jsonl`). Nothing is written to it that cannot be rebuilt. Read it with `sqlite3 -readonly`, DuckDB `ATTACH ... (TYPE sqlite, READ_ONLY)` or any SQLite client. Schema version 5 (`schema_meta.schema_version`); a version change means a rebuild, never a migration.
 
 **Naming.** Where an OpenTelemetry GenAI attribute fits, the column is that attribute without the `gen_ai.` prefix, dots to underscores. **Semconv version pinned: 1.37.0** (`schema_meta.semconv_version`). The GenAI conventions are in development status; a column named for an attribute follows the pinned version, not later renames. Every other column is awt-specific.
 
@@ -79,4 +79,37 @@ WHERE fts_text MATCH '"tokenizer"' AND f.kind = 'message'
 ORDER BY bm25(fts_text) LIMIT 10;
 ```
 
-Not built yet (later phases): `usage`.
+### usage (L8)
+Primary key `usage_id`. Two grains share the table and **overlap, so never add them**: `grain` says which a row is.
+
+| column | OTel | note |
+|---|---|---|
+| `usage_id` | | `m:<session_id>:<message_id>` (grain `message`), `c:<ccusage file stem>:<model>` (grain `session_model`) |
+| `grain` | | `message`: one assistant message, from the transcript. `session_model`: one (session, model) total imported from ccusage |
+| `session_id` | | the session ingested here; null for a ccusage row whose session was not ingested |
+| `conversation_id` | `gen_ai.conversation.id` | the provider's session id (set on ccusage rows, which join to `sessions` through it with `provider_name`) |
+| `provider_name` | `gen_ai.provider.name` | as in `sessions` (ccusage's `claude` is `claude_code`) |
+| `message_id`, `turn_id` | | the join keys for `messages` (with `session_id`) and `turns`; null on ccusage rows |
+| `request_model` | `gen_ai.request.model` | the message's turn `request_model`; null on ccusage rows |
+| `response_model` | `gen_ai.response.model` | the message's model; on a ccusage row its `modelName` |
+| `usage_input_tokens`, `usage_output_tokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` | provider counts. `usage_input_tokens` excludes cache tokens for Claude (it is the uncached input) |
+| `cache_read_tokens`, `cache_write_tokens` | | cache reads and cache creation |
+| `cost_usd`, `cost_source` | | `ccusage` (priced by ccusage), `computed` (the transcript carried a cost: pi, opencode; there is no price table, so Claude messages have none), or null |
+| `latency_ms` | | Claude: time since the parent record; pi: `durationMs`; opencode: completed minus created. Null on ccusage rows. Not time to first token |
+
+Messages join as `usage u JOIN messages m ON m.session_id = u.session_id AND m.message_id = u.message_id`, turns as `JOIN turns t ON t.turn_id = u.turn_id`. A Claude API message streamed as several records appears once, keyed by the last record's `uuid`.
+
+### usage_best (view)
+Per (`session_id`, `provider_name`, `response_model`): the ccusage row when the session has any, else the message rows summed (`cost_usd` summed, `cost_source` `computed` when any message had a cost). Columns as in `usage` without keys. Use it for cost and token totals; ccusage rows with no session here are not in it.
+
+## Queries
+
+`docs/recipes/*.sql` has one recipe per question in ARCHITECTURE-v2 section 11 (31). The header comments are `-- question:`, `-- level:`, `-- tables:`, `-- status:` and `-- notes:`, plus `-- param:` for named parameters (`:now`, `:retention_days`; blank means the default) and `-- needs:` when data is missing. **`real`** answers the question on the stored data. **`partial`** answers part of it and returns the other part as the text `needs data`. **`stub`** answers nothing: it returns one row, `needs data`, naming what no phase provides yet. A stub is never a guess. `tests/test_recipes.py` runs every recipe on `fixtures/recipes-v0` and compares rows. `parquet.sql` is a DuckDB export, not a question.
+
+| status | recipes |
+|---|---|
+| stub | `l7-redecisions` (needs the phase 9 similarity data) |
+| partial | `l6-rework` (exact repeats only), `l7-effects-by-rule` (no resend phase stored), `l7-find-use` (no hit-used link), `l8-latency-percentiles` (no time to first token), `rec-records-by-origin` (phase 8 judgments) |
+| real | the other 25 |
+
+`awt ui` serves them as canned queries (`docs/adr/0005-datasette-for-ui.md`); `sqlite3 -readonly "$AWT_STORE/store.db" < docs/recipes/NAME.sql` runs one by hand (pass `:now` with `-cmd ".param set :now '2026-11-16T12:00:00Z'"`).
