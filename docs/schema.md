@@ -30,23 +30,26 @@
 | column | OTel | note |
 |---|---|---|
 | `session_id` | | primary key: the canonical file name without `.jsonl` |
-| `provider_name` | `gen_ai.provider.name` | `claude_code` |
+| `provider_name` | `gen_ai.provider.name` | `claude_code`, `opencode`, `pi` |
 | `conversation_id` | `gen_ai.conversation.id` | the provider's `sessionId` |
 | `node_id` | | set only when `cwd` equals the real path of exactly one node, else null |
-| `join_confidence` | | `cwd` when `node_id` is set, else null (decision 4) |
+| `join_confidence` | | `session_id` (Paseo's recorded provider session id), `cwd` (exactly one node at that path), else null (decision 4) |
 | `cwd` | | first `cwd` seen |
-| `request_model` | `gen_ai.request.model` | first assistant `message.model` |
+| `request_model` | `gen_ai.request.model` | first assistant `message.model`; pi: the first `model_change`'s `modelId`, else the first assistant model; opencode: the first user message's `model.modelID`, else the first assistant `modelID` |
 | `started_at`, `ended_at` | | first and last record timestamp |
-| `source`, `adapter` | | `claude`, adapter version |
+| `source`, `adapter` | | `claude`, `opencode` or `pi`; adapter version |
 
 ### turns (L6)
-`turn_id` (`<session_id>:<n>`), `session_id`, `seq` (0-based), `started_at`, `ended_at` (last record timestamp inside the turn), `outcome` (null: not inferable from transcripts), `paseo_turn` (0: inferred from user-message boundaries).
+`turn_id` (`<session_id>:<n>`), `session_id`, `seq` (0-based), `started_at`, `ended_at` (last record timestamp inside the turn), `outcome` (`completed`, `failed`, `canceled` from Paseo's turn event; null when no event matched), `paseo_turn` (1 when a Paseo turn event matched the turn, else 0: boundaries inferred from user messages), `request_model` (the model asked for: opencode the user message's `model.modelID`, pi the model in effect at the turn start, else the first assistant model of the turn; Paseo's model fills it only when the transcript gives none), `response_model` (the model of the last assistant message in the turn; null when the transcript names none).
 
 ### messages (L7)
-Primary key `(session_id, message_id)`. `message_id` is the record `uuid`. `turn_id` is null before the first prompt. `seq` is the canonical row number. `role`, `ts`, `text` (text blocks joined by newline; whole), `parent_id` (`parentUuid`), `response_finish_reasons` (`gen_ai.response.finish_reasons`; a JSON array with the record's `stop_reason`, or null).
+Primary key `(session_id, message_id)`. `message_id` is the record `uuid`. `turn_id` is null before the first prompt. `seq` is the canonical row number. `role`, `ts`, `text` (text blocks joined by newline; whole), `parent_id` (`parentUuid`), `response_finish_reasons` (`gen_ai.response.finish_reasons`; a JSON array with the record's `stop_reason`, or null), `response_model` (`gen_ai.response.model`: set on assistant messages of opencode (`modelID`) and pi (`message.model`); null elsewhere, null when the record names none).
 
 ### tool_calls (L7)
 Primary key `(session_id, tool_call_id)`. `tool_call_id` (`gen_ai.tool.call.id`), `message_id` (the assistant message that made the call), `tool_name` (`gen_ai.tool.name`), `args` (`gen_ai.tool.call.arguments`: JSON, sorted keys), `result_excerpt` (first 4,096 characters of the result), `result_sha256` (of the whole result), `is_error` (0/1), `started_at` (call message time), `ended_at` (result message time).
+
+### permissions (L7)
+Primary key `(agent_id, request_id)`. From the Paseo pipe only. `request_id`, `agent_id` (Paseo agent id), `session_id` (the transcript session of that agent, else null), `node_id` (that session's node, else null), `tool_name`, `target` (path or command as Paseo showed it), `decision` (`allow`, `deny`, or `unanswered` while no answer event exists), `decided_by` (`plugin` when the plugin answered, `person` otherwise; null while unanswered), `ts` (request), `decided_at`.
 
 ### records (any level)
 One row per valid line of every node log. `record_id` (the row's own id, `d-`, `q-`, `n-`, when there is one and it is unused, else `<node_id>#<line index among valid rows>`; effect rows always use the second form), `node_id`, `type`, `ts`, `by`, `fields` (the whole row as JSON, `json_extract` reads any field), `session_id` (always null: no deterministic join exists), `origin` (`person` or `plugin` when `by` says so, else `agent`).
@@ -55,7 +58,7 @@ One row per valid line of every node log. `record_id` (the row's own id, `d-`, `
 One row per effect id, folded from its rows: `effect_id`, `node_id`, `target`, `key`, `state` (`planned`, `begun`, `sent`, `unknown`, `dropped`), `attempt`, `origin` (`declared`; `detected` arrives with detection), `rule` (null until then), `begun_by`, `begun_at` (from the first `begun` row), `sent_ref` (`ref` of the last `sent` row), `tool_call_id` (null until detection).
 
 ### ingest_sources
-A snapshot of `ingest/claude.offsets.json` taken at each build: `source`, `path` (relative to the projects directory), `inode`, `offset`, `adapter`, `last_run`, `errors` (canonical rows that were not JSON). It can lag the file until the next rebuild.
+A snapshot of every `ingest/<source>.offsets.json` taken at each build: `source` (`claude`, `pi`, `opencode`, `paseo`), `path` (relative to the projects directory; an opencode session id; a Paseo `<dir>/<agent>.json`), `inode`, `offset`, `adapter`, `last_run`, `errors` (canonical rows that were not JSON). It can lag the file until the next rebuild.
 
 ### canonical
 `src`, `session`, `seq`, `file` (path under `log/`), `raw` (the provider record as compact JSON, verbatim). Primary key `(src, file, seq)`. Any field the tables lack is `json_extract(raw, '$.path')` away.

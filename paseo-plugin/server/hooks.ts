@@ -11,6 +11,7 @@ import { NUDGE, withBlock } from "./prompt.js";
 import { Tree, clean, cut } from "./tree.js";
 import { readProjects } from "./projects.js";
 import { readReceipt } from "./receipt.js";
+import { Pipe } from "./pipe.js";
 import { RECEIPT_KIND, RECEIPT_VERSION } from "../shared/receipt.js";
 
 /** The text of the last assistant message in a timeline page, wherever the page keeps its items. */
@@ -118,11 +119,37 @@ async function within<T>(cfg: AwtConfig, signal: AbortSignal | undefined, log: L
   }
 }
 
-export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): () => void {
+/** The model Paseo reports for the agent now (raw id), else `<provider>:default`. Best effort: it never throws. */
+async function modelOf(ctx: PluginHookContext, agent: PluginHookAgent): Promise<string> {
+  try {
+    const ref = ctx.paseo.agents.ref(agent.id);
+    const read = () => ref.runtimeInfo?.model ?? ref.current()?.runtimeInfo?.model;
+    let model = read();
+    if (!model) {
+      await ref.refresh();
+      model = read();
+    }
+    if (typeof model === "string" && model.trim()) return model.trim();
+  } catch {
+    // the default below
+  }
+  return `${agent.provider}:default`;
+}
+
+/** What a permission request touches: a file path or a command, as Paseo shows it. */
+function permissionTarget(request: unknown): string | undefined {
+  const d = (request as { detail?: Record<string, unknown> }).detail;
+  const v = d && (d.filePath ?? d.command);
+  return typeof v === "string" ? v : Array.isArray(v) ? v.join(" ") : undefined;
+}
+
+export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): (() => void) & { idle: () => Promise<void> } {
   const cfg = readConfig(env);
   const tree = new Tree(cfg, log);
   if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, off, changes or on; showing receipts`);
   const turnStart = new Map<string, number>();
+  const pipe = new Pipe(cfg, log);
+  const answeredByPlugin = new Set<string>();
   /** Agents whose last open.before gave them an AWT_DIR. Only these are nudged. */
   const withDir = new Set<string>();
   /** When each agent was last nudged. It is nudged again only after it has recorded state since. */
@@ -303,6 +330,15 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   add(server.addHook("agent.turn.after", async ({ agent, outcome, turnId }, ctx) => {
     const started = turnStart.get(agent.id);
     turnStart.delete(agent.id);
+    // The Paseo pipe: this turn's outcome and model, for the store. Detached: it never delays or fails the turn.
+    if (pipe.on) {
+      pipe.track(modelOf(ctx, agent).then((model) => {
+        const ev = { event: "turn" as const, eid: `turn:${agent.id}:${turnId ?? started ?? Date.now()}`, agentId: agent.id, turnId: turnId ?? undefined, provider: agent.provider, model,
+          startedAt: started === undefined ? undefined : new Date(started).toISOString(), endedAt: new Date().toISOString(), outcome: outcome.kind,
+          code: outcome.kind === "failed" ? outcome.error.code : undefined };
+        pipe.add(ev, true);
+      }).catch((error) => log(`awt plugin: pipe turn event: ${String(error)}`)));
+    }
     await safe(log, "agent.turn.after", undefined, async () => {
       if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !(await tracked(agent.id))) return;
       if (!cfg.nudge && !cfg.autoHandoff) return;
@@ -365,16 +401,23 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
 
   // The one permission the plugin answers: an agent touching its own node dir, which is always outside its cwd. Anything else
   // (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
+  add(server.addHook("agent.permission.after", async ({ agent, requestId, resolution }) => {
+    const mine = answeredByPlugin.delete(`${agent.id}:${requestId}`);
+    pipe.add({ event: "permission_resolved", eid: `permres:${agent.id}:${requestId}`, agentId: agent.id, requestId, decision: resolution.behavior, decidedBy: mine ? "plugin" : "person", ts: new Date().toISOString() });
+  }));
+
   add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
+    pipe.add({ event: "permission", eid: `perm:${agent.id}:${request.id}`, agentId: agent.id, requestId: request.id, provider: agent.provider, tool: request.name, target: permissionTarget(request), ts: new Date().toISOString() });
     await safe(log, "agent.permission.before", undefined, async () => {
       const targets = permissionTargets(request as Parameters<typeof permissionTargets>[0]);
       if (!targets) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);
       if (!node || !insideNode(node, targets)) return;
+      answeredByPlugin.add(`${agent.id}:${request.id}`);
       await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
     });
   }));
-  return () => removers.forEach((r) => r());
+  return Object.assign(() => (pipe.flush(), removers.forEach((r) => r())), { idle: () => pipe.idle() });
 }
 
 export type { PluginHookAgent };
