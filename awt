@@ -2829,9 +2829,6 @@ def block_text(c):
 
 def derive_claude(db, sid, rows, place):
     """messages, turns, tool_calls and the session row of one canonical claude file. A turn starts at each user message that carries text (not only tool results)."""
-    def fts(text, kind, cur):
-        if text and cur.rowcount == 1:
-            fts_add(db, kind, cur.lastrowid, text[:FTS_CAP])
     conv = cwd_ = model = first = last = None
     real = lambda x: x if isinstance(x, str) and x.strip() and x != "<synthetic>" else None
     turns, calls, turn = [], {}, -1
@@ -2862,13 +2859,13 @@ def derive_claude(db, sid, rows, place):
         stop = m.get("stop_reason")
         cur = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model) VALUES (?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, m.get("role") or r["type"], ts,
                          text, r.get("parentUuid"), json.dumps([stop]) if isinstance(stop, str) else None, rm))
-        fts(text, "message", cur)
+        fts_row(db, "message", cur, text)
         for b in bl:
             if b.get("type") == "tool_use" and isinstance(b.get("id"), str):
                 args = u(json.dumps(b.get("input"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
                 cur = db.execute("INSERT OR IGNORE INTO tool_calls VALUES (?,?,?,?,?,NULL,NULL,NULL,?,NULL)", (b["id"], mid, sid, b.get("name"), args, ts))
                 calls[b["id"]] = cur.lastrowid if cur.rowcount == 1 else None
-                fts(args, "tool_call", cur)
+                fts_row(db, "tool_call", cur, args)
             elif b.get("type") == "tool_result" and calls.get(b.get("tool_use_id")):
                 t = u(block_text(b.get("content")))
                 db.execute("UPDATE tool_calls SET result_excerpt=?, result_sha256=?, is_error=?, ended_at=? WHERE rowid=?",
@@ -3010,6 +3007,13 @@ def paseo_join(agents):
     return pj
 
 
+def paseo_model(m):
+    """A Paseo model as the transcripts name it: bare (`testprov/x` is `x`); `<provider>:default` names no model and is not filled."""
+    if not isinstance(m, str) or not m or m.endswith(":default"):
+        return None
+    return m.split("/", 1)[1] if "/" in m and m.split("/", 1)[1] else m
+
+
 def apply_paseo(db, agents, events):
     """Paseo's own record of what happened, laid over the sessions the transcripts gave. Idempotent: it first undoes its earlier pass, so it can run after any change.
     A `turn` event marks the first not yet claimed session turn that began within 5 s before its start and before the next event's start (no offset: the provider writes the user message after Paseo starts the turn): `outcome`, `paseo_turn` 1,
@@ -3035,14 +3039,15 @@ def apply_paseo(db, agents, events):
         es.sort(key=lambda e: (epoch(e.get("startedAt") or e.get("ts") or ""), e["eid"]))
         free = [(t, epoch(st or "")) for t, st in db.execute("SELECT turn_id, started_at FROM turns WHERE session_id=? ORDER BY seq", (sess[aid][0],))]
         for i, e in enumerate(es):
+            model = paseo_model(e.get("model"))
             lo = epoch(e.get("startedAt") or "") - 5
             hi = epoch(es[i + 1].get("startedAt") or "") if i + 1 < len(es) else float("inf")
             hit = next(((t, x) for t, x in free if lo <= x < hi), None)
             if hit:
                 free.remove(hit)
-                if e.get("model") and db.execute("SELECT request_model IS NULL FROM turns WHERE turn_id=?", (hit[0],)).fetchone()[0]:
+                if model and db.execute("SELECT request_model IS NULL FROM turns WHERE turn_id=?", (hit[0],)).fetchone()[0]:
                     db.execute("INSERT OR IGNORE INTO paseo_fill VALUES (?)", (hit[0],))
-                db.execute("UPDATE turns SET outcome=?, paseo_turn=1, request_model=COALESCE(request_model, ?) WHERE turn_id=?", (e.get("outcome"), e.get("model"), hit[0]))
+                db.execute("UPDATE turns SET outcome=?, paseo_turn=1, request_model=COALESCE(request_model, ?) WHERE turn_id=?", (e.get("outcome"), model, hit[0]))
     res = {(e["agentId"], e.get("requestId")): e for e in evs("permission_resolved")}
     for e in sorted(evs("permission"), key=lambda e: (e.get("ts") or "", e["eid"])):
         r = res.get((e["agentId"], e.get("requestId")))
@@ -3181,7 +3186,7 @@ def sync_into(db, store, root, inputs, fresh):
         loaded[k] = rows
     gone = any(k[0] == "canonical" and k not in keys for k in prev)
     paseo = lambda k: bool(loaded.get(k)) and loaded[k][0][0] == "paseo"
-    paseo_changed = any(paseo(k) for k in loaded) or any(k[0] == "canonical" and k not in keys and k[1].split(os.sep)[0] == "paseo" for k in prev)
+    paseo_changed = any(paseo(k) for k in loaded) or any(k[0] == "canonical" and k not in keys and k[1].split(os.sep)[:2] == ["log", "paseo"] for k in prev)
     agents, events = paseo_view(db)
     pj = paseo_join(agents)
 

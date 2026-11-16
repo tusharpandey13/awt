@@ -80,5 +80,37 @@ class TestM2(P4):
         self.assertIn("stdin", self.errors("paseo"))
 
 
+class TestL3(P4):
+    def test_a_deleted_paseo_file_unjoins_its_sessions_like_a_rebuild(self):
+        sid = "pi-gone-0001"
+        self.put_rows("2026-10-24T12-00-00-000Z_%s.jsonl" % sid, pi_entries(sid, [("2026-10-24T12:00:00.300Z", "2026-10-24T12:00:01.000Z")]))
+        self.put_agent("agt_gone", "pi", sid)
+        self.tree()
+        self.agent_node("a-gone", "paseo:agent/agt_gone")
+        self.run_src("all", root=self.root)
+        self.assertEqual(self.q("select node_id, join_confidence from sessions"), [("paseo:agent/agt_gone", "session_id")])
+        os.unlink(glob.glob(os.path.join(self.store, "log", "paseo", "agt_gone.jsonl"))[0])
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.q("select node_id, join_confidence from sessions"), [(None, None)])
+        inc = self.logical()
+        self.ok("ingest", "--rebuild", root=self.root)
+        self.assertEqual(self.logical(), inc)
+
+
+class TestL2(P4):
+    def test_paseo_model_is_normalised_and_default_is_never_filled(self):
+        sid = "pi-model-0001"
+        rows = pi_entries(sid, [("2026-10-24T12:00:00.300Z", "2026-10-24T12:00:01.000Z"), ("2026-10-24T12:01:00.300Z", "2026-10-24T12:01:01.000Z")])
+        for r in rows:  # no model anywhere in the transcript
+            if r["type"] == "message" and r["message"]["role"] == "assistant":
+                del r["message"]["model"]
+        self.put_rows("2026-10-24T12-00-00-000Z_%s.jsonl" % sid, rows)
+        self.put_agent("agt_m", "pi", sid)
+        self.run_src("all", root=self.root)
+        self.pipe_in(turn_ev("agt_m", "t1", "2026-10-24T12:00:00.000Z", "completed", model="testprov/pi-test-9") + turn_ev("agt_m", "t2", "2026-10-24T12:01:00.000Z", "completed", model="pi:default"))
+        self.assertEqual(self.q("select seq, request_model, paseo_turn from turns order by seq"), [(0, "pi-test-9", 1), (1, None, 1)])
+        self.assertEqual(self.q("select count(*) from canonical where raw like '%pi:default%'"), [(1,)])  # kept in canonical
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,8 @@ export interface AwtConfig {
   receiptBad: boolean;
   /** Paseo's `projects.json`, read only for `archivedAt` (the SDK has no project archive hook and `projects.list` carries no `archivedAt`). AWT_PASEO_PROJECTS overrides it; tests point it at a temp file. */
   projectsFile: string;
+  /** The awt store (AWT_STORE, else `awt-store` beside the node tree's data dir): the pipe spools unsent events in its `ingest/` directory. */
+  store: string;
   /** The environment every awt child runs in. */
   env: NodeJS.ProcessEnv;
 }
@@ -34,6 +36,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): AwtConfig {
     related: env.AWT_RELATED || null,
     receiptBad: !["", "0", "off", "1", "on", "changes", undefined].includes(env.AWT_RECEIPT),
     projectsFile: env.AWT_PASEO_PROJECTS || join(env.PASEO_HOME || join(env.HOME || homedir(), ".paseo"), "projects", "projects.json"),
+    store: env.AWT_STORE || join(data, "awt-store"),
     env,
   };
 }

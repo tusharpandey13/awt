@@ -403,7 +403,7 @@ class TestPaseoPipe(Prov):
         self.run_src("all", root=self.root)
         self.pipe_in(pipe("turn:"))
         self.assertEqual(self.q("select t.seq, t.request_model, t.response_model from turns t join sessions s using (session_id) where s.provider_name='opencode' order by 1"),
-                         [(0, "oc-test-1", "oc-test-1"), (1, "testprov/oc-test-2", None)])
+                         [(0, "oc-test-1", "oc-test-1"), (1, "oc-test-2", None)])
 
     def test_turns_without_a_session_are_kept_in_the_log_only(self):
         self.pipe_in(pipe("turn:agt_oc1"))  # no opencode ingest: no session to lay them over

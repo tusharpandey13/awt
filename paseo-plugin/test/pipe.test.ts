@@ -95,3 +95,46 @@ test("PP6 a replayed turn adds nothing: the event id is stable", async () => {
   await turn(r, "agt_a", 1);
   assert.equal(events(r, "agt_a").length, 1);
 });
+
+// M3: events survive a crash, a restart and a failed send (the spool), and a retry is safe because the event id is stable.
+import { existsSync, statSync } from "node:fs";
+import { readConfig } from "../server/config.js";
+import { Pipe, type PipeEvent } from "../server/pipe.js";
+import { AWT } from "./harness.js";
+
+const pipeFor = (r: Rig, bin: string, logs: string[] = []) =>
+  new Pipe(readConfig({ ...process.env, AWT_DIR: undefined, HOME: r.tmp, AWT_BIN: bin, AWT_ROOT: r.root, AWT_STORE: r.store, AWT_PASEO_HOME: join(r.tmp, "paseo-home"), AWT_PIPE: "1", AWT_PIPE_DELAY_MS: "60000", AWT_TIMEOUT_MS: "60000" }), (m) => logs.push(m));
+const spool = (r: Rig) => join(r.store, "ingest", "paseo.spool.jsonl");
+const ev = (n: number): PipeEvent => ({ event: "turn", eid: `turn:agt_a:turn-${n}`, agentId: "agt_a", turnId: `turn-${n}`, outcome: "completed", startedAt: "2026-10-24T12:00:00.000Z" });
+
+test("PP7 an event is on disk (mode 600) as soon as it is queued, and a new plugin sends it at start", async () => {
+  const r = mk();
+  const p1 = pipeFor(r, AWT);
+  p1.add(ev(1)); // queued, 60 s delay: the plugin dies here
+  assert.ok(existsSync(spool(r)));
+  assert.equal(statSync(spool(r)).mode & 0o777, 0o600);
+  assert.deepEqual(events(r, "agt_a"), []);
+  const p2 = pipeFor(r, AWT);
+  await p2.idle();
+  assert.deepEqual(events(r, "agt_a").map((e) => e.eid), ["turn:agt_a:turn-1"]);
+  assert.ok(!existsSync(spool(r)), "an acknowledged spool is removed");
+});
+
+test("PP8 a failed send keeps the events; the next flush or start sends them, once", async () => {
+  const r = mk();
+  const logs: string[] = [];
+  const bad = pipeFor(r, "/nonexistent/awt", logs);
+  bad.add(ev(1), true);
+  await bad.idle();
+  assert.ok(logs.some((l) => l.includes("pipe")), logs.join("\n"));
+  assert.equal(readFileSync(spool(r), "utf8").trim().split("\n").length, 1);
+  const good = pipeFor(r, AWT);
+  good.add(ev(2), true);
+  await good.idle();
+  assert.deepEqual(events(r, "agt_a").map((e) => e.eid).sort(), ["turn:agt_a:turn-1", "turn:agt_a:turn-2"]);
+  assert.ok(!existsSync(spool(r)));
+  const again = pipeFor(r, AWT);
+  again.add(ev(1), true); // a replay of a delivered event adds nothing
+  await again.idle();
+  assert.equal(events(r, "agt_a").length, 2);
+});
