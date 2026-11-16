@@ -19,7 +19,7 @@
  "persistence": {
   "provider": "pi",
   "sessionId": "01a1b2c3-0000-7000-8000-0000000000p1",
-  "nativeHandle": "01a1b2c3-0000-7000-8000-0000000000p1",
+  "nativeHandle": "/home/parsekit/.pi/agent/sessions/--work-parsekit--/2026-10-23T12-23-19-335Z_01a1b2c3-0000-7000-8000-0000000000p1.jsonl",
   "metadata": {
    "cwd": "/work/parsekit"
   }

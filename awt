@@ -2,8 +2,8 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, signal, tempfile, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
-import math
+import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, stat, subprocess, tempfile, time, urllib.parse
+import itertools, math
 try:
     import sqlite3
 except ImportError:  # no _sqlite3: every verb but find --like, ingest and doctor's store line still works
@@ -2673,8 +2673,59 @@ def claude_dir():
     return os.environ.get("AWT_CLAUDE_PROJECTS") or os.path.join(claude_home(), "projects")
 
 
+def pi_agent_dir():
+    return os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR") or "~/.pi/agent")
+
+
 def pi_dir():
-    return os.environ.get("AWT_PI_SESSIONS") or os.path.expanduser("~/.pi/agent/sessions")
+    """The first pi session root, whose files are keyed by their path below it: AWT_PI_SESSIONS, else the default `<agent dir>/sessions`."""
+    return os.environ.get("AWT_PI_SESSIONS") or os.path.join(pi_agent_dir(), "sessions")
+
+
+def pi_settings_dir(settings, base):
+    """The `sessionDir` of a pi settings.json (a relative one is taken from base), or None."""
+    try:
+        with open(settings, encoding="utf-8") as g:
+            d = json.load(g).get("sessionDir")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return os.path.join(base, os.path.expanduser(d)) if isinstance(d, str) and d else None
+
+
+def pi_sources():
+    """(path, key, session name) of pi transcripts outside the first root: the other places pi can keep sessions (PI_CODING_AGENT_SESSION_DIR; `sessionDir` in `<agent dir>/settings.json` and,
+    for a Paseo pi agent, in `<its cwd>/.pi/settings.json`; the default `<agent dir>/sessions`, unless AWT_PI_SESSIONS names the root) and the exact file of a Paseo pi agent (`persistence.nativeHandle`). Read-only.
+    The key is the absolute path. A file is yielded once, however many places name it."""
+    agent = pi_agent_dir()
+    dirs = []
+    if not os.environ.get("AWT_PI_SESSIONS"):
+        dirs = [os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR") or ""), pi_settings_dir(os.path.join(agent, "settings.json"), agent), os.path.join(agent, "sessions")]
+    files = []
+    base = os.path.join(paseo_home(), "agents")
+    for d in sorted(os.listdir(base)) if os.path.isdir(base) else ():
+        for f in sorted(os.listdir(os.path.join(base, d))) if os.path.isdir(os.path.join(base, d)) else ():
+            try:
+                with open(os.path.join(base, d, f), encoding="utf-8") as g:
+                    a = json.load(g)
+                if not f.endswith(".json") or a.get("provider") != "pi":
+                    continue
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(a.get("cwd"), str) and os.path.isabs(a["cwd"]):
+                dirs.append(pi_settings_dir(os.path.join(a["cwd"], ".pi", "settings.json"), a["cwd"]))
+            h = (a.get("persistence") or {}).get("nativeHandle") if isinstance(a.get("persistence"), dict) else None
+            if isinstance(h, str) and os.path.isabs(h):
+                files.append(h)
+    seen = {os.path.realpath(pi_dir())}
+    for d in dirs:
+        if d and os.path.realpath(d) not in seen:
+            seen.add(os.path.realpath(d))
+            for p, _, name in claude_sessions(d) if os.path.isdir(d) else ():
+                yield p, os.path.abspath(p), name
+    for p in files:
+        if p.endswith(".jsonl") and os.path.isfile(p) and not os.path.islink(p) and not any(os.path.realpath(p).startswith(r + os.sep) for r in seen):
+            seen.add(os.path.realpath(p))
+            yield p, os.path.abspath(p), os.path.basename(p)[:-6]
 
 
 def opencode_db():
@@ -2774,7 +2825,7 @@ def ingest_claude(store):
 
 
 def ingest_pi(store):
-    return ingest_jsonl(store, "pi", pi_dir())
+    return ingest_jsonl(store, "pi", pi_dir(), pi_sources)
 
 
 def load_state(offp):
@@ -2788,7 +2839,7 @@ def load_state(offp):
         return {}, {}
 
 
-def ingest_jsonl(store, src, root):
+def ingest_jsonl(store, src, root, more=lambda: ()):
     """Append new source lines (one JSONL transcript per session: claude, pi) as canonical rows. Returns (rows written, files seen, files that failed).
     A file that fails is recorded under `errors` in the offsets file and the rest are still ingested."""
     private_dir(os.path.join(store, "ingest"), store)
@@ -2800,7 +2851,7 @@ def ingest_jsonl(store, src, root):
         files, errors = load_state(offp)
         used = {v.get("out") for v in files.values()}
         total, seen = 0, 0
-        for path, rel_, name in claude_sessions(root) if os.path.isdir(root) else ():
+        for path, rel_, name in itertools.chain(claude_sessions(root) if os.path.isdir(root) else (), more()):
             seen += 1
             try:
                 st = os.stat(path)
@@ -2983,9 +3034,28 @@ def iso_ms(ms):
     return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (int(ms) % 1000)
 
 
+def oc_known(store, out):
+    """({(table, id) live in the canonical file after its tombstones}, {(table, id) ever in it})."""
+    alive, seen = set(), set()
+    try:
+        with open(os.path.join(store, out), "rb") as g:
+            for ln in g:
+                try:
+                    r = json.loads(ln)["raw"]
+                    k = (r["table"], r["id"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                seen.add(k)
+                alive.discard(k) if r.get("deleted") else alive.add(k)
+    except OSError:
+        pass
+    return alive, seen
+
+
 def ingest_opencode(store):
     """opencode.db (read-only) as canonical rows: one per session, message and part row, raw = its columns with `data` parsed.
-    Incremental per session by max time_updated; a row changed since is appended again and the store keeps the last one. Unknown schema: recorded as an error, nothing read."""
+    Incremental per session by max time_updated; a row changed since is appended again and the store keeps the last one. A row opencode deleted since (revert, deleted session) is appended as a tombstone
+    `{table, id, session_id, deleted: true}` (found by comparing the ids it still holds with the file's, only when their count changed); the file keeps the history, the derivation drops the row. Unknown schema: recorded as an error, nothing read."""
     path = opencode_db()
 
     def work(files, errors, save):
@@ -2994,7 +3064,8 @@ def ingest_opencode(store):
         total, ts = 0, now()
         errors.pop("opencode.db", None)
         try:
-            db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True)
+            # a WAL database without its -wal file is idle: immutable=1 stops sqlite creating -wal and -shm beside the user's file; with them present opencode is live, so mode=ro only
+            db = sqlite3.connect("file:%s?mode=ro%s" % (urllib.parse.quote(path), "" if os.path.exists(path + "-wal") else "&immutable=1"), uri=True)
         except sqlite3.Error as x:
             errors["opencode.db"] = "%s: %s" % (type(x).__name__, str(x)[:200])
             return 0, 0
@@ -3009,12 +3080,26 @@ def ingest_opencode(store):
             except (sqlite3.Error, ValueError) as x:
                 errors["opencode.db"] = "%s: %s" % (type(x).__name__, str(x)[:200])
                 return 0, 0
+            for sid in sorted(set(files) - {r[0] for r in sessions}):  # a session opencode deleted: tombstone everything of it that is still live
+                e = files[sid]
+                if e.get("out") and not e.get("gone"):
+                    alive, _ = oc_known(store, e["out"])
+                    total += append_rows(store, e["out"], "opencode", sid, [dict(table=t, id=i, session_id=sid, deleted=True) for t, i in sorted(alive)], lambda r: "opencode.db:%s:%s" % (r["table"], r["id"]), ts)
+                    e["gone"], e["n"] = True, -1
+                    save()
             for srow in sessions:
                 srec = dict(zip(scols, srow))
                 sid = srec["id"]
                 try:
                     e = dict(files.get(sid) or dict(out=None, cursor=0, at=[]))
+                    e.pop("gone", None)
                     cur, at = e["cursor"], set(e["at"])
+                    live = {("session", sid)} | {(t, r[0]) for t in ("message", "part") for r in db.execute("SELECT id FROM %s WHERE session_id=?" % t, (sid,))}
+                    tomb, back = [], set()
+                    if e["out"] and e.get("n") != len(live):
+                        alive, seen = oc_known(store, e["out"])
+                        tomb = [dict(table=t, id=i, session_id=sid, deleted=True) for t, i in sorted(alive - live)]
+                        back = (live & seen) - alive  # deleted earlier, back now: read again whatever its time_updated
                     items = []
                     if srec["time_updated"] >= cur:
                         items.append(("session", sid, sid, srec["time_created"], srec["time_updated"], srec, None))
@@ -3025,11 +3110,23 @@ def ingest_opencode(store):
                             except (TypeError, ValueError):
                                 d = {"_unparsed": data}
                             items.append((tbl, rid, sid, tc, tu, d, mid))
+                    for tbl, rid in sorted(back):  # same columns as above, by id
+                        if tbl == "session":
+                            if not items or items[0][0] != "session":
+                                items.insert(0, ("session", sid, sid, srec["time_created"], srec["time_updated"], srec, None))
+                        elif not any(i[0] == tbl and i[1] == rid for i in items):
+                            r = db.execute("SELECT time_created, time_updated, data, %s FROM %s WHERE id=?" % ("message_id" if tbl == "part" else "NULL", tbl), (rid,)).fetchone()
+                            try:
+                                d = json.loads(r[2])
+                            except (TypeError, ValueError):
+                                d = {"_unparsed": r[2]}
+                            items.append((tbl, rid, sid, r[0], r[1], d, r[3]))
                     keys = lambda i: "%s:%s:%s" % (i[0], i[1], i[4])
-                    new = [i for i in items if keys(i) not in at]
+                    new = [i for i in items if keys(i) not in at or (i[0], i[1]) in back]
                     top = max([cur] + [i[4] for i in items])
                     e["at"] = sorted(keys(i) for i in items if i[4] == top)
-                    if not new:
+                    e["n"] = len(live)
+                    if not new and not tomb:
                         e["cursor"] = top
                         if e != files.get(sid):
                             files[sid] = e
@@ -3038,7 +3135,7 @@ def ingest_opencode(store):
                         continue
                     if e["out"] is None:
                         e["out"] = os.path.join("log", "opencode", iso_ms(srec["time_created"])[:7], safe_name(sid) + ".jsonl")
-                    raws = [dict(table=i[0], id=i[1], session_id=i[2], **({"message_id": i[6]} if i[0] == "part" else {}), time_created=i[3], time_updated=i[4], data=i[5]) for i in new]
+                    raws = tomb + [dict(table=i[0], id=i[1], session_id=i[2], **({"message_id": i[6]} if i[0] == "part" else {}), time_created=i[3], time_updated=i[4], data=i[5]) for i in new]
                     total += append_rows(store, e["out"], "opencode", sid, raws, lambda r: "opencode.db:%s:%s" % (r["table"], r["id"]), ts)
                     e["cursor"] = top
                     files[sid] = e
@@ -3099,7 +3196,7 @@ PASEO_EVENT_KEYS = ("event", "eid", "agentId", "turnId", "provider", "model", "s
 STDIN_CAP = 8 << 20
 
 
-def ingest_paseo_events(store, text):
+def ingest_paseo_events(store, text, cut=False):
     """The Paseo pipe: JSON lines from the plugin on stdin (turn outcomes, permission requests and answers) as canonical rows in the agent's `log/paseo/<agent id>.jsonl`.
     Only known keys of an event are kept. An event id (`eid`) already stored is skipped, so a retry or a replay adds nothing."""
     def work(files, errors, save):
@@ -3111,11 +3208,13 @@ def ingest_paseo_events(store, text):
             seen += 1
             try:
                 e = json.loads(ln)
-                if not isinstance(e, dict) or e.get("event") not in PASEO_EVENTS or not all(isinstance(e.get(k), str) and e[k] for k in ("eid", "agentId")):
+                if not isinstance(e, dict) or not isinstance(e.get("event"), str) or e["event"] not in PASEO_EVENTS or not all(isinstance(e.get(k), str) and e[k] for k in ("eid", "agentId")):
                     raise ValueError("not a paseo event")
                 by.setdefault(e["agentId"], []).append({k: e[k] for k in PASEO_EVENT_KEYS if isinstance(e.get(k), str)})
-            except ValueError as x:
+            except (ValueError, TypeError, RecursionError) as x:
                 errors["stdin"] = "%s: %s (line %d of the last piped input)" % (type(x).__name__, str(x)[:100], seen)
+        if cut:
+            errors["stdin"] = "input over %d MiB: the rest was not read" % (STDIN_CAP >> 20)
         for aid, evs in sorted(by.items()):
             out = os.path.join("log", "paseo", safe_name(aid) + ".jsonl")
             have = set()
@@ -3139,12 +3238,12 @@ def ingest_paseo_events(store, text):
     return run_source(store, "paseo", work)
 
 
-def ingest_paseo_all(store, piped=None):
+def ingest_paseo_all(store, piped=None, cut=False):
     """Agent files, then (when piped is not None) the piped events."""
     a = ingest_paseo(store)
     if piped is None:
         return a
-    b = ingest_paseo_events(store, piped)
+    b = ingest_paseo_events(store, piped, cut)
     return (a[0] + b[0], a[1] + b[1], b[2])
 
 
@@ -3218,15 +3317,16 @@ def cmd_ingest(a):
     try:
         store = store_dir()
         private_dir(store)
-        piped = None
+        piped, cut = None, False
         if a.stdin:
             if a.source != "paseo" or a.rebuild:
                 die("--stdin takes events for the paseo source only", "awt ingest --source paseo --stdin")
             piped = sys.stdin.buffer.read(STDIN_CAP).decode("utf-8", "replace")
+            cut = bool(sys.stdin.buffer.read(1))
         if not a.rebuild:
             for name, fn, what in SOURCES:
                 if name == "paseo" and piped is not None:
-                    fn = lambda st, piped=piped: ingest_paseo_all(st, piped)
+                    fn = lambda st, piped=piped, cut=cut: ingest_paseo_all(st, piped, cut)
                 if a.source == name or (a.source == "all" and name != "ccusage"):
                     try:
                         res.append((fn(store), what))
@@ -3325,14 +3425,14 @@ def cmd_ui(a):
 
 # ---------- store.db ----------
 # Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
-SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 5, "1.37.0", 262144, 4096
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 6, "1.37.0", 262144, 4096
 DDL = """
 CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
 CREATE TABLE nodes(node_id TEXT PRIMARY KEY, kind TEXT, name TEXT, path TEXT, parent_id TEXT, project_id TEXT, status TEXT, goal TEXT);
 CREATE TABLE sessions(session_id TEXT PRIMARY KEY, provider_name TEXT, conversation_id TEXT, node_id TEXT, join_confidence TEXT, cwd TEXT, request_model TEXT, started_at TEXT, ended_at TEXT, source TEXT, adapter INTEGER);
 CREATE TABLE turns(turn_id TEXT PRIMARY KEY, session_id TEXT, seq INTEGER, started_at TEXT, ended_at TEXT, outcome TEXT, paseo_turn INTEGER, request_model TEXT, response_model TEXT);
-CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGER, role TEXT, ts TEXT, text TEXT, parent_id TEXT, response_finish_reasons TEXT, response_model TEXT, PRIMARY KEY(session_id, message_id));
+CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGER, role TEXT, ts TEXT, text TEXT, parent_id TEXT, response_finish_reasons TEXT, response_model TEXT, active INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(session_id, message_id));
 CREATE TABLE tool_calls(tool_call_id TEXT, message_id TEXT, session_id TEXT, tool_name TEXT, args TEXT, result_excerpt TEXT, result_sha256 TEXT, is_error INTEGER, started_at TEXT, ended_at TEXT, PRIMARY KEY(session_id, tool_call_id));
 CREATE TABLE permissions(request_id TEXT, session_id TEXT, agent_id TEXT, node_id TEXT, tool_name TEXT, target TEXT, decision TEXT, decided_by TEXT, ts TEXT, decided_at TEXT, PRIMARY KEY(agent_id, request_id));
 CREATE TABLE records(record_id TEXT PRIMARY KEY, node_id TEXT, type TEXT, ts TEXT, by TEXT, fields TEXT, session_id TEXT, origin TEXT, model TEXT NOT NULL, turn_id TEXT);
@@ -3499,9 +3599,6 @@ def put_usage(db, sid, provider, mid, turn, resp, inp, out, cr, cw, cost, lat):
 
 def derive_claude(db, sid, rows, place):
     """messages, turns, tool_calls and the session row of one canonical claude file. A turn starts at each user message that carries text (not only tool results)."""
-    def fts(text, kind, cur):
-        if text and cur.rowcount == 1:
-            fts_add(db, kind, cur.lastrowid, text[:FTS_CAP])
     conv = cwd_ = model = first = last = None
     real = lambda x: x if isinstance(x, str) and x.strip() and x != "<synthetic>" else None
     turns, calls, turn = [], {}, -1
@@ -3534,7 +3631,7 @@ def derive_claude(db, sid, rows, place):
         stop = m.get("stop_reason")
         cur = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model) VALUES (?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, m.get("role") or r["type"], ts,
                          text, r.get("parentUuid"), json.dumps([stop]) if isinstance(stop, str) else None, rm))
-        fts(text, "message", cur)
+        fts_row(db, "message", cur, text)
         if r["type"] == "assistant" and isinstance(m.get("usage"), dict):
             uses[m["id"] if isinstance(m.get("id"), str) else mid] = (mid, turns[-1][0] if turns else None, real(rm), m["usage"], ms_between(tsof.get(r.get("parentUuid")), ts) if ts and tsof.get(r.get("parentUuid")) else None)
         for b in bl:
@@ -3542,7 +3639,7 @@ def derive_claude(db, sid, rows, place):
                 args = u(json.dumps(b.get("input"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
                 cur = db.execute("INSERT OR IGNORE INTO tool_calls VALUES (?,?,?,?,?,NULL,NULL,NULL,?,NULL)", (b["id"], mid, sid, b.get("name"), args, ts))
                 calls[b["id"]] = cur.lastrowid if cur.rowcount == 1 else None
-                fts(args, "tool_call", cur)
+                fts_row(db, "tool_call", cur, args)
             elif b.get("type") == "tool_result" and calls.get(b.get("tool_use_id")):
                 t = u(block_text(b.get("content")))
                 db.execute("UPDATE tool_calls SET result_excerpt=?, result_sha256=?, is_error=?, ended_at=? WHERE rowid=?",
@@ -3554,10 +3651,34 @@ def derive_claude(db, sid, rows, place):
     db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", (sid, "claude_code", conv or sid, node, conf, cwd_, model, first, last, "claude", ADAPTER))
 
 
+def pi_path(rows):
+    """(ids on the active branch, or None when the branch cannot be told): the chain of `parentId` from the last entry that has an id back to the root. pi appends every entry to the leaf,
+    so the last entry is where the person is; entries off that chain belong to branches they went back from. None (everything counts) when the chain ends at a missing parent or ids are absent."""
+    byid = {r["id"]: r for _, r in rows if isinstance(r, dict) and isinstance(r.get("id"), str) and r.get("type") != "session"}
+    if not byid:
+        return None
+    path, cur = set(), next(r["id"] for _, r in reversed(rows) if isinstance(r, dict) and r.get("id") in byid)
+    while cur in byid and cur not in path:
+        path.add(cur)
+        cur = byid[cur].get("parentId")
+    return path if cur is None else None
+
+
+def pi_edit_text(rep):
+    """What a `context_edit` replacement says: null (the entry is left out of the model's context) is empty text; {content: string | blocks} its text."""
+    c = rep.get("content") if isinstance(rep, dict) else None
+    return u(c if isinstance(c, str) else block_text(c)) if rep is not None else ""
+
+
 def derive_pi(db, sid, rows, place):
-    """pi session file: a `session` header, then `message` entries with role user, assistant (text, thinking, toolCall blocks), toolResult or system. A turn starts at each user message with text."""
+    """pi session file: a `session` header, then entries linked by id and parentId. The active branch (see pi_path) is the conversation: a turn starts at each user message with text on it, and only it
+    sets the models. Messages on abandoned branches are rows with active 0 and no turn. A `context_edit` on the active branch replaces the text of its target message (null: empty); the original stays in canonical.
+    role user, assistant (text, thinking, toolCall blocks), toolResult or system; `custom`, `custom_message`, `compaction` and other entries are kept in canonical only."""
     conv = cwd_ = model = first = last = cur = None  # model: the session's first; cur: the model in effect now
     turns, calls = [], {}
+    path = pi_path(rows)
+    live = lambda r: path is None or not isinstance(r.get("id"), str) or r["id"] in path
+    edits = {r["targetId"]: r.get("replacement") for _, r in rows if isinstance(r, dict) and r.get("type") == "context_edit" and isinstance(r.get("targetId"), str) and live(r)}
     for seq, r in rows:
         if not isinstance(r, dict):
             continue
@@ -3567,7 +3688,8 @@ def derive_pi(db, sid, rows, place):
         if r.get("type") == "session":
             conv, cwd_ = conv or r.get("id"), cwd_ or r.get("cwd")
             continue
-        if r.get("type") == "model_change":
+        act = live(r)
+        if r.get("type") == "model_change" and act:
             cur = r.get("modelId") if isinstance(r.get("modelId"), str) else cur
             model = model or cur
         m = r.get("message")
@@ -3576,19 +3698,21 @@ def derive_pi(db, sid, rows, place):
         role = m.get("role")
         bl = blocks_of(m.get("content"))
         text = u("\n".join(b["text"] for b in bl if b.get("type") == "text" and isinstance(b.get("text"), str)))
-        if role == "user" and any(b.get("type") == "text" for b in bl):
+        if act and r.get("id") in edits:
+            text = pi_edit_text(edits[r["id"]])
+        if act and role == "user" and any(b.get("type") == "text" for b in bl):
             turns.append([sid + ":%d" % len(turns), len(turns), ts, ts, cur, None])
-        if turns and ts:
+        if act and turns and ts:
             turns[-1][3] = max(turns[-1][3] or ts, ts)
         resp = m["model"] if role == "assistant" and isinstance(m.get("model"), str) else None
-        if resp:
+        if resp and act:
             cur, model = resp, model or resp
             if turns:
                 turns[-1][4], turns[-1][5] = turns[-1][4] or resp, resp
         mid = r.get("id") or "%s#%d" % (sid, seq)
         stop = m.get("stopReason")
-        c = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model) VALUES (?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, role, ts, text, r.get("parentId"),
-                       json.dumps([stop]) if isinstance(stop, str) else None, resp))
+        c = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model, active) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns and act else None, sid, seq, role, ts, text, r.get("parentId"),
+                       json.dumps([stop]) if isinstance(stop, str) else None, resp, 1 if act else 0))
         fts_row(db, "message", c, text)
         if role == "assistant" and isinstance(m.get("usage"), dict):
             us = m["usage"]
@@ -3614,8 +3738,11 @@ def derive_opencode(db, sid, rows, place):
     A turn starts at each user message. A message's text is its text parts; a `tool` part is a tool call (status error: the error text is the result)."""
     cur_ = {"session": {}, "message": {}, "part": {}}
     for _, r in rows:
-        if isinstance(r, dict) and r.get("table") in cur_ and isinstance(r.get("data"), dict):
-            cur_[r["table"]][r.get("id")] = r
+        if isinstance(r, dict) and r.get("table") in cur_:
+            if r.get("deleted") is True:  # a tombstone: opencode deleted the row (revert, deleted session)
+                cur_[r["table"]].pop(r.get("id"), None)
+            elif isinstance(r.get("data"), dict):
+                cur_[r["table"]][r.get("id")] = r
     ss = next(iter(cur_["session"].values()), None)
     if ss is None:
         return
@@ -3695,9 +3822,16 @@ def paseo_join(agents):
     return pj
 
 
+def paseo_model(m):
+    """A Paseo model as the transcripts name it: bare (`testprov/x` is `x`); `<provider>:default` names no model and is not filled."""
+    if not isinstance(m, str) or not m or m.endswith(":default"):
+        return None
+    return m.split("/", 1)[1] if "/" in m and m.split("/", 1)[1] else m
+
+
 def apply_paseo(db, agents, events):
     """Paseo's own record of what happened, laid over the sessions the transcripts gave. Idempotent: it first undoes its earlier pass, so it can run after any change.
-    A `turn` event marks the first not yet claimed session turn that began within 5 s before its start and before the next turn's start: `outcome`, `paseo_turn` 1,
+    A `turn` event marks the first not yet claimed session turn that began within 5 s before its start and before the next event's start (no offset: the provider writes the user message after Paseo starts the turn): `outcome`, `paseo_turn` 1,
     and `request_model` when the transcript gave none (paseo_fill remembers which). A `permission` event is a row; `permission_resolved` with the same agent and request id fills decision and decider."""
     db.execute("UPDATE turns SET request_model=NULL WHERE turn_id IN (SELECT turn_id FROM paseo_fill)")
     db.execute("UPDATE turns SET outcome=NULL, paseo_turn=0 WHERE paseo_turn=1")
@@ -3720,14 +3854,15 @@ def apply_paseo(db, agents, events):
         es.sort(key=lambda e: (epoch(e.get("startedAt") or e.get("ts") or ""), e["eid"]))
         free = [(t, epoch(st or "")) for t, st in db.execute("SELECT turn_id, started_at FROM turns WHERE session_id=? ORDER BY seq", (sess[aid][0],))]
         for i, e in enumerate(es):
+            model = paseo_model(e.get("model"))
             lo = epoch(e.get("startedAt") or "") - 5
-            hi = epoch(es[i + 1].get("startedAt") or "") - 5 if i + 1 < len(es) else float("inf")
+            hi = epoch(es[i + 1].get("startedAt") or "") if i + 1 < len(es) else float("inf")
             hit = next(((t, x) for t, x in free if lo <= x < hi), None)
             if hit:
                 free.remove(hit)
-                if e.get("model") and db.execute("SELECT request_model IS NULL FROM turns WHERE turn_id=?", (hit[0],)).fetchone()[0]:
+                if model and db.execute("SELECT request_model IS NULL FROM turns WHERE turn_id=?", (hit[0],)).fetchone()[0]:
                     db.execute("INSERT OR IGNORE INTO paseo_fill VALUES (?)", (hit[0],))
-                db.execute("UPDATE turns SET outcome=?, paseo_turn=1, request_model=COALESCE(request_model, ?) WHERE turn_id=?", (e.get("outcome"), e.get("model"), hit[0]))
+                db.execute("UPDATE turns SET outcome=?, paseo_turn=1, request_model=COALESCE(request_model, ?) WHERE turn_id=?", (e.get("outcome"), model, hit[0]))
     res = {(e["agentId"], e.get("requestId")): e for e in evs("permission_resolved")}
     for e in sorted(evs("permission"), key=lambda e: (e.get("ts") or "", e["eid"])):
         r = res.get((e["agentId"], e.get("requestId")))
@@ -3885,7 +4020,7 @@ def sync_into(db, store, root, inputs, fresh):
         loaded[k] = rows
     gone = any(k[0] == "canonical" and k not in keys for k in prev)
     paseo = lambda k: bool(loaded.get(k)) and loaded[k][0][0] == "paseo"
-    paseo_changed = any(paseo(k) for k in loaded) or any(k[0] == "canonical" and k not in keys and k[1].split(os.sep)[0] == "paseo" for k in prev)
+    paseo_changed = any(paseo(k) for k in loaded) or any(k[0] == "canonical" and k not in keys and k[1].split(os.sep)[:2] == ["log", "paseo"] for k in prev)
     agents, events = paseo_view(db)
     pj = paseo_join(agents)
 

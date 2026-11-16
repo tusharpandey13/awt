@@ -485,7 +485,12 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       const node = await tree.find(`paseo:agent/${agent.id}`);
       if (!node || !insideNode(node, targets)) return;
       answeredByPlugin.add(`${agent.id}:${request.id}`);
-      await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+      try {
+        await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+      } catch (error) {
+        answeredByPlugin.delete(`${agent.id}:${request.id}`); // not answered: the person's later answer is the person's
+        throw error;
+      }
     });
   }));
   return Object.assign(() => (pipe.flush(), removers.forEach((r) => r())), { idle: () => pipe.idle() });

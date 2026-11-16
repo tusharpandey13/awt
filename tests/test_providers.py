@@ -24,6 +24,7 @@ def build_db(path, drop=None, extra=None):
     if os.path.exists(path):
         os.unlink(path)
     db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=WAL")  # like real opencode: a read-only open of a WAL database creates -wal and -shm
     db.executescript(OC_DDL)
     s = fx["session"]
     db.execute("INSERT INTO session(%s) VALUES (%s)" % (",".join(s), ",".join("?" * len(s))), list(s.values()))
@@ -402,7 +403,7 @@ class TestPaseoPipe(Prov):
         self.run_src("all", root=self.root)
         self.pipe_in(pipe("turn:"))
         self.assertEqual(self.q("select t.seq, t.request_model, t.response_model from turns t join sessions s using (session_id) where s.provider_name='opencode' order by 1"),
-                         [(0, "oc-test-1", "oc-test-1"), (1, "testprov/oc-test-2", None)])
+                         [(0, "oc-test-1", "oc-test-1"), (1, "oc-test-2", None)])
 
     def test_turns_without_a_session_are_kept_in_the_log_only(self):
         self.pipe_in(pipe("turn:agt_oc1"))  # no opencode ingest: no session to lay them over
@@ -451,7 +452,7 @@ class TestPaseoPipe(Prov):
         self.pipe_in(pipe())
         oc = self.rowids("opencode")
         with open(src, "a", encoding="utf-8") as g:
-            g.write(json.dumps({"type": "message", "id": "late01", "parentId": None, "timestamp": "2026-10-23T12:30:00.000Z",
+            g.write(json.dumps({"type": "message", "id": "late01", "parentId": "m7r", "timestamp": "2026-10-23T12:30:00.000Z",
                                 "message": {"role": "user", "content": [{"type": "text", "text": "one more"}]}}) + "\n")
         self.run_src("pi", root=self.root)
         self.assertEqual(self.rowids("opencode"), oc)
