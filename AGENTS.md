@@ -47,7 +47,7 @@ After `init`, the task's own `AGENTS.md` holds the working rules for agents in t
 
 **Start of a session:** `awt resume`. It prints the goal, the current state, open questions and effects, and what changed since the last handoff. A subagent with a brief skips this and reads its brief.
 
-**Before adding anything,** check it isn't known already: `awt find "term"`, or `awt list` for everything.
+**Before adding anything,** check it isn't known already: `awt find "term"` (exact), `awt find --like "a sentence"` (related records from the whole tree), or `awt list` for everything.
 
 **While working,** record through the verbs, never by editing `.awt/`:
 
@@ -128,6 +128,8 @@ Settings, read from the daemon's environment:
 | `AWT_ROOT` | `${XDG_DATA_HOME:-~/.local/share}/awt` | Where the tree lives |
 | `AWT_TIMEOUT_MS` | `5000` | How long one `awt` call may take |
 | `AWT_AUTO_HANDOFF` | on | `0` stops the plugin keeping an agent's last reply as an `auto` state when it ended a turn without a handoff |
+| `AWT_RELATED` | `3` | Related records `decide` and `ask` print after writing (0 to 20; 0 is off). Forwarded to every agent's environment |
+| `AWT_RECEIPT` | on | `0` turns off the per-turn receipt line in the chat; `changes` shows it only when something was stored |
 | `AWT_NUDGE` | off | `1` sends a follow-up prompt when an agent ends a turn without a handoff. Off by default: it adds a visible message and a model turn to the chat |
 
 To upgrade, install again with the new `--ref`. To remove: `paseo plugin remove awt`; the tree stays on disk.
@@ -180,7 +182,7 @@ If `./relay` exists and the work splits into parts: write a plan file (`./relay 
 This repository is the source of the tool. The `AGENTS.md` that users get is a template embedded in the `awt` script, not this file.
 
 - `SPEC.md` is the contract. Change it in the same commit as behaviour.
-- `awt` stays one file: Python 3.9+, stdlib only. `migrate-wt` is a separate one-off.
+- `awt` is a Python 3.9+ executable. It prefers the standard library; a third-party dependency needs a stated reason in its PR and must keep the documented install working. `migrate-wt` is a separate one-off.
 - Complexity is debt. The verb limit in `SPEC.md` is real: a new verb means removing one.
 - A rule belongs in a script or test, not in prompt text.
 - Run before committing: `python3 -m unittest discover -s tests -p 'test_*.py' && python3 tests/chaos.py`.

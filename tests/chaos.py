@@ -1904,6 +1904,38 @@ def rd_node(node):
         return g.read().decode("utf-8", "replace").splitlines()
 
 
+@attack("tree-recall-2000")
+def a_tree_recall_2000(c):
+    """T-R1g: `find --like` across a full 2,000-node tree answers in time, and `decide` stays quick with its related lookup."""
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    t = tnode(c, w, "task", "t")
+    if not (w and t):
+        return
+    for i in range(1998):
+        d = os.path.join(t, "agents", "a%04d" % i, ".awt")
+        os.makedirs(d)
+        rows = [dict(v=1, ts="2026-01-01T00:00:00.000000Z", type="node", host="h", by="x", kind="agent", name="a%04d" % i)]
+        rows += [dict(v=1, ts="2026-01-01T00:00:%02d.000000Z" % j, type="note", host="h", by="x", id="n-%04x%04x" % (i, j), text="parsekit case %d tokenizer unicode %s" % (i, "w%d" % (i % 50))) for j in range(1, 4)]
+        with open(os.path.join(d, "events.jsonl"), "w") as g:
+            g.write("".join(json.dumps(r) + "\n" for r in rows))
+        os.makedirs(os.path.join(t, "agents", "a%04d" % i, "scratch"))
+    r = c.raw([sys.executable, "-I", AWT, "--dir", t, "find", "--like", "tokenizer unicode w7", "--limit", "5"], cwd=c.base, args=["find"], allow=(0,))
+    if r.dt > 2.0:
+        c.fail("find --like took %.1f s on 2,000 nodes (> 2 s)" % r.dt)
+    if len(r.out.splitlines()) != 5:
+        c.fail("find --like gave an unexpected answer: " + r.out[:120])
+    for env, want in ((None, 3), (c.env(AWT_RELATED="5"), 5)):  # decide reads AWT_RELATED; find ignores it
+        r = c.raw([sys.executable, "-I", AWT, "--dir", t, "decide", "tokenizer unicode", "--why", "parsekit tokenizer"], cwd=c.base, env=env, args=["decide"], allow=(0,))
+        if r.dt > 4.5:
+            c.fail("decide with related lookup took %.1f s on 2,000 nodes" % r.dt)
+        if not r.out.startswith("d-"):
+            c.fail("decide printed no id: " + r.out[:80])
+        rel = [l for l in r.out.splitlines() if l.startswith("related:")]
+        if len(rel) != want and not any("lookup stopped" in l for l in rel):
+            c.fail("decide printed %d related lines, wanted %d: %s" % (len(rel), want, r.out[:200]))
+
+
 @attack("tree-budget-fuzz")
 def a_tree_budget_fuzz(c):
     top = tree_root(c)
