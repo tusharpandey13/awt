@@ -132,6 +132,9 @@ class Detect(Base):
         self.assertEqual({r["model"] for r in self.effects()[-3:]}, {"us.test.model-1"})
         self.ev("PreToolUse", "git push origin d", "m4", model="")
         self.assertEqual(self.effects()[-1]["model"], "us.test.model-1")
+        r = self.awt("--model", "flag-model", "ingest", "--event", "--hook", input=json.dumps({"hook_event_name": "PreToolUse", "cwd": self.cwd, "tool_name": "Bash", "tool_input": {"command": "git push origin e"}, "tool_use_id": "m5"}))
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.effects()[-1]["model"], "flag-model")  # phase 2's --model beats AWT_MODEL; a payload model beats both
         self.assertTrue(all(r.get("model") for r in self.effects()))
 
     def test_a_call_that_matches_nothing_takes_no_lock_and_writes_nothing(self):
@@ -286,6 +289,10 @@ class Detect(Base):
         db = sqlite3.connect(os.path.join(self.tmp, "store", "store.db"))
         row = db.execute("SELECT origin, rule, state, tool_call_id FROM effects").fetchall()
         self.assertEqual(row, [("detected", "git push", "begun", "t1")])
+        self.ev("PostToolUse", "git push origin x", "t1", model="claude-sonnet-5-5")  # a later row lands through the incremental sync, no --rebuild
+        self.ok("ingest")
+        self.assertEqual(db.execute("SELECT state FROM effects").fetchall(), [("sent",)])
+        self.assertEqual(db.execute("SELECT model FROM records WHERE type='effect' ORDER BY rowid DESC LIMIT 1").fetchone(), ("claude-sonnet-5-5",))
 
     def test_init_writes_the_tool_hooks(self):
         s = json.loads(slurp(self.p(".claude", "settings.json")))
