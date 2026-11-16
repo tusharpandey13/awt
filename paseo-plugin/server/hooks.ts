@@ -13,6 +13,8 @@ import { readProjects } from "./projects.js";
 import { readReceipt } from "./receipt.js";
 import { Pipe } from "./pipe.js";
 import { RECEIPT_KIND, RECEIPT_VERSION } from "../shared/receipt.js";
+import { RESEND_KIND, RESEND_VERSION } from "../shared/resend.js";
+import { callEvents, permissionEvent, resendReason, type DetectEvent } from "./detect.js";
 
 /** The text of the last assistant message in a timeline page, wherever the page keeps its items. */
 export function lastAssistantText(page: unknown): string | null {
@@ -171,11 +173,14 @@ function permissionTarget(request: unknown): string | undefined {
 export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): (() => void) & { idle: () => Promise<void> } {
   const cfg = readConfig(env);
   const models = modelTracker();
+  const asked = new Map<string, DetectEvent>(); // permission requests awt recorded, until they are answered
   const tree = new Tree(cfg, log);
   if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, off, changes or on; showing receipts`);
   const turnStart = new Map<string, number>();
   const pipe = new Pipe(cfg, log);
   const answeredByPlugin = new Set<string>();
+  /** Tool call ids already sent to `awt ingest --event`, per agent (the last 500). awt ignores a repeat anyway; this saves the process. */
+  const calls = new Map<string, Set<string>>();
   /** Agents whose last open.before gave them an AWT_DIR. Only these are nudged. */
   const withDir = new Set<string>();
   /** When each agent was last nudged. It is nudged again only after it has recorded state since. */
@@ -401,6 +406,19 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
         throw error;
       }
     }));
+    // Detected effects, after the fact: every finished shell or MCP call of the turn, including auto-allowed ones that raised no request. awt pairs them with what the permission hook recorded and ignores a call it already settled.
+    await safe(log, "agent.turn.after detect", undefined, () => withModel(model, async () => {
+      if (started === undefined || !(await tracked(agent.id))) return;
+      const node = await tree.find(`paseo:agent/${agent.id}`);
+      if (!node) return;
+      const fresh = callEvents(await ctx.paseo.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 200 }), agent).filter((e) => !(calls.get(agent.id)?.has(e.id!)));
+      if (!fresh.length) return;
+      const r = await awt(cfg, node, ["ingest", "--event", "--hook"], agent.id, JSON.stringify(fresh));
+      if (r.code !== 0) return;
+      const seen = calls.get(agent.id) ?? new Set<string>();
+      fresh.forEach((e) => seen.add(e.id!));
+      calls.set(agent.id, new Set([...seen].slice(-500)));
+    }));
     // After the stand-in handoff, so the receipt counts it. Any outcome, subagents included; a failure here never touches the turn.
     await safe(log, "agent.turn.after receipt", undefined, () => withModel(model, async () => {
       if (cfg.receipt === "off" || started === undefined || !(await tracked(agent.id))) return;
@@ -432,13 +450,35 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
 
   // The one permission the plugin answers: an agent touching its own node dir, which is always outside its cwd. Anything else
   // (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
-  add(server.addHook("agent.permission.after", async ({ agent, requestId, resolution }) => {
+  add(server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, ctx) => {
     const mine = answeredByPlugin.delete(`${agent.id}:${requestId}`);
     pipe.add({ event: "permission_resolved", eid: `permres:${agent.id}:${requestId}`, agentId: agent.id, requestId, decision: resolution.behavior, decidedBy: mine ? "plugin" : "person", ts: new Date().toISOString() });
+    // A person denied a request awt recorded as begun: that call never ran, so the effect goes back to not-sent (awt: phase "denied"). A restart forgets the pending requests, and such an effect stays begun for `effect mark`.
+    const ev = asked.get(requestId);
+    asked.delete(requestId);
+    if (!ev || resolution?.behavior !== "deny") return;
+    await safe(log, "agent.permission.after detect", undefined, async () => withModel(await models.of(agent, ctx), async () => {
+      const node = await tree.find(`paseo:agent/${agent.id}`);
+      if (node) await awt(cfg, node, ["ingest", "--event", "--hook"], agent.id, JSON.stringify({ ...ev, phase: "denied" }));
+    }));
   }));
 
   add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
     pipe.add({ event: "permission", eid: `perm:${agent.id}:${request.id}`, agentId: agent.id, requestId: request.id, provider: agent.provider, tool: request.name, target: permissionTarget(request), ts: new Date().toISOString() });
+    // Detected effects: a shell or MCP request that awt labels as outbound is recorded; a resend is left for the person with a note. Never denies.
+    await safe(log, "agent.permission.before detect", undefined, async () => withModel(await models.of(agent, ctx), async () => {
+      const ev = permissionEvent(agent, request);
+      if (!ev) return;
+      const node = await tree.find(`paseo:agent/${agent.id}`);
+      if (!node) return;
+      const r = await awt(cfg, node, ["ingest", "--event", "--hook"], agent.id, JSON.stringify(ev));
+      if (r.code === 0) {
+        asked.set(request.id, ev);
+        if (asked.size > 200) asked.delete(asked.keys().next().value!);
+      }
+      const reason = r.code === 0 ? resendReason(r.stdout) : null;
+      if (reason) await ctx.paseo.agents.ref(agent.id).timeline.append({ type: "plugin", id: `${RESEND_KIND}.${request.id}`, kind: RESEND_KIND, version: RESEND_VERSION, data: { reason: cut(clean(reason), 600) } });
+    }));
     await safe(log, "agent.permission.before", undefined, async () => {
       const targets = permissionTargets(request as Parameters<typeof permissionTargets>[0]);
       if (!targets) return;

@@ -1,4 +1,4 @@
-import ast, datetime, json, os, shutil, socket, subprocess, sys, tempfile, time, unittest
+import ast, datetime, json, os, re, shutil, socket, subprocess, sys, tempfile, time, unittest
 
 AWT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "awt"))
 GITENV = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e.x", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e.x",
@@ -97,7 +97,7 @@ class TestBasics(Base):
         for dp, dns, fns in os.walk(self.root):
             for n in dns + fns:
                 p = os.path.join(dp, n)
-                out[os.path.relpath(p, self.root)] = slurp(p, "rb") if os.path.isfile(p) else None
+                out[os.path.relpath(p, self.root)] = re.sub(rb"Generated [^;]*;", b"Generated;", slurp(p, "rb")) if os.path.isfile(p) else None  # BRIEF.md carries a clock stamp
         return out
 
     def test_init_preserves_existing(self):
