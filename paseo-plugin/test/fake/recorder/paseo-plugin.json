@@ -1,0 +1,7 @@
+{
+  "id": "recorder",
+  "name": "recorder",
+  "description": "Test only: appends every hook payload to $AWT_HOOK_LOG",
+  "media": [],
+  "requirements": { "paseo": ">=0.15.4" }
+}
