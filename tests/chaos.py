@@ -1328,7 +1328,8 @@ def a_secrets(c):
     d2.run("init", "--goal", "g", "--done", "d")
 
     def tree():
-        return {os.path.relpath(os.path.join(a, f), d2.dir): open(os.path.join(a, f), "rb").read() for a, _, fs in os.walk(d2.dir) for f in fs if f != "awt"}
+        # BRIEF.md ends with a "Generated <second>" line, which differs when the two runs straddle a second
+        return {os.path.relpath(os.path.join(a, f), d2.dir): re.sub(rb"Generated [^;]*;", b"Generated;", open(os.path.join(a, f), "rb").read()) for a, _, fs in os.walk(d2.dir) for f in fs if f != "awt"}
     s1 = tree()
     d2.run("init", "--goal", "g", "--done", "d")
     d2.run("init")

@@ -6,6 +6,10 @@ import type { AwtConfig } from "./config.js";
 const current = new AsyncLocalStorage<AbortSignal>();
 export const withSignal = <T>(signal: AbortSignal, fn: () => Promise<T>): Promise<T> => current.run(signal, fn);
 
+/** The model of the agent a hook is working for. Every awt call made inside `withModel` records it (`--model`). */
+const modelStore = new AsyncLocalStorage<string>();
+export const withModel = <T>(model: string, fn: () => Promise<T>): Promise<T> => modelStore.run(model, fn);
+
 export interface AwtResult {
   code: number;
   stdout: string;
@@ -20,7 +24,7 @@ export function awt(cfg: AwtConfig, dir: string, args: string[], by = "paseo-plu
     try {
       execFile(
         cfg.bin,
-        ["--dir", dir, "--by", by, ...args],
+        ["--dir", dir, "--by", by, ...(modelStore.getStore() ? ["--model", modelStore.getStore() as string] : []), ...args],
         { timeout: cfg.timeoutMs, maxBuffer: 16 * 1024 * 1024, env: childEnv, signal: current.getStore() },
         (err, stdout, stderr) => {
           const code = err ? (typeof (err as NodeJS.ErrnoException & { code?: unknown }).code === "number" ? ((err as { code: number }).code) : -1) : 0;

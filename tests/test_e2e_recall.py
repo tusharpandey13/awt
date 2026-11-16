@@ -70,6 +70,12 @@ def top(root, path):
     return os.path.relpath(path, root)
 
 
+
+def nomodel(text):
+    """`list --json` rows gained `model` (SPEC, Model tracking); v0.2.0 output equals ours without it, since the old rows read as unknown:legacy."""
+    return re.sub(r', "model": "unknown:legacy"', "", text)
+
+
 class Cli(unittest.TestCase):
     """Temp dir T, a clean environment, and a `run` that applies the universal check U1."""
 
@@ -660,7 +666,7 @@ class ER20(Cli):
                 if job[1] == ("doctor",):  # v2 phase 0 changes doctor's effect and settings checks on purpose
                     self.assertEqual(b.returncode, a.returncode, job)
                 else:
-                    self.assertEqual((b.returncode, b.stdout, b.stderr), (a.returncode, a.stdout, a.stderr), job)
+                    self.assertEqual((b.returncode, nomodel(b.stdout), b.stderr), (a.returncode, a.stdout, a.stderr), job)
                 if job[1] == ("doctor",):
                     self.assertIn("0 quarantined", b.stdout)
         # 2: solo resume, v0.2.0 vs now

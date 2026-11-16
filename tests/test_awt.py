@@ -25,6 +25,7 @@ class Base(unittest.TestCase):
         self.env = dict(os.environ, HOME=self.tmp, **GITENV)
         self.env.pop("AWT_DIR", None)
         self.env.pop("AWT_BY", None)
+        self.env["AWT_MODEL"] = "claude-test-1"  # doctor warns on unknown:* models; tests/test_model.py covers the unset case
 
     def awt(self, *args, root=None, **kw):
         cmd = [sys.executable, "-I", AWT] + (["--dir", root or self.root] if root != "" else []) + list(args)

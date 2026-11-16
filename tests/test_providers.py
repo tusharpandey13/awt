@@ -78,6 +78,15 @@ class Prov(Ing):
         with open(self.db, "rb") as g:
             return hashlib.sha256(g.read()).hexdigest()
 
+    def logical(self):
+        """Every table's rows, sorted and without rowids, plus nothing of FTS internals: what an incremental update must share with a rebuild."""
+        c = sqlite3.connect("file:%s?mode=ro" % self.db, uri=True)
+        try:
+            return {t: sorted(map(repr, c.execute("select * from " + t).fetchall())) for (t,) in
+                    c.execute("select name from sqlite_master where type='table' and name not like 'fts_%' and name != 'build_state' order by name").fetchall()}
+        finally:
+            c.close()
+
     def mk(self, parent, kind, name, *extra):
         r = self.ok("init", "--kind", kind, "--name", name, *extra, root=parent)
         return os.path.join(parent, r.stdout.split()[1])
@@ -134,7 +143,7 @@ class TestPi(Prov):
         self.assertEqual(tc, [("call_a1", "read", '{"path":"lexer.py"}', "def lex(): pass", 0, "2026-10-23T12:23:22.000Z", "2026-10-23T12:23:23.000Z"),
                               ("call_a2", "bash", '{"command":"pytest -q"}', "1 failed", 1, "2026-10-23T12:23:25.000Z", "2026-10-23T12:23:27.000Z")])
         self.assertEqual(self.q("select response_finish_reasons from messages where message_id='m2'"), [('["toolUse"]',)])
-        self.assertEqual(self.q("select count(*) from fts_text where kind='tool_call'"), [(2,)])
+        self.assertEqual(self.q("select count(*) from fts_ref where kind='tool_call'"), [(2,)])
         self.assertEqual(self.q("select source, path, errors from ingest_sources")[0][0], "pi")
 
     def test_missing_dir_and_bad_line(self):
@@ -414,14 +423,55 @@ class TestPaseoPipe(Prov):
         self.pipe_in(pipe("permres"))
         self.assertEqual(self.q("select decision, decided_by from permissions where request_id='perm-0001'"), [("allow", "person")])
 
+    def rowids(self, provider):
+        return self.q("select m.rowid, m.message_id from messages m join sessions s using (session_id) where s.provider_name=? order by 1", provider)
+
+    def test_a_pipe_event_re_derives_no_transcript(self):
+        self.run_src("all", root=self.root)
+        before = [self.rowids("pi"), self.rowids("opencode")]
+        self.pipe_in(pipe())
+        self.assertEqual([self.rowids("pi"), self.rowids("opencode")], before)  # same rows, same rowids: nothing was dropped and derived again
+        self.assertEqual(self.q("select count(*) from turns where paseo_turn=1"), [(4,)])
+        inc = self.logical()
+        self.ok("ingest", "--rebuild", root=self.root)
+        self.assertEqual(self.logical(), inc)
+
+    def test_a_late_agent_record_re_places_sessions_without_re_deriving_them(self):
+        self.run_src("all", root=self.root)
+        self.pipe_in(pipe())
+        ids = self.rowids("pi")
+        self.agent_node("a-pi", "paseo:agent/agt_pi1")
+        self.run_src("all", root=self.root)
+        self.assertEqual(self.rowids("pi"), ids)
+        self.assertEqual(self.q("select node_id, join_confidence from sessions where provider_name='pi'"), [("paseo:agent/agt_pi1", "session_id")])
+
+    def test_a_changed_pi_file_is_re_derived_on_its_own(self):
+        src = self.put_pi()
+        self.run_src("all", root=self.root)
+        self.pipe_in(pipe())
+        oc = self.rowids("opencode")
+        with open(src, "a", encoding="utf-8") as g:
+            g.write(json.dumps({"type": "message", "id": "late01", "parentId": None, "timestamp": "2026-10-23T12:30:00.000Z",
+                                "message": {"role": "user", "content": [{"type": "text", "text": "one more"}]}}) + "\n")
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.rowids("opencode"), oc)
+        self.assertEqual(self.q("select count(*) from messages where message_id='late01'"), [(1,)])
+        self.assertEqual(self.q("select count(*) from turns where paseo_turn=1"), [(4,)])  # the Paseo layer was laid over the new turns again
+        inc = self.logical()
+        self.ok("ingest", "--rebuild", root=self.root)
+        self.assertEqual(self.logical(), inc)
+
     def test_pipe_joins_the_node_and_rebuild_is_byte_stable(self):
         self.agent_node("a-oc", "paseo:agent/agt_oc1")
         self.run_src("all", root=self.root)
         self.pipe_in(pipe())
         self.assertEqual(self.q("select distinct node_id from permissions"), [("paseo:agent/agt_oc1",)])
-        d1 = self.digest()
+        inc = self.logical()
         os.unlink(self.ocdb)
         shutil.rmtree(self.paseo)
+        self.ok("ingest", "--rebuild", root=self.root)
+        self.assertEqual(self.logical(), inc)  # the incremental update and the rebuild hold the same rows
+        d1 = self.digest()
         self.ok("ingest", "--rebuild", root=self.root)
         self.assertEqual(self.digest(), d1)
 
