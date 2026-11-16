@@ -303,7 +303,7 @@ class TestIngest(Ing):
         verbs = m.build()._subparsers._group_actions[0].choices
         self.assertIn("ingest", verbs)
         self.assertNotIn("save", verbs)
-        self.assertLessEqual(len([v for v in verbs if v != "help"]), 16)
+        self.assertLessEqual(len([v for v in verbs if v != "help"]), 17)  # ui added in phase 5; the planned supersede removal (ADR 0006) brings it back to 16
 
     def test_lone_surrogate_is_stored_and_does_not_stop_the_run(self):
         bad = b'{"type":"user","message":{"role":"user","content":"x \\ud83d y"}}\n'  # built at runtime: a lone surrogate escape
