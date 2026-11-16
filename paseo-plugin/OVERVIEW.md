@@ -2,7 +2,7 @@
 
 Keeps one awt node tree for everything you do in Paseo: a workspace node per Paseo workspace, a `main` task per workspace, an agent node per agent chat, and subagent nodes under their parents when Paseo reports the parent.
 
-- Agents get `AWT_DIR` and `AWT_BY` in their environment, a short instruction block in their system prompt, and an `awt_resume` tool.
+- Agents get `AWT_DIR`, `AWT_BY` and `AWT_MODEL` (configured model, else the resolved one from the agent snapshot, else `<provider>:default`) in their environment, and every record the plugin writes for an agent carries that agent's current model; a short instruction block in their system prompt, and an `awt_resume` tool.
 - When an agent finishes a turn without recording a handoff, its last reply is kept as a state in scope `auto`. Nothing is sent to the chat. `AWT_NUDGE=1` sends one follow-up asking for a handoff instead.
 - After every turn the chat gets one muted `awt.receipt` line showing what is stored in awt (decisions, notes, handoff, or nothing). A client renderer draws it; the model never sees it.
 - The static prompt block points agents at `awt find --like` and tells them to call `awt_resume` again after compaction (Paseo has no session-hook field to do it natively).
