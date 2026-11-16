@@ -225,5 +225,52 @@ class TestM4(P4):
         self.assertEqual(len(self.canon_rows("pi")), n + 1)
 
 
+class TestM5(P4):
+    def put_branch(self):
+        for f in glob.glob(os.path.join(FX, "pi-branch", "*.jsonl")):
+            shutil.copy(f, os.path.join(self.pi, "--work-parsekit--"))
+
+    def test_the_active_branch_is_the_conversation_and_the_rest_is_marked(self):
+        self.put_branch()
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.q("select message_id, active, turn_id is null from messages order by seq"),
+                         [("m1", 1, 0), ("m2", 1, 0), ("m3", 1, 0), ("m4", 1, 0), ("m5", 0, 1), ("m6", 0, 1), ("m7", 1, 0), ("m8", 1, 0), ("m9", 1, 0), ("m10", 1, 0)])
+        self.assertEqual(self.q("select seq, started_at from turns order by seq"), [(0, "2026-10-24T13:00:10.000Z"), (1, "2026-10-24T13:01:00.000Z"), (2, "2026-10-24T13:01:30.000Z")])
+        self.assertEqual(self.q("select m.message_id from messages m join turns t using (turn_id) where t.seq=1 order by m.seq"), [("m7",), ("m8",)])
+        # the abandoned branch's model change and model do not leak into the session or the turns
+        self.assertEqual(self.q("select request_model from sessions"), [("pi-test-1",)])
+        self.assertEqual(self.q("select distinct request_model, response_model from turns"), [("pi-test-1", "pi-test-1")])
+        self.assertEqual(self.q("select response_model from messages where message_id='m6'"), [("pi-test-9",)])  # kept as it was written
+        self.assertEqual(self.q("select count(*) from fts_text where fts_text match 'regex'"), [(2,)])  # still searchable
+
+    def test_context_edits_are_applied_to_the_text_and_the_index(self):
+        self.put_branch()
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.q("select text from messages where message_id in ('m4','m8') order by seq"), [("",), ("scanner condensed",)])
+        self.assertEqual(self.q("select count(*) from fts_text where fts_text match 'verbose'"), [(0,)])
+        self.assertEqual(self.q("select count(*) from fts_text where fts_text match 'condensed'"), [(1,)])
+        self.assertEqual(self.q("select count(*) from fts_text where fts_text match 'table'"), [(0,)])
+        self.assertEqual(self.q("select count(*) from canonical where raw like '%verbose%'"), [(1,)])  # the original stays in canonical
+        self.assertEqual(self.q("select count(*) from tool_calls"), [(1,)])  # an edit changes what the model saw, not what was done
+
+    def test_incremental_equals_rebuild_and_a_branch_arriving_later_re_derives(self):
+        src = os.path.join(FX, "pi-branch")
+        f = glob.glob(os.path.join(src, "*.jsonl"))[0]
+        with open(f, encoding="utf-8") as g:
+            lines = g.readlines()
+        dst = os.path.join(self.pi, "--work-parsekit--", os.path.basename(f))
+        with open(dst, "w", encoding="utf-8") as g:
+            g.writelines(lines[:9])  # up to m6: the conversation is still one line
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.q("select count(*) from messages where active=0"), [(0,)])  # the last entry is m6
+        with open(dst, "a", encoding="utf-8") as g:
+            g.writelines(lines[9:])
+        self.run_src("pi", root=self.root)
+        self.assertEqual(self.q("select count(*) from messages where active=0"), [(2,)])
+        inc = self.logical()
+        self.ok("ingest", "--rebuild", root=self.root)
+        self.assertEqual(self.logical(), inc)
+
+
 if __name__ == "__main__":
     unittest.main()

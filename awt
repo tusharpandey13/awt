@@ -2776,14 +2776,14 @@ def cmd_ingest(a):
 
 # ---------- store.db ----------
 # Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
-SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 4, "1.37.0", 262144, 4096
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 5, "1.37.0", 262144, 4096
 DDL = """
 CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
 CREATE TABLE nodes(node_id TEXT PRIMARY KEY, kind TEXT, name TEXT, path TEXT, parent_id TEXT, project_id TEXT, status TEXT, goal TEXT);
 CREATE TABLE sessions(session_id TEXT PRIMARY KEY, provider_name TEXT, conversation_id TEXT, node_id TEXT, join_confidence TEXT, cwd TEXT, request_model TEXT, started_at TEXT, ended_at TEXT, source TEXT, adapter INTEGER);
 CREATE TABLE turns(turn_id TEXT PRIMARY KEY, session_id TEXT, seq INTEGER, started_at TEXT, ended_at TEXT, outcome TEXT, paseo_turn INTEGER, request_model TEXT, response_model TEXT);
-CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGER, role TEXT, ts TEXT, text TEXT, parent_id TEXT, response_finish_reasons TEXT, response_model TEXT, PRIMARY KEY(session_id, message_id));
+CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGER, role TEXT, ts TEXT, text TEXT, parent_id TEXT, response_finish_reasons TEXT, response_model TEXT, active INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(session_id, message_id));
 CREATE TABLE tool_calls(tool_call_id TEXT, message_id TEXT, session_id TEXT, tool_name TEXT, args TEXT, result_excerpt TEXT, result_sha256 TEXT, is_error INTEGER, started_at TEXT, ended_at TEXT, PRIMARY KEY(session_id, tool_call_id));
 CREATE TABLE permissions(request_id TEXT, session_id TEXT, agent_id TEXT, node_id TEXT, tool_name TEXT, target TEXT, decision TEXT, decided_by TEXT, ts TEXT, decided_at TEXT, PRIMARY KEY(agent_id, request_id));
 CREATE TABLE records(record_id TEXT PRIMARY KEY, node_id TEXT, type TEXT, ts TEXT, by TEXT, fields TEXT, session_id TEXT, origin TEXT, model TEXT NOT NULL, turn_id TEXT);
@@ -2971,10 +2971,34 @@ def derive_claude(db, sid, rows, place):
     db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", (sid, "claude_code", conv or sid, node, conf, cwd_, model, first, last, "claude", ADAPTER))
 
 
+def pi_path(rows):
+    """(ids on the active branch, or None when the branch cannot be told): the chain of `parentId` from the last entry that has an id back to the root. pi appends every entry to the leaf,
+    so the last entry is where the person is; entries off that chain belong to branches they went back from. None (everything counts) when the chain ends at a missing parent or ids are absent."""
+    byid = {r["id"]: r for _, r in rows if isinstance(r, dict) and isinstance(r.get("id"), str) and r.get("type") != "session"}
+    if not byid:
+        return None
+    path, cur = set(), next(r["id"] for _, r in reversed(rows) if isinstance(r, dict) and r.get("id") in byid)
+    while cur in byid and cur not in path:
+        path.add(cur)
+        cur = byid[cur].get("parentId")
+    return path if cur is None else None
+
+
+def pi_edit_text(rep):
+    """What a `context_edit` replacement says: null (the entry is left out of the model's context) is empty text; {content: string | blocks} its text."""
+    c = rep.get("content") if isinstance(rep, dict) else None
+    return u(c if isinstance(c, str) else block_text(c)) if rep is not None else ""
+
+
 def derive_pi(db, sid, rows, place):
-    """pi session file: a `session` header, then `message` entries with role user, assistant (text, thinking, toolCall blocks), toolResult or system. A turn starts at each user message with text."""
+    """pi session file: a `session` header, then entries linked by id and parentId. The active branch (see pi_path) is the conversation: a turn starts at each user message with text on it, and only it
+    sets the models. Messages on abandoned branches are rows with active 0 and no turn. A `context_edit` on the active branch replaces the text of its target message (null: empty); the original stays in canonical.
+    role user, assistant (text, thinking, toolCall blocks), toolResult or system; `custom`, `custom_message`, `compaction` and other entries are kept in canonical only."""
     conv = cwd_ = model = first = last = cur = None  # model: the session's first; cur: the model in effect now
     turns, calls = [], {}
+    path = pi_path(rows)
+    live = lambda r: path is None or not isinstance(r.get("id"), str) or r["id"] in path
+    edits = {r["targetId"]: r.get("replacement") for _, r in rows if isinstance(r, dict) and r.get("type") == "context_edit" and isinstance(r.get("targetId"), str) and live(r)}
     for seq, r in rows:
         if not isinstance(r, dict):
             continue
@@ -2984,7 +3008,8 @@ def derive_pi(db, sid, rows, place):
         if r.get("type") == "session":
             conv, cwd_ = conv or r.get("id"), cwd_ or r.get("cwd")
             continue
-        if r.get("type") == "model_change":
+        act = live(r)
+        if r.get("type") == "model_change" and act:
             cur = r.get("modelId") if isinstance(r.get("modelId"), str) else cur
             model = model or cur
         m = r.get("message")
@@ -2993,19 +3018,21 @@ def derive_pi(db, sid, rows, place):
         role = m.get("role")
         bl = blocks_of(m.get("content"))
         text = u("\n".join(b["text"] for b in bl if b.get("type") == "text" and isinstance(b.get("text"), str)))
-        if role == "user" and any(b.get("type") == "text" for b in bl):
+        if act and r.get("id") in edits:
+            text = pi_edit_text(edits[r["id"]])
+        if act and role == "user" and any(b.get("type") == "text" for b in bl):
             turns.append([sid + ":%d" % len(turns), len(turns), ts, ts, cur, None])
-        if turns and ts:
+        if act and turns and ts:
             turns[-1][3] = max(turns[-1][3] or ts, ts)
         resp = m["model"] if role == "assistant" and isinstance(m.get("model"), str) else None
-        if resp:
+        if resp and act:
             cur, model = resp, model or resp
             if turns:
                 turns[-1][4], turns[-1][5] = turns[-1][4] or resp, resp
         mid = r.get("id") or "%s#%d" % (sid, seq)
         stop = m.get("stopReason")
-        c = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model) VALUES (?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, role, ts, text, r.get("parentId"),
-                       json.dumps([stop]) if isinstance(stop, str) else None, resp))
+        c = db.execute("INSERT OR IGNORE INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model, active) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns and act else None, sid, seq, role, ts, text, r.get("parentId"),
+                       json.dumps([stop]) if isinstance(stop, str) else None, resp, 1 if act else 0))
         fts_row(db, "message", c, text)
         for b in bl:
             if role == "assistant" and b.get("type") == "toolCall" and isinstance(b.get("id"), str):

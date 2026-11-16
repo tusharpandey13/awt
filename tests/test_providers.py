@@ -452,7 +452,7 @@ class TestPaseoPipe(Prov):
         self.pipe_in(pipe())
         oc = self.rowids("opencode")
         with open(src, "a", encoding="utf-8") as g:
-            g.write(json.dumps({"type": "message", "id": "late01", "parentId": None, "timestamp": "2026-10-23T12:30:00.000Z",
+            g.write(json.dumps({"type": "message", "id": "late01", "parentId": "m7r", "timestamp": "2026-10-23T12:30:00.000Z",
                                 "message": {"role": "user", "content": [{"type": "text", "text": "one more"}]}}) + "\n")
         self.run_src("pi", root=self.root)
         self.assertEqual(self.rowids("opencode"), oc)
