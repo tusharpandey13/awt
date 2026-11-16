@@ -113,7 +113,7 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 | Text too long for a field | Write `docs/<name>.md`, then reference its path in the field |
 | Slack/chat you can only see pasted | `./awt capture --from slack --title "t" notes.txt` |
 | Same content on stdin | `./awt capture --from slack --title "t" -` |
-| Doc replaced by a better one | `./awt supersede docs/old.md docs/new.md --why "r"` |
+| Doc replaced by a better one | `mv docs/old.md docs/_superseded/`, then `./awt note "docs/new.md replaces docs/old.md: r"` |
 | About to send something that must not go out twice | `./awt effect plan`, `begin`, send it yourself, `mark` (below) |
 | Effect stuck `begun` or `unknown` | `./awt effect show <id>`, then ask a person |
 | Check workspace health | `./awt doctor` |
@@ -130,7 +130,6 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 ./awt answer q-1a2b3c4d "T"
 ./awt ref TARGET --title "T" [--why "T"] [--kind K] [--no-access]
 ./awt capture --from SRC --title "T" [--ref URL] [FILE]
-./awt supersede docs/old.md docs/new.md [--why "T"]
 ./awt status active|paused|done
 ./awt find "term"
 ./awt effect plan --target T [--body FILE] [--how TEXT] [--after ID]... [--again] [--why T]
@@ -163,7 +162,7 @@ Every refusal prints `error:` and `fix:`. Read the `fix:` first.
 | Unknown id (exit 4) | Wrong id for `answer`, `--supersedes`, `--after`, `effect`. | `./awt list <section>` and copy the id. |
 | Already answered / already superseded | Duplicate action. | Use the current id the `fix:` names. |
 | Removed flag or `effect apply` (exit 2) | The tool no longer runs commands. | Send it yourself; use `plan`, `begin`, `mark`. |
-| Path escapes the root | `--body` or `supersede` path resolves outside the task dir. | Copy the file into `outbox/` or `docs/` and retry. |
+| Path escapes the root | `--body` path resolves outside the task dir. | Copy the file into `outbox/` or `docs/` and retry. |
 | `begin`: not planned | The effect is `begun`, `unknown`, `sent` or `dropped`. | `effect show <id>`. Never send it again. |
 | `begin`: someone else is sending | Another process holds the claim. | Wait; check `effect show`. |
 | `begin`: body changed | Body file edited after planning. | Re-plan. Show the person the new body. |
@@ -220,7 +219,7 @@ USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   state --now T --next T      note T                   decide C --why T         ask T
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
-  supersede OLD NEW           status active|paused|done
+  status active|paused|done
   effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|pi|opencode|paseo|ccusage|all] [--hook] [--stdin] [--event]
   ui [--port N]
 exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
@@ -965,7 +964,7 @@ def listing(name, D, all_):
 
 # ---------- BRIEF.md: a derived file, never read back as state ----------
 FANOUT = 20  # most agents below a task whose briefs a task write refreshes
-WRITES = {"state", "note", "decide", "ask", "answer", "ref", "capture", "supersede", "status"}
+WRITES = {"state", "note", "decide", "ask", "answer", "ref", "capture", "status"}
 
 
 def write_brief(path, git_section=True):
@@ -1686,29 +1685,6 @@ def cmd_capture(a):
     os.rename(tmp, P(path))
     emit("capture", path=path, title=a.title, sha=h, ref=a.ref, **{"from": a.from_})
     out("%s captured%s" % (path, " (%d secrets redacted)" % n if n else ""))
-
-
-def cmd_supersede(a):
-    old, new = inside(a.old), inside(a.new)
-    for p in (old, new):
-        if not p.startswith(P("docs") + os.sep):
-            die("%s is not under docs/" % rel(p), "only docs/ files can be superseded")
-        if not os.path.isfile(p):
-            die("%s does not exist" % rel(p), "check the path", 4)
-    if old == new:
-        die("OLD and NEW are the same file", "give two different docs")
-    dst = P("docs", "_superseded", os.path.basename(old))
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    realdir("docs/_superseded")
-    stem, ext = os.path.splitext(dst)
-    i = 1
-    while os.path.lexists(dst):
-        i += 1
-        dst = "%s-%d%s" % (stem, i, ext)
-    check("doc", dict(path=rel(old), action="supersede", by_doc=rel(new), **({"why": a.why} if a.why else {})))
-    os.rename(old, dst)
-    emit("doc", path=rel(old), action="supersede", by_doc=rel(new), why=a.why)
-    out("%s superseded by %s (moved to %s)" % (rel(old), rel(new), rel(dst)))
 
 
 def cmd_status(a):
@@ -3261,7 +3237,7 @@ def ingest_ccusage(store):
     if not exe:
         die("ccusage not found (looked for %s)" % ccusage_cmd(), "install it with: npm install -g ccusage (or set AWT_CCUSAGE to its path), then: awt ingest --source ccusage")
     try:
-        r = subprocess.run([exe, "session", "--json"], capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL)
+        r = subprocess.run([exe, "session", "--json", "--offline"], capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             raise ValueError("exit %d: %s" % (r.returncode, (r.stderr or "").strip()[:200]))
         data = json.loads(r.stdout)
@@ -3388,6 +3364,59 @@ def ui_metadata():
                                                               "usage": {"facets": ["grain", "cost_source", "response_model"]}, "turns": {"facets": ["outcome"]}}}}}
 
 
+UI_GUARD = """from datasette import hookimpl
+
+OK = ("127.0.0.1", "localhost")
+
+
+@hookimpl
+def asgi_wrapper(datasette):
+    def wrap(app):
+        async def guard(scope, receive, send):
+            if scope["type"] in ("http", "websocket"):
+                host = dict(scope.get("headers") or []).get(b"host", b"").decode("latin-1").lower()
+                name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+                if name not in OK or scope.get("path", "").endswith(".db"):
+                    if scope["type"] == "http":
+                        await send({"type": "http.response.start", "status": 400, "headers": [(b"content-type", b"text/plain")]})
+                        await send({"type": "http.response.body", "body": b"awt ui: only 127.0.0.1 and localhost, and no raw database\\n"})
+                    else:
+                        await send({"type": "websocket.close"})
+                    return
+            await app(scope, receive, send)
+        return guard
+    return wrap
+"""
+
+
+def free_port(want):
+    """want if 127.0.0.1:want can be bound, else a port the system gives (0 asks for any)."""
+    for port in (want, 0):
+        sk = socket.socket()
+        try:
+            sk.bind(("127.0.0.1", port))
+            return sk.getsockname()[1]
+        except OSError:
+            pass
+        finally:
+            sk.close()
+    return want
+
+
+def snapshot_store(db, dst):
+    """A consistent copy of store.db made with the SQLite backup API (the live file is rewritten in place by ingest)."""
+    src = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    try:
+        dc = sqlite3.connect(dst)
+        try:
+            src.backup(dc)
+        finally:
+            dc.close()
+    finally:
+        src.close()
+    os.chmod(dst, 0o600)
+
+
 def cmd_ui(a):
     db = os.path.join(store_dir(), "store.db")
     if a.print_metadata:
@@ -3398,34 +3427,50 @@ def cmd_ui(a):
     if not exe:
         die("datasette is not installed", "pipx install datasette (or: uv tool install datasette), then: awt ui")
     tmp = tempfile.mkdtemp(prefix="awt-ui-")
-    os.chmod(tmp, 0o700)
-    meta = os.path.join(tmp, "metadata.json")
-    with open(meta, "w", encoding="utf-8") as g:
-        json.dump(ui_metadata(), g)
-    cmd = [exe, "serve", "-i", db, "-h", "127.0.0.1", "-p", str(a.port), "-m", meta, "--setting", "default_page_size", "100", "--setting", "sql_time_limit_ms", "10000"]
-    out("awt ui: http://127.0.0.1:%d/  (read-only; Ctrl-C stops it)" % a.port)
-    sys.stdout.flush()
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    proc = None
+    stop = lambda *_: (_ for _ in ()).throw(KeyboardInterrupt())
+    for sg in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sg, stop)
+    code = 0
     try:
+        os.chmod(tmp, 0o700)
+        snap = os.path.join(tmp, "store.db")
+        stamp = now()
+        snapshot_store(db, snap)
+        with open(os.path.join(tmp, "metadata.json"), "w", encoding="utf-8") as g:
+            json.dump(ui_metadata(), g)
+        os.mkdir(os.path.join(tmp, "plugins"))
+        with open(os.path.join(tmp, "plugins", "awt_ui_guard.py"), "w", encoding="utf-8") as g:
+            g.write(UI_GUARD)
+        port = free_port(a.port)
+        cmd = [exe, "serve", "-i", snap, "-h", "127.0.0.1", "-p", str(port), "-m", os.path.join(tmp, "metadata.json"), "--plugins-dir", os.path.join(tmp, "plugins"),
+               "--setting", "allow_download", "off", "--setting", "default_page_size", "100", "--setting", "sql_time_limit_ms", "10000"]
+        if port != a.port:
+            out("awt ui: port %d is taken, using %d" % (a.port, port))
+        out("awt ui: http://127.0.0.1:%d/  (read-only snapshot of %s; restart to refresh; Ctrl-C stops it)" % (port, stamp))
+        sys.stdout.flush()
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, start_new_session=True)
         code = proc.wait()
     except KeyboardInterrupt:
-        proc.terminate()
-        try:
-            code = proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            code = proc.wait()
         code = 0
+    except (OSError, sqlite3.Error) as x:
+        die("awt ui could not start: %s: %s" % (type(x).__name__, x), "check that the store is readable and datasette runs: %s --version" % exe)
     finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
         shutil.rmtree(tmp, ignore_errors=True)
     if code:
-        die("datasette exited with %d" % code, "run it by hand: %s" % " ".join(shlex.quote(c) for c in cmd))
+        die("datasette exited with %d" % code, "try another port: awt ui --port %d" % free_port(0))
 
 
 # ---------- store.db ----------
 # Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
-SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 6, "1.37.0", 262144, 4096
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 7, "1.37.0", 262144, 4096
 DDL = """
 CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
@@ -3436,17 +3481,25 @@ CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGE
 CREATE TABLE tool_calls(tool_call_id TEXT, message_id TEXT, session_id TEXT, tool_name TEXT, args TEXT, result_excerpt TEXT, result_sha256 TEXT, is_error INTEGER, started_at TEXT, ended_at TEXT, PRIMARY KEY(session_id, tool_call_id));
 CREATE TABLE permissions(request_id TEXT, session_id TEXT, agent_id TEXT, node_id TEXT, tool_name TEXT, target TEXT, decision TEXT, decided_by TEXT, ts TEXT, decided_at TEXT, PRIMARY KEY(agent_id, request_id));
 CREATE TABLE records(record_id TEXT PRIMARY KEY, node_id TEXT, type TEXT, ts TEXT, by TEXT, fields TEXT, session_id TEXT, origin TEXT, model TEXT NOT NULL, turn_id TEXT);
-CREATE TABLE effects(effect_id TEXT PRIMARY KEY, node_id TEXT, target TEXT, key TEXT, state TEXT, attempt INTEGER, origin TEXT, rule TEXT, begun_by TEXT, begun_at TEXT, sent_ref TEXT, tool_call_id TEXT);
+CREATE TABLE effects(effect_id TEXT PRIMARY KEY, node_id TEXT, target TEXT, key TEXT, state TEXT, attempt INTEGER, origin TEXT, rule TEXT, begun_by TEXT, begun_at TEXT, sent_ref TEXT, tool_call_id TEXT, of_key TEXT, seen TEXT);
 CREATE TABLE ingest_sources(source TEXT, path TEXT, inode INTEGER, offset INTEGER, adapter INTEGER, last_run TEXT, errors INTEGER, PRIMARY KEY(source, path));
 CREATE TABLE canonical(src TEXT, session TEXT, seq INTEGER, file TEXT, raw TEXT, PRIMARY KEY(src, file, seq));
 CREATE TABLE build_state(kind TEXT, path TEXT, size INTEGER, errors INTEGER, PRIMARY KEY(kind, path));
 CREATE TABLE paseo_fill(turn_id TEXT PRIMARY KEY);
-CREATE TABLE usage(usage_id TEXT PRIMARY KEY, grain TEXT, session_id TEXT, conversation_id TEXT, provider_name TEXT, message_id TEXT, turn_id TEXT, request_model TEXT, response_model TEXT, usage_input_tokens INTEGER, usage_output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, cost_usd REAL, cost_source TEXT, latency_ms INTEGER);
+CREATE TABLE usage(usage_id TEXT PRIMARY KEY, grain TEXT, session_id TEXT, conversation_id TEXT, provider_name TEXT, message_id TEXT, turn_id TEXT, request_model TEXT, response_model TEXT, usage_input_tokens INTEGER, usage_output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, cost_usd REAL, cost_source TEXT, latency_ms INTEGER, api_id TEXT, as_of TEXT);
+CREATE INDEX usage_api ON usage(provider_name, api_id);
+CREATE INDEX usage_conv ON usage(provider_name, conversation_id);
+CREATE VIEW usage_msg AS
+SELECT * FROM usage u WHERE grain='message' AND (api_id IS NULL OR usage_id = (SELECT min(d.usage_id) FROM usage d WHERE d.grain='message' AND d.provider_name=u.provider_name AND d.api_id=u.api_id));
+CREATE VIEW usage_cc AS
+SELECT * FROM usage u WHERE grain='session_model' AND session_id IS NOT NULL AND (as_of IS NULL OR NOT EXISTS (
+  SELECT 1 FROM usage m JOIN messages x ON x.session_id=m.session_id AND x.message_id=m.message_id
+  WHERE m.grain='message' AND m.provider_name=u.provider_name AND m.conversation_id=u.conversation_id AND julianday(x.ts) > julianday(u.as_of) + 0.0000116));
 CREATE VIEW usage_best AS
-SELECT session_id, provider_name, response_model, usage_input_tokens, usage_output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, cost_source FROM usage WHERE grain='session_model' AND session_id IS NOT NULL
+SELECT session_id, provider_name, response_model, usage_input_tokens, usage_output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, cost_source FROM usage_cc
 UNION ALL
 SELECT session_id, provider_name, response_model, sum(usage_input_tokens), sum(usage_output_tokens), sum(cache_read_tokens), sum(cache_write_tokens), sum(cost_usd), CASE WHEN count(cost_usd) > 0 THEN 'computed' END
-FROM usage WHERE grain='message' AND session_id NOT IN (SELECT session_id FROM usage WHERE grain='session_model' AND session_id IS NOT NULL) GROUP BY session_id, provider_name, response_model;
+FROM usage_msg m WHERE NOT EXISTS (SELECT 1 FROM usage_cc c WHERE c.provider_name=m.provider_name AND c.conversation_id=m.conversation_id) GROUP BY session_id, provider_name, response_model;
 CREATE TABLE fts_ref(id INTEGER PRIMARY KEY, kind TEXT, ref INTEGER);
 CREATE VIRTUAL TABLE fts_text USING fts5(text, content='', tokenize='unicode61');
 """
@@ -3589,12 +3642,12 @@ def ms_between(a, b):
         return None
 
 
-def put_usage(db, sid, provider, mid, turn, resp, inp, out, cr, cw, cost, lat):
+def put_usage(db, sid, provider, mid, turn, resp, inp, out, cr, cw, cost, lat, api=None):
     """One usage row for an assistant message (grain `message`). Counts are kept only when they are integers; cost only when the transcript carried one (cost_source computed)."""
     n = lambda x: x if isinstance(x, int) and not isinstance(x, bool) else None
     cost = cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
-    db.execute("INSERT OR REPLACE INTO usage VALUES (?,'message',?,NULL,?,?,?,NULL,?,?,?,?,?,?,?,?)", ("m:%s:%s" % (sid, mid), sid, provider, mid, turn, resp, n(inp), n(out), n(cr), n(cw),
-               cost, "computed" if cost is not None else None, lat))
+    db.execute("INSERT OR REPLACE INTO usage VALUES (?,'message',?,NULL,?,?,?,NULL,?,?,?,?,?,?,?,?,?,NULL)", ("m:%s:%s" % (sid, mid), sid, provider, mid, turn, resp, n(inp), n(out), n(cr), n(cw),
+               cost, "computed" if cost is not None else None, lat, api))
 
 
 def derive_claude(db, sid, rows, place):
@@ -3602,13 +3655,13 @@ def derive_claude(db, sid, rows, place):
     conv = cwd_ = model = first = last = None
     real = lambda x: x if isinstance(x, str) and x.strip() and x != "<synthetic>" else None
     turns, calls, turn = [], {}, -1
-    uses, tsof = {}, {}  # uses: API message id -> its last record's usage (a streamed message is written as several records that repeat it)
+    uses, tsof, first_parent = {}, {}, {}  # uses: API message id -> its last record's usage (a streamed message is written as several records that repeat it); first_parent: API id -> parentUuid of its first record (the request)
     for seq, r in rows:
         if not isinstance(r, dict):
             continue
         ts = r.get("timestamp") if isinstance(r.get("timestamp"), str) else None
         tsof[r.get("uuid")] = ts
-        conv, cwd_ = conv or r.get("sessionId"), cwd_ or r.get("cwd")
+        conv, cwd_ = r.get("sessionId") if isinstance(r.get("sessionId"), str) and r.get("sessionId") else conv, cwd_ or r.get("cwd")  # the last sessionId: a resumed file starts with copies of the old session's records
         first = first or ts
         last = max(last, ts) if last and ts else last or ts
         m = r.get("message")
@@ -3633,7 +3686,9 @@ def derive_claude(db, sid, rows, place):
                          text, r.get("parentUuid"), json.dumps([stop]) if isinstance(stop, str) else None, rm))
         fts_row(db, "message", cur, text)
         if r["type"] == "assistant" and isinstance(m.get("usage"), dict):
-            uses[m["id"] if isinstance(m.get("id"), str) else mid] = (mid, turns[-1][0] if turns else None, real(rm), m["usage"], ms_between(tsof.get(r.get("parentUuid")), ts) if ts and tsof.get(r.get("parentUuid")) else None)
+            api = m["id"] if isinstance(m.get("id"), str) else mid
+            first_parent.setdefault(api, r.get("parentUuid"))
+            uses[api] = (mid, turns[-1][0] if turns else None, real(rm), m["usage"], ms_between(tsof.get(first_parent[api]), ts) if ts and tsof.get(first_parent[api]) else None, m["id"] if isinstance(m.get("id"), str) else None)
         for b in bl:
             if b.get("type") == "tool_use" and isinstance(b.get("id"), str):
                 args = u(json.dumps(b.get("input"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -3645,8 +3700,8 @@ def derive_claude(db, sid, rows, place):
                 db.execute("UPDATE tool_calls SET result_excerpt=?, result_sha256=?, is_error=?, ended_at=? WHERE rowid=?",
                            (t[:EXCERPT], sha(t.encode("utf-8")), 1 if b.get("is_error") else 0, ts, calls[b["tool_use_id"]]))
     db.executemany("INSERT INTO turns VALUES (?,?,?,?,?,NULL,0,?,?)", [(t[0], sid, t[1], t[2], t[3], t[4], t[5]) for t in turns])
-    for mid_, turn_, resp_, us, lat in uses.values():
-        put_usage(db, sid, "claude_code", mid_, turn_, resp_, us.get("input_tokens"), us.get("output_tokens"), us.get("cache_read_input_tokens"), us.get("cache_creation_input_tokens"), None, lat)
+    for mid_, turn_, resp_, us, lat, api_ in uses.values():
+        put_usage(db, sid, "claude_code", mid_, turn_, resp_, us.get("input_tokens"), us.get("output_tokens"), us.get("cache_read_input_tokens"), us.get("cache_creation_input_tokens"), None, lat, api_)
     node, conf = place("claude_code", conv or sid, cwd_)
     db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", (sid, "claude_code", conv or sid, node, conf, cwd_, model, first, last, "claude", ADAPTER))
 
@@ -3716,7 +3771,7 @@ def derive_pi(db, sid, rows, place):
         fts_row(db, "message", c, text)
         if role == "assistant" and isinstance(m.get("usage"), dict):
             us = m["usage"]
-            put_usage(db, sid, "pi", mid, turns[-1][0] if turns else None, resp, us.get("input"), us.get("output"), us.get("cacheRead"), us.get("cacheWrite"),
+            put_usage(db, sid, "pi", mid, turns[-1][0] if turns and act else None, resp, us.get("input"), us.get("output"), us.get("cacheRead"), us.get("cacheWrite"),
                       us["cost"].get("total") if isinstance(us.get("cost"), dict) else None, m.get("durationMs") if isinstance(m.get("durationMs"), int) else None)
         for b in bl:
             if role == "assistant" and b.get("type") == "toolCall" and isinstance(b.get("id"), str):
@@ -3909,8 +3964,9 @@ def derive_nodes(db, root):
             hist = e["hist"]
             begun = next((h for h in hist if h["step"] in ("begun", "claimed")), None)
             sent = next((h for h in reversed(hist) if h["step"] == "sent" and h.get("ref")), None)
-            db.execute("INSERT OR IGNORE INTO effects VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (e["id"], i, e["target"], e["key"], e["state"], e["attempt"], e.get("origin") or "declared", e.get("rule"),
-                       begun and begun.get("by"), begun and begun["ts"], sent and sent["ref"], e.get("tool_call_id")))
+            db.execute("INSERT OR IGNORE INTO effects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (e["id"], i, e["target"], e["key"], e["state"], e["attempt"], e.get("origin") or "declared", e.get("rule"),
+                       begun and begun.get("by"), begun and begun["ts"], sent and sent["ref"], e.get("tool_call_id"), e.get("of") if isinstance(e.get("of"), str) else None,
+                       e["seen"] if e.get("seen") in ("before", "after") else None))
     return {p: i for p, i in join.items() if list(join.values()).count(i) == 1}, set(join.values())
 
 
@@ -3922,13 +3978,14 @@ def derive_ccusage(db, sid, rows, place):
     prov = {"claude": "claude_code"}.get(raw.get("agent"), raw.get("agent"))
     n = lambda x: x if isinstance(x, int) and not isinstance(x, bool) else None
     for b in raw["modelBreakdowns"]:
-        db.execute("INSERT OR REPLACE INTO usage VALUES (?,'session_model',NULL,?,?,NULL,NULL,NULL,?,?,?,?,?,?,'ccusage',NULL)", ("c:%s:%s" % (sid, b["modelName"]), raw.get("period"), prov, b["modelName"], n(b.get("inputTokens")), n(b.get("outputTokens")),
-                   n(b.get("cacheReadTokens")), n(b.get("cacheCreationTokens")), b["cost"] if isinstance(b.get("cost"), (int, float)) else None))
+        db.execute("INSERT OR REPLACE INTO usage VALUES (?,'session_model',NULL,?,?,NULL,NULL,NULL,?,?,?,?,?,?,'ccusage',NULL,NULL,?)", ("c:%s:%s" % (sid, b["modelName"]), raw.get("period"), prov, b["modelName"], n(b.get("inputTokens")), n(b.get("outputTokens")),
+                   n(b.get("cacheReadTokens")), n(b.get("cacheCreationTokens")), b["cost"] if isinstance(b.get("cost"), (int, float)) else None, raw.get("lastActivity")))
 
 
 def match_usage(db):
     """Join ccusage rows to the sessions ingested here (the provider's session id, conversation_id), and give message rows their turn's request model."""
     db.execute("UPDATE usage SET session_id=(SELECT s.session_id FROM sessions s WHERE s.conversation_id=usage.conversation_id AND s.provider_name=usage.provider_name ORDER BY s.session_id LIMIT 1) WHERE grain='session_model'")
+    db.execute("UPDATE usage SET conversation_id=(SELECT s.conversation_id FROM sessions s WHERE s.session_id=usage.session_id) WHERE grain='message'")
     db.execute("UPDATE usage SET request_model=(SELECT t.request_model FROM turns t WHERE t.turn_id=usage.turn_id) WHERE grain='message'")
 
 
@@ -4199,7 +4256,6 @@ def build():
     V(sp, "answer", [("id", T), ("text", T)])
     V(sp, "ref", [("target", T)], [(("--title",), dict(required=True)), (("--why",), T), (("--kind",), T), (("--no-access",), F)])
     V(sp, "capture", [("file", dict(nargs="?"))], [(("--from",), dict(required=True, dest="from_")), (("--title",), dict(required=True)), (("--ref",), T)])
-    V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
     V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
     V(sp, "doctor", opt=[(("--staged",), F)])
     V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "pi", "opencode", "paseo", "ccusage", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F), (("--stdin",), F), (("--event",), F)])
@@ -4253,6 +4309,9 @@ def main(argv):
         return out(AGENT_REF)
     if not rest or rest[0] in ("help", "--help", "-h"):
         return out(USAGE)
+    if rest[:1] == ["supersede"]:
+        die("supersede was removed: move the file yourself and note it",
+            "mv docs/old.md docs/_superseded/ && awt note \"docs/new.md replaces docs/old.md: WHY\"", 2)
     if rest[:1] == ["save"]:
         die("save was removed: git does the commit, and doctor --staged does the secret check",
             "git add -A && awt doctor --staged && git commit -m MESSAGE   (put awt doctor --staged in .git/hooks/pre-commit to run it on every commit)", 2)
