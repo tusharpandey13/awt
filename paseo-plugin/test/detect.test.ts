@@ -130,8 +130,26 @@ test("D9 permissionEvent and callEvents read only what they understand", () => {
   assert.equal(resendReason(JSON.stringify({ hookSpecificOutput: { permissionDecision: "ask", permissionDecisionReason: "why" } })), "why");
 });
 
-test("D10 events carry the agent's model when Paseo knows it, and none when it does not", () => {
-  const req = { id: "x", name: "Bash", detail: { type: "shell", command: "git push" } };
-  assert.equal(permissionEvent({ cwd: "/w", model: "claude-sonnet-5-5" }, req)?.model, "claude-sonnet-5-5");
-  assert.equal("model" in (permissionEvent({ cwd: "/w", model: null }, req) ?? {}), false);
+test("D10 the detect ingest call carries the agent's model (--model), at permission time and in the turn scan", async () => {
+  const r = mk({}, WS);
+  r.runtime.set("agt_1", "claude-sonnet-5-5");
+  const dir = await opened(r, "agt_1");
+  await r.call("agent.permission.before", shellAsk("agt_1", "perm-1", "git push origin feat/x"));
+  assert.deepEqual(effects(r, dir).map((x) => x.model), ["claude-sonnet-5-5", "claude-sonnet-5-5"]);
+  await turn(r, "agt_1", [call("c1", "git push origin feat/x")]);
+  assert.deepEqual(new Set(effects(r, dir).map((x) => x.model)), new Set(["claude-sonnet-5-5"]));
+});
+
+test("D11 a denied permission puts the begun effect back to not-sent; an allowed one changes nothing", async () => {
+  const r = mk({}, WS);
+  const dir = await opened(r, "agt_1");
+  await r.call("agent.permission.before", shellAsk("agt_1", "perm-1", "gh pr merge 4 --squash"));
+  await r.call("agent.permission.after", { agent: agentPayload("agt_1"), requestId: "perm-1", resolution: { behavior: "allow" } });
+  assert.deepEqual(effects(r, dir).map((x) => x.step), ["planned", "begun"]);
+  await r.call("agent.permission.before", shellAsk("agt_1", "perm-2", "gh pr merge 5 --squash"));
+  await r.call("agent.permission.after", { agent: agentPayload("agt_1"), requestId: "perm-2", resolution: { behavior: "deny" } });
+  const id5 = effects(r, dir).find((x) => x.how?.includes("merge 5")).id;
+  const rows = effects(r, dir).filter((x) => x.id === id5);
+  assert.deepEqual(rows.map((x) => x.step), ["planned", "begun", "planned"]);
+  assert.equal(r.awt(dir, "effect", "show", rows[0].id).includes("state: planned"), true);
 });

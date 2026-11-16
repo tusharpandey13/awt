@@ -13,7 +13,7 @@ import { readProjects } from "./projects.js";
 import { readReceipt } from "./receipt.js";
 import { RECEIPT_KIND, RECEIPT_VERSION } from "../shared/receipt.js";
 import { RESEND_KIND, RESEND_VERSION } from "../shared/resend.js";
-import { callEvents, permissionEvent, resendReason } from "./detect.js";
+import { callEvents, permissionEvent, resendReason, type DetectEvent } from "./detect.js";
 
 /** The text of the last assistant message in a timeline page, wherever the page keeps its items. */
 export function lastAssistantText(page: unknown): string | null {
@@ -165,6 +165,7 @@ function modelTracker() {
 export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): () => void {
   const cfg = readConfig(env);
   const models = modelTracker();
+  const asked = new Map<string, DetectEvent>(); // permission requests awt recorded, until they are answered
   const tree = new Tree(cfg, log);
   if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, off, changes or on; showing receipts`);
   const turnStart = new Map<string, number>();
@@ -434,15 +435,19 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   // (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
   add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
     // Detected effects: a shell or MCP request that awt labels as outbound is recorded; a resend is left for the person with a note. Never denies.
-    await safe(log, "agent.permission.before detect", undefined, async () => {
+    await safe(log, "agent.permission.before detect", undefined, async () => withModel(await models.of(agent, ctx), async () => {
       const ev = permissionEvent(agent, request);
       if (!ev) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);
       if (!node) return;
       const r = await awt(cfg, node, ["ingest", "--event", "--hook"], agent.id, JSON.stringify(ev));
+      if (r.code === 0) {
+        asked.set(request.id, ev);
+        if (asked.size > 200) asked.delete(asked.keys().next().value!);
+      }
       const reason = r.code === 0 ? resendReason(r.stdout) : null;
       if (reason) await ctx.paseo.agents.ref(agent.id).timeline.append({ type: "plugin", id: `${RESEND_KIND}.${request.id}`, kind: RESEND_KIND, version: RESEND_VERSION, data: { reason: cut(clean(reason), 600) } });
-    });
+    }));
     await safe(log, "agent.permission.before", undefined, async () => {
       const targets = permissionTargets(request as Parameters<typeof permissionTargets>[0]);
       if (!targets) return;
@@ -450,6 +455,16 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       if (!node || !insideNode(node, targets)) return;
       await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
     });
+  }));
+  // A person denied a request awt recorded as begun: that call never ran, so the effect goes back to not-sent (awt: phase "denied"). A restart forgets the pending requests, and such an effect stays begun for `effect mark`.
+  add(server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, ctx) => {
+    const ev = asked.get(requestId);
+    asked.delete(requestId);
+    if (!ev || resolution?.behavior !== "deny") return;
+    await safe(log, "agent.permission.after detect", undefined, async () => withModel(await models.of(agent, ctx), async () => {
+      const node = await tree.find(`paseo:agent/${agent.id}`);
+      if (node) await awt(cfg, node, ["ingest", "--event", "--hook"], agent.id, JSON.stringify({ ...ev, phase: "denied" }));
+    }));
   }));
   return () => removers.forEach((r) => r());
 }

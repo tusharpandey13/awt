@@ -1,18 +1,15 @@
 /** Detected effects (SPEC, Effects, Detected). The plugin only reports tool calls to `awt ingest --event`; awt labels them and keeps the ledger. Nothing here denies or runs anything. */
 
 export interface DetectEvent {
-  phase: "before" | "after";
+  phase: "before" | "after" | "denied";
   tool: string;
   input: Record<string, unknown>;
   cwd?: string;
   id?: string;
   ok?: boolean | null;
-  /** The agent's current model, when Paseo knows it (MODEL-TRACKING); awt falls back to AWT_MODEL, then unknown:unset. */
-  model?: string;
 }
 
-type AgentLike = { cwd?: string | null; model?: string | null };
-const withModel = <T extends DetectEvent>(e: T, agent: AgentLike): T => (agent.model ? { ...e, model: agent.model } : e);
+type AgentLike = { cwd?: string | null };
 
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
@@ -24,8 +21,8 @@ export function permissionEvent(agent: AgentLike, request: unknown): DetectEvent
   if (!isObj(request) || typeof request.id !== "string") return null;
   const detail = isObj(request.detail) ? request.detail : null;
   const cwd = (detail && typeof detail.cwd === "string" ? detail.cwd : undefined) ?? agent.cwd ?? undefined;
-  if (detail?.type === "shell" && typeof detail.command === "string") return withModel({ phase: "before", tool: "Bash", input: { command: detail.command }, cwd, id: request.id }, agent);
-  if (typeof request.name === "string" && request.name.startsWith("mcp__") && isObj(request.input)) return withModel({ phase: "before", tool: request.name, input: request.input, cwd, id: request.id }, agent);
+  if (detail?.type === "shell" && typeof detail.command === "string") return { phase: "before", tool: "Bash", input: { command: detail.command }, cwd, id: request.id };
+  if (typeof request.name === "string" && request.name.startsWith("mcp__") && isObj(request.input)) return { phase: "before", tool: request.name, input: request.input, cwd, id: request.id };
   return null;
 }
 
@@ -41,8 +38,8 @@ export function callEvents(page: unknown, agent: AgentLike): DetectEvent[] {
     const detail = isObj(o.detail) ? o.detail : {};
     const cwd = (typeof detail.cwd === "string" ? detail.cwd : undefined) ?? agent.cwd ?? undefined;
     const ok = o.status === "completed" ? (detail.exitCode === undefined || detail.exitCode === null || detail.exitCode === 0) : o.status === "failed" ? false : null;
-    if (detail.type === "shell" && typeof detail.command === "string") found.push(withModel({ phase: "after", tool: "Bash", input: { command: detail.command }, cwd, id: o.callId, ok }, agent));
-    else if (o.name.startsWith("mcp__") && isObj(detail.input)) found.push(withModel({ phase: "after", tool: o.name, input: detail.input, cwd, id: o.callId, ok }, agent));
+    if (detail.type === "shell" && typeof detail.command === "string") found.push({ phase: "after", tool: "Bash", input: { command: detail.command }, cwd, id: o.callId, ok });
+    else if (o.name.startsWith("mcp__") && isObj(detail.input)) found.push({ phase: "after", tool: o.name, input: detail.input, cwd, id: o.callId, ok });
   };
   walk(page, 0);
   return found;

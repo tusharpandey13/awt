@@ -1,6 +1,6 @@
 """Detected effects (SPEC Effects, 'Detected'): `awt ingest --event --hook` reads one tool-call event on stdin and writes the ledger.
 Fixtures are a fictional `parsekit` project; token-shaped strings are built at run time."""
-import hashlib, importlib.machinery, importlib.util, json, os, stat, subprocess, sys, unittest
+import fcntl, hashlib, importlib.machinery, importlib.util, json, os, stat, subprocess, sys, time, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_awt import AWT, Base, slurp
@@ -76,7 +76,7 @@ class Classify(unittest.TestCase):
         self.assertNotEqual(k("git push origin main"), k("git push origin dev"))
 
 
-class Detect(Base):
+class DetectBase(Base):
     def setUp(self):
         super().setUp()
         self.init()
@@ -108,6 +108,9 @@ class Detect(Base):
         self.assertEqual((o["hookEventName"], o["permissionDecision"]), ("PreToolUse", "ask"))
         return o["permissionDecisionReason"]
 
+
+
+class Detect(DetectBase):
     def test_pre_and_post_write_the_ledger_without_any_agent_call(self):
         self.assertEqual(self.ev("PreToolUse", "git push origin feat/x"), "")
         self.assertEqual(self.steps(), ["planned", "begun"])
@@ -158,36 +161,36 @@ class Detect(Base):
         self.assertEqual(len(self.effects()), n)
 
     def test_resend_that_goes_ahead_is_recorded_after_the_fact(self):
-        self.ev("PreToolUse", "git push", "t1")
-        self.ev("PostToolUse", "git push", "t1")
-        self.assertIsNotNone(self.asked(self.ev("PreToolUse", "git push", "t2")))
-        self.ev("PostToolUse", "git push", "t2")  # the person said yes
+        self.ev("PreToolUse", "gh pr merge 4", "t1")
+        self.ev("PostToolUse", "gh pr merge 4", "t1")
+        self.assertIsNotNone(self.asked(self.ev("PreToolUse", "gh pr merge 4", "t2")))
+        self.ev("PostToolUse", "gh pr merge 4", "t2")  # the person said yes
         ids = {r["id"] for r in self.effects()}
         self.assertEqual(len(ids), 2)
         late = [r for r in self.effects() if r.get("tool_call_id") == "t2" and r["step"] == "planned"][0]
         self.assertEqual(late["seen"], "after")
         self.assertEqual([self.state_of(i) for i in sorted(ids)], ["sent", "sent"])
-        self.ev("PostToolUse", "git push", "t2")  # a replayed event
+        self.ev("PostToolUse", "gh pr merge 4", "t2")  # a replayed event
         self.assertEqual({r["id"] for r in self.effects()}, ids)
         self.assertEqual(len(self.effects()), 6)
 
     def test_failure_and_interrupt_are_unknown_and_unknown_also_asks(self):
-        self.ev("PreToolUse", "git push", "t1")
-        self.ev("PostToolUseFailure", "git push", "t1", error="exit 1")
+        self.ev("PreToolUse", "gh pr merge 4", "t1")
+        self.ev("PostToolUseFailure", "gh pr merge 4", "t1", error="exit 1")
         i = self.effects()[0]["id"]
         self.assertEqual(self.state_of(i), "unknown")
-        self.assertIn(i, self.asked(self.ev("PreToolUse", "git push", "t2")))
+        self.assertIn(i, self.asked(self.ev("PreToolUse", "gh pr merge 4", "t2")))
         self.ev("PreToolUse", "npm publish", "t3")
         self.ev("PostToolUse", "npm publish", "t3", tool_response={"interrupted": True})
         j = [r for r in self.effects() if r.get("rule") == "npm publish"][0]["id"]
         self.assertEqual(self.state_of(j), "unknown")
 
     def test_a_begun_duplicate_is_only_recorded(self):
-        self.assertEqual(self.ev("PreToolUse", "git push", "t1"), "")
-        self.assertEqual(self.ev("PreToolUse", "git push", "t2"), "")  # first one has no result yet: not sent, not unknown
+        self.assertEqual(self.ev("PreToolUse", "gh pr merge 4", "t1"), "")
+        self.assertEqual(self.ev("PreToolUse", "gh pr merge 4", "t2"), "")  # first one has no result yet: not sent, not unknown
         self.assertEqual(len({r["id"] for r in self.effects()}), 2)
-        self.ev("PostToolUse", "git push", "t1")
-        self.ev("PostToolUse", "git push", "t2")
+        self.ev("PostToolUse", "gh pr merge 4", "t1")
+        self.ev("PostToolUse", "gh pr merge 4", "t2")
         self.assertEqual(sorted(self.state_of(i) for i in {r["id"] for r in self.effects()}), ["sent", "sent"])
 
     def test_post_without_pre_is_recorded_after_the_fact(self):
@@ -226,14 +229,14 @@ class Detect(Base):
         self.assertIsNotNone(self.asked(self.ev("PreToolUse", c, "t2")))
 
     def test_declared_effect_is_not_recorded_twice_and_a_sent_one_guards_resends(self):
-        i = self.plan("--how", "git push origin main", target="git:origin/main")
+        i = self.plan("--how", "gh pr merge 4 --squash", target="git:origin/main")
         self.ok("effect", "begin", i)
-        self.assertEqual(self.ev("PreToolUse", "git push origin main", "t1"), "")
-        self.ev("PostToolUse", "git push origin main", "t1")
+        self.assertEqual(self.ev("PreToolUse", "gh pr merge 4 --squash", "t1"), "")
+        self.ev("PostToolUse", "gh pr merge 4 --squash", "t1")
         self.assertEqual({r["id"] for r in self.effects()}, {i})
         self.assertEqual(self.state_of(i), "begun")  # only the sender marks a declared effect
         self.ok("effect", "mark", i, "sent")
-        self.assertIn(i, self.asked(self.ev("PreToolUse", "git push origin main", "t2")))
+        self.assertIn(i, self.asked(self.ev("PreToolUse", "gh pr merge 4 --squash", "t2")))
         self.assertEqual({r["id"] for r in self.effects()}, {i})
 
     def test_owner_rules_file(self):
@@ -246,13 +249,13 @@ class Detect(Base):
         self.assertTrue(self.effects()[0]["rule"].startswith("owner:"))
 
     def test_plugin_shape_and_hook_silence(self):
-        out = self.hook({"phase": "before", "tool": "Bash", "command": "git push origin dev", "cwd": self.cwd, "id": "perm-1"}, by="agt_1")
+        out = self.hook({"phase": "before", "tool": "Bash", "command": "gh pr merge 4", "cwd": self.cwd, "id": "perm-1"}, by="agt_1")
         self.assertEqual(out, "")
         self.assertEqual(self.effects()[0]["by"], "agt_1")
-        self.hook({"phase": "after", "tool": "Bash", "command": "git push origin dev", "cwd": self.cwd, "id": "call-9", "ok": True}, by="agt_1")
+        self.hook({"phase": "after", "tool": "Bash", "command": "gh pr merge 4", "cwd": self.cwd, "id": "call-9", "ok": True}, by="agt_1")
         self.assertEqual(self.steps(), ["planned", "begun", "sent"])  # paired by key, the ids differ
-        self.assertIsNotNone(self.asked(self.hook({"phase": "before", "tool": "Bash", "command": "git push origin dev", "cwd": self.cwd, "id": "perm-2"})))
-        self.hook({"phase": "after", "tool": "Bash", "command": "git push origin dev", "cwd": self.cwd, "id": "call-9", "ok": True})  # replay
+        self.assertIsNotNone(self.asked(self.hook({"phase": "before", "tool": "Bash", "command": "gh pr merge 4", "cwd": self.cwd, "id": "perm-2"})))
+        self.hook({"phase": "after", "tool": "Bash", "command": "gh pr merge 4", "cwd": self.cwd, "id": "call-9", "ok": True})  # replay
         self.assertEqual(self.steps(), ["planned", "begun", "sent"])
         n = self.events()
         for junk in ["", "not json", "[]", "{}", '{"hook_event_name": 5}', '{"phase": "before"}', '{"phase":"before","tool":"Bash","command":["x"]}']:
@@ -296,11 +299,265 @@ class Detect(Base):
 
     def test_init_writes_the_tool_hooks(self):
         s = json.loads(slurp(self.p(".claude", "settings.json")))
-        for ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        for ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"):
             g = s["hooks"][ev][0]
             self.assertEqual(g["matcher"], "Bash|mcp__.*")
             self.assertTrue(g["hooks"][0]["command"].endswith("awt ingest --event --hook"), ev)
+            self.assertEqual(g["hooks"][0]["timeout"], 10)
         self.assertIn("SessionEnd", s["hooks"])
+
+
+def keys(cmd, cwd="/w", tool="Bash", inp=None):
+    return [k for _r, _t, k in MOD.classify(tool, inp if inp is not None else {"command": cmd}, cwd)]
+
+
+class ClassifyP3(unittest.TestCase):
+    """M4/M5: the pattern gaps the phase 3 review found."""
+
+    def test_missed_forms_now_match(self):
+        want = {
+            "gh -R owner/parsekit pr comment 12 --body x": "gh pr comment", "gh --repo owner/parsekit issue create --title t": "gh issue create",
+            "gh pr comment 12 \\\n  --body x": "gh pr comment", "git \\\n push": "git push", "echo hi # note\ngit push": "git push",
+            "git push # now": "git push", "bash -lc 'git push origin main'": "git push", "sh -ec 'gh pr create'": "gh pr create",
+            "curl -sX POST https://api.example.com/x": "curl POST", "curl -sd '{}' https://api.example.com/x": "curl POST",
+            "scp notes.txt deploy@build.example.com:": "scp", "gh api repos/o/r/issues --raw-field=title=x": "gh api POST",
+            "gh api graphql -f query='mutation { addComment(input: {}) { clientMutationId } }'": "gh api POST",
+            "gh workflow run ci.yml": "gh workflow run",
+        }
+        for cmd, rule in want.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(matched(cmd), [rule])
+
+    def test_reads_and_quoted_hashes_do_not_match(self):
+        for cmd in ["gh api graphql -f query='{ viewer { login } }'", "echo 'a # git push'", "echo \"x\" # git push", "curl -sS https://example.com",
+                    "git log --oneline # git push"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(matched(cmd), [])
+
+    def test_mcp_reads_are_not_sends_and_missed_sends_are(self):
+        for t in ["mcp__x__get_posts", "mcp__x__list_comments", "mcp__x__search_posts", "mcp__x__get_comment", "mcp__x__read_message", "mcp__x__fetch_issue"]:
+            self.assertEqual(MOD.classify(t, {"q": 1}, "/w"), [], t)
+        for t in ["mcp__github__push_files", "mcp__github__merge_pull_request", "mcp__github__create_issue", "mcp__x__reply_to_thread", "mcp__mail__sendEmail"]:
+            self.assertEqual(len(MOD.classify(t, {"q": 1}, "/w")), 1, t)
+
+    def test_heredoc_bodies_are_in_the_key_but_never_match(self):
+        a = "gh pr comment 12 --body \"$(cat <<'EOF'\none\nEOF\n)\""
+        b = a.replace("one", "two")
+        self.assertEqual(matched(a), ["gh pr comment"])
+        self.assertNotEqual(keys(a), keys(b))
+        self.assertEqual(keys(a), keys(a))
+        self.assertEqual(matched("cat <<EOF\ngit push\nEOF"), [])
+
+    def test_git_push_key_follows_head_and_publish_key_the_version(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="awt-test-")
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        os.makedirs(os.path.join(d, ".git", "refs", "heads"))
+        open(os.path.join(d, ".git", "HEAD"), "w").write("ref: refs/heads/main\n")
+        ref = os.path.join(d, ".git", "refs", "heads", "main")
+        open(ref, "w").write("a" * 40 + "\n")
+        k1 = keys("git push", d)
+        self.assertEqual(k1, keys("git push", d))
+        open(ref, "w").write("b" * 40 + "\n")
+        self.assertNotEqual(k1, keys("git push", d))
+        os.remove(ref)  # packed refs
+        open(os.path.join(d, ".git", "packed-refs"), "w").write("# pack\n%s refs/heads/main\n" % ("c" * 40))
+        self.assertNotEqual(keys("git push", d), k1)
+        self.assertEqual(MOD.git_head(d, []), "c" * 40)
+        open(os.path.join(d, "package.json"), "w").write('{"name": "parsekit", "version": "1.0.0"}')
+        p1 = keys("npm publish", d)
+        open(os.path.join(d, "package.json"), "w").write('{"name": "parsekit", "version": "1.0.1"}')
+        self.assertNotEqual(p1, keys("npm publish", d))
+
+    def test_redact_each_credential_form(self):
+        pw = "hunter" + "2pass"
+        for cmd in ["curl -u bob:%s -X POST https://api.example.com/x" % pw, "curl -ubob:%s -X POST https://api.example.com/x" % pw,
+                    "curl --user bob:%s -d a=1 https://api.example.com/x" % pw, "curl -X POST https://bob:%s@api.example.com/x" % pw,
+                    "curl -X POST -H 'Authorization: Basic %s' https://api.example.com/x" % pw, "curl -X POST -H 'authorization: Bearer %s' https://api.example.com/x" % pw,
+                    "curl -X POST -H 'X-Api-Key: %s' https://api.example.com/x" % pw, "curl -X POST --oauth2-bearer %s https://api.example.com/x" % pw,
+                    "curl -X POST --password=%s https://api.example.com/x" % pw, "curl -X POST --token %s https://api.example.com/x" % pw,
+                    "gh api -X POST repos/o/r/issues -f 'title=t' --header 'Authorization: token %s'" % pw]:
+            with self.subTest(cmd=cmd):
+                r = MOD.redact(MOD.classify("Bash", {"command": cmd}, "/w")[0][1])
+                self.assertNotIn(pw, r)
+                self.assertIn("[REDACTED]", r)
+        self.assertEqual(MOD.redact("git push -u origin main"), "git push -u origin main")  # -u is only a password flag for curl
+        self.assertNotIn(pw, MOD.redact('mcp__x__post {"password": "%s", "text": "hi"}' % pw))
+
+
+class DetectP3(DetectBase):
+    def repo(self, sha="a" * 40):
+        os.makedirs(os.path.join(self.tmp, "repo", ".git", "refs", "heads"), exist_ok=True)
+        with open(os.path.join(self.tmp, "repo", ".git", "HEAD"), "w") as g:
+            g.write("ref: refs/heads/main\n")
+        self.head(sha)
+        return os.path.join(self.tmp, "repo")
+
+    def head(self, sha):
+        with open(os.path.join(self.tmp, "repo", ".git", "refs", "heads", "main"), "w") as g:
+            g.write(sha + "\n")
+
+    def send(self, cmd, cid, cwd=None, **kw):
+        out = self.ev("PreToolUse", cmd, cid, cwd=cwd, **kw)
+        if not out:
+            self.ev("PostToolUse", cmd, cid, cwd=cwd, **kw)
+        return out
+
+    def test_h1_repeat_push_with_a_commit_between_never_asks_and_rows_stay_distinct(self):
+        d = self.repo()
+        self.assertEqual(self.send("git push", "p1", d), "")
+        self.head("b" * 40)
+        self.assertEqual(self.send("git push", "p2", d), "")
+        self.assertEqual(len({r["id"] for r in self.effects()}), 2)
+        self.assertEqual(len({r["key"] for r in self.effects() if r["step"] == "planned"}), 2)
+        self.assertEqual(self.send("git push", "p3", d), "")  # same head, a plain resend: harmless, still no ask
+        self.assertEqual(len({r["id"] for r in self.effects()}), 3)
+
+    def test_h1_force_push_ssh_rsync_scp_and_publish(self):
+        d = self.repo()
+        for c in ["ssh deploy@build.example.com uptime", "rsync -a out/ build.example.com:/srv/", "scp a.tgz deploy@build.example.com:/srv"]:
+            self.assertEqual(self.send(c, "i1", d), "", c)
+            self.assertEqual(self.send(c, "i2", d), "", c)
+        self.assertEqual(self.send("git push --force-with-lease", "f1", d), "")
+        self.assertIsNotNone(self.asked(self.ev("PreToolUse", "git push --force-with-lease", "f2", cwd=d)))
+        with open(os.path.join(d, "package.json"), "w") as g:
+            g.write('{"name": "parsekit", "version": "1.0.0"}')
+        self.assertEqual(self.send("npm publish", "n1", d), "")
+        self.assertIsNotNone(self.asked(self.ev("PreToolUse", "npm publish", "n2", cwd=d)))  # the same version again
+        with open(os.path.join(d, "package.json"), "w") as g:
+            g.write('{"name": "parsekit", "version": "1.0.1"}')
+        self.assertEqual(self.ev("PreToolUse", "npm publish", "n3", cwd=d), "")  # a bumped version is a new send
+
+    def test_h2_a_second_heredoc_comment_is_not_a_resend(self):
+        c = "gh pr comment 12 --body \"$(cat <<'EOF'\n%s\nEOF\n)\""
+        self.send(c % "round one", "h1")
+        self.assertEqual(self.ev("PreToolUse", c % "round two", "h2"), "")
+        self.assertIsNotNone(self.asked(self.ev("PreToolUse", c % "round one", "h3")))
+
+    def test_h3_a_replayed_settled_id_does_not_settle_another_open_effect(self):
+        w = lambda ph, i: self.hook({"phase": ph, "tool": "Bash", "command": "git push origin dev", "cwd": self.cwd, "id": i, "ok": True})
+        w("before", "perm-1")
+        w("before", "perm-2")
+        w("after", "call-9")  # settles the first
+        before = [self.state_of(i) for i in sorted({r["id"] for r in self.effects()})]
+        self.assertEqual(sorted(before), ["begun", "sent"])
+        w("after", "call-9")  # replayed
+        self.assertEqual(sorted(self.state_of(i) for i in {r["id"] for r in self.effects()}), ["begun", "sent"])
+        self.assertEqual(len([r for r in self.effects() if r.get("tool_call_id") == "call-9"]), 1)
+
+    def test_h4_credentials_never_reach_the_log(self):
+        pw = "hunter" + "2pass"
+        for n, c in enumerate(["curl -u bob:%s -X POST https://bob:%s@api.example.com/x" % (pw, pw), "curl -X POST -H 'X-Api-Key: %s' https://api.example.com/x" % pw,
+                               "curl -X POST --password=%s https://api.example.com/x" % pw]):
+            self.send(c, "c%d" % n)
+        self.assertNotIn(pw, self.events().decode())
+        self.assertIn("[REDACTED]", self.events().decode())
+        self.assertIsNotNone(self.asked(self.ev("PreToolUse", "curl -X POST --password=%s https://api.example.com/x" % pw, "c9")))  # the key is the unredacted command
+
+    def test_m1_a_denied_call_is_not_sent_and_does_not_block_done(self):
+        self.ev("PreToolUse", "gh pr merge 4 --squash", "t1")
+        self.ev("PermissionDenied", "gh pr merge 4 --squash", "t1")
+        i = self.effects()[0]["id"]
+        self.assertEqual(self.state_of(i), "planned")
+        self.ok("status", "done")  # a denied detected effect is not an open question
+        self.ev("PermissionDenied", "gh pr merge 4 --squash", "t1")  # replay: nothing more
+        self.assertEqual(self.steps(), ["planned", "begun", "planned"])
+        self.assertEqual(self.ev("PreToolUse", "gh pr merge 4 --squash", "t2"), "")  # asking again is fine: it was never sent
+        self.ev("PostToolUse", "gh pr merge 4 --squash", "t2")
+        self.assertEqual(sorted(self.state_of(x) for x in {r["id"] for r in self.effects()}), ["planned", "sent"])
+        self.assertNotRegex(self.awt("doctor").stdout, r"warn \d+ quarantined")
+
+    def test_m1_plugin_denied_phase_and_a_failed_exit_stays_unknown(self):
+        self.hook({"phase": "before", "tool": "Bash", "command": "git push origin dev", "cwd": self.cwd, "id": "perm-1"})
+        self.hook({"phase": "denied", "tool": "Bash", "command": "git push origin dev", "cwd": self.cwd, "id": "perm-1"})
+        self.assertEqual(self.state_of(self.effects()[0]["id"]), "planned")
+        self.ev("PreToolUse", "gh pr create", "t5")
+        self.ev("PostToolUseFailure", "gh pr create", "t5")
+        j = [r for r in self.effects() if r.get("rule") == "gh pr create"][0]["id"]
+        self.assertEqual(self.state_of(j), "unknown")
+        self.bad("status", "done")
+
+    def test_m2_mark_not_sent_then_the_next_call_is_not_quarantined(self):
+        self.ev("PreToolUse", "gh pr create", "t1")
+        self.ev("PostToolUseFailure", "gh pr create", "t1")
+        i = self.effects()[0]["id"]
+        self.ok("effect", "mark", i, "not-sent", "--why", "it failed")
+        self.ev("PostToolUse", "gh pr create", "t2")  # only the result is seen: it settles the planned effect
+        self.assertEqual(self.state_of(i), "sent")
+        self.assertNotRegex(self.awt("doctor").stdout, r"warn \d+ quarantined")
+
+    def test_m8_a_held_lock_means_nothing_is_recorded_and_exit_zero(self):
+        fd = os.open(self.p(".awt", "events.jsonl"), os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            t = time.time()
+            self.assertEqual(self.ev("PreToolUse", "git push", "t1"), "")
+            self.assertLess(time.time() - t, 8)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.effects(), [])
+
+    def test_m8_a_batch_reads_the_log_once(self):
+        evs = [{"phase": "after", "tool": "Bash", "command": "git push origin b%d" % n, "cwd": self.cwd, "id": "c%d" % n, "ok": True} for n in range(30)]
+        self.hook(evs)
+        self.assertEqual(len([r for r in self.effects() if r["step"] == "sent"]), 30)
+
+    def test_m7_the_hook_command_skips_awt_for_calls_that_cannot_be_outbound(self):
+        bindir = os.path.join(self.tmp, "proj")
+        os.makedirs(bindir)
+        canary = os.path.join(self.tmp, "called")
+        with open(os.path.join(bindir, "awt"), "w") as g:
+            g.write("#!/bin/sh\necho x >> %s\ncat > /dev/null\n" % canary)
+        os.chmod(os.path.join(bindir, "awt"), 0o755)
+        cmd = json.loads(slurp(self.p(".claude", "settings.json")))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        env = dict(self.env, CLAUDE_PROJECT_DIR=bindir, PATH=bindir + os.pathsep + self.env["PATH"], XDG_CONFIG_HOME=os.path.join(self.tmp, "cfg"))
+        run = lambda c: subprocess.run(["sh", "-c", cmd], input=json.dumps({"tool_name": "Bash", "tool_input": {"command": c}}), text=True, env=env, capture_output=True)
+        for c in ["ls -la", "git status", "cat README.md", "python3 -m unittest"]:
+            self.assertEqual(run(c).returncode, 0)
+        self.assertFalse(os.path.exists(canary))
+        for c in ["git push origin main", "gh pr comment 3 --body x", "curl -X POST https://example.com", "npm publish"]:
+            run(c)
+        self.assertEqual(len(slurp(canary).split()), 4)
+        os.makedirs(os.path.join(self.tmp, "cfg", "awt"))
+        open(os.path.join(self.tmp, "cfg", "awt", "outbound"), "w").write("^deploy\n")  # an owner file: every call goes through
+        run("ls -la")
+        self.assertEqual(len(slurp(canary).split()), 5)
+
+
+class FixtureSession(Base):
+    """M9: a recorded parsekit session driven through `ingest --event --hook` in order."""
+
+    def test_parsekit_session_end_to_end(self):
+        self.init()
+        self.env["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "cfg")
+        d = os.path.join(self.tmp, "parsekit")
+        os.makedirs(os.path.join(d, ".git", "refs", "heads"))
+        open(os.path.join(d, ".git", "HEAD"), "w").write("ref: refs/heads/feat/lexer\n")
+        os.makedirs(os.path.join(d, ".git", "refs", "heads", "feat"))
+        ref = os.path.join(d, ".git", "refs", "heads", "feat", "lexer")
+        open(ref, "w").write("1" * 40 + "\n")
+        asks = []
+        for n, ln in enumerate(slurp(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "claude-hooks", "parsekit-session.jsonl")).splitlines()):
+            p = json.loads(ln.replace("${CWD}", d))
+            if "_set_head" in p:
+                open(ref, "w").write(p["_set_head"] + "\n")
+                continue
+            want = p.pop("_expect_ask", False)
+            r = self.awt("ingest", "--event", "--hook", input=json.dumps(p))
+            self.assertEqual((r.returncode, r.stderr), (0, ""))
+            self.assertEqual(bool(r.stdout.strip()), want, "line %d: %s" % (n, r.stdout))
+            if r.stdout.strip():
+                asks.append(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(len(asks), 1)
+        eff = [r for r in self.rows("effect") if r["step"] == "planned"]
+        self.assertEqual([r["rule"] for r in eff], ["git push", "gh pr comment", "git push", "gh pr comment", "gh pr comment"])
+        self.assertIn(eff[1]["id"], asks[0])
+        self.assertEqual({r["model"] for r in self.rows("effect")}, {"claude-sonnet-5-5"})
+        states = {}
+        for r in self.rows("effect"):
+            states[r["id"]] = r["step"]
+        self.assertEqual(sorted(states.values()), ["sent"] * 5)
+        self.assertEqual(len([r for r in eff if r["seen"] == "after"]), 1)  # the approved resend: noticed after the fact
 
 
 if __name__ == "__main__":
