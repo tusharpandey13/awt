@@ -138,3 +138,15 @@ test("PP8 a failed send keeps the events; the next flush or start sends them, on
   await again.idle();
   assert.equal(events(r, "agt_a").length, 2);
 });
+
+test("PP9 a refused plugin answer is not labelled plugin when the person answers later", async () => {
+  const r = mk();
+  const a = await r.call("agent.open.before", openReq("agt_a"));
+  const agent = agentPayload("agt_a");
+  const mine = { id: "perm-1", provider: "claude", name: "Write", kind: "tool", detail: { type: "write", filePath: join(a.env.AWT_DIR, "notes.md"), content: "x" } };
+  r.failRespond.on = true;
+  await r.call("agent.permission.before", { agent, request: mine });
+  await r.call("agent.permission.after", { agent, requestId: "perm-1", resolution: { behavior: "allow" } });
+  await r.idle();
+  assert.equal(events(r, "agt_a").find((e) => e.eid === "permres:agt_a:perm-1").decidedBy, "person");
+});

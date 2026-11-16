@@ -272,5 +272,13 @@ class TestM5(P4):
         self.assertEqual(self.logical(), inc)
 
 
+class TestL7(P4):
+    def test_stdin_over_the_cap_is_reported_not_silently_cut(self):
+        self.put_agent("agt_x", "pi", "s")
+        self.pipe_in(turn_ev("agt_x", "t1", "2026-10-24T12:00:00.000Z", "completed") + " \n" * ((8 << 20) // 2 + 10))
+        self.assertEqual([g["raw"]["eid"] for g in self.canon_rows("paseo") if "event" in g["raw"]], ["turn:agt_x:t1"])
+        self.assertIn("8 MiB", self.errors("paseo")["stdin"])
+
+
 if __name__ == "__main__":
     unittest.main()

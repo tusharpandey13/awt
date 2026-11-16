@@ -2684,7 +2684,7 @@ PASEO_EVENT_KEYS = ("event", "eid", "agentId", "turnId", "provider", "model", "s
 STDIN_CAP = 8 << 20
 
 
-def ingest_paseo_events(store, text):
+def ingest_paseo_events(store, text, cut=False):
     """The Paseo pipe: JSON lines from the plugin on stdin (turn outcomes, permission requests and answers) as canonical rows in the agent's `log/paseo/<agent id>.jsonl`.
     Only known keys of an event are kept. An event id (`eid`) already stored is skipped, so a retry or a replay adds nothing."""
     def work(files, errors, save):
@@ -2701,6 +2701,8 @@ def ingest_paseo_events(store, text):
                 by.setdefault(e["agentId"], []).append({k: e[k] for k in PASEO_EVENT_KEYS if isinstance(e.get(k), str)})
             except (ValueError, TypeError, RecursionError) as x:
                 errors["stdin"] = "%s: %s (line %d of the last piped input)" % (type(x).__name__, str(x)[:100], seen)
+        if cut:
+            errors["stdin"] = "input over %d MiB: the rest was not read" % (STDIN_CAP >> 20)
         for aid, evs in sorted(by.items()):
             out = os.path.join("log", "paseo", safe_name(aid) + ".jsonl")
             have = set()
@@ -2724,12 +2726,12 @@ def ingest_paseo_events(store, text):
     return run_source(store, "paseo", work)
 
 
-def ingest_paseo_all(store, piped=None):
+def ingest_paseo_all(store, piped=None, cut=False):
     """Agent files, then (when piped is not None) the piped events."""
     a = ingest_paseo(store)
     if piped is None:
         return a
-    b = ingest_paseo_events(store, piped)
+    b = ingest_paseo_events(store, piped, cut)
     return (a[0] + b[0], a[1] + b[1], b[2])
 
 
@@ -2741,15 +2743,16 @@ def cmd_ingest(a):
     try:
         store = store_dir()
         private_dir(store)
-        piped = None
+        piped, cut = None, False
         if a.stdin:
             if a.source != "paseo" or a.rebuild:
                 die("--stdin takes events for the paseo source only", "awt ingest --source paseo --stdin")
             piped = sys.stdin.buffer.read(STDIN_CAP).decode("utf-8", "replace")
+            cut = bool(sys.stdin.buffer.read(1))
         if not a.rebuild:
             for name, fn, what in SOURCES:
                 if name == "paseo" and piped is not None:
-                    fn = lambda st, piped=piped: ingest_paseo_all(st, piped)
+                    fn = lambda st, piped=piped, cut=cut: ingest_paseo_all(st, piped, cut)
                 if a.source in (name, "all"):
                     try:
                         res.append((fn(store), what))
