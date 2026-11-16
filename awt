@@ -82,6 +82,15 @@ SETTINGS = '''{
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt resume --hook" } ] }
     ],
+    "PreToolUse": [
+      { "matcher": "Bash|mcp__.*", "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt ingest --event --hook" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Bash|mcp__.*", "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt ingest --event --hook" } ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "Bash|mcp__.*", "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt ingest --event --hook" } ] }
+    ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "\\"$CLAUDE_PROJECT_DIR\\"/awt ingest --source claude --hook" } ] }
     ]
@@ -216,7 +225,7 @@ USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
   supersede OLD NEW           status active|paused|done
-  effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|all] [--hook]
+  effect plan|begin|mark|show doctor [--staged]        ingest [--source claude|all] [--hook] [--event]
 exit: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id
 agent reference: awt help agents"""
 
@@ -1837,6 +1846,344 @@ def eff_mark(a):
     out("%s %s" % (a.id, a.to))
 
 
+# ---------- detected effects ----------
+# SPEC "Detected effects". The host side (a Claude Code PreToolUse/PostToolUse hook, the Paseo plugin) pipes one tool-call event to
+# `ingest --event --hook`. This only LABELS a call and writes ledger rows; it never runs, blocks or denies anything. The one host
+# gate is the `ask` a Claude Code PreToolUse hook returns for an exact duplicate of a send already `sent` or `unknown`.
+WRAP = {"sudo", "env", "command", "time", "nohup", "exec", "nice", "builtin"}
+GH_VERBS = {"pr": {"create", "comment", "edit", "merge", "close", "reopen", "review", "ready"},
+            "issue": {"create", "comment", "edit", "close", "reopen", "delete", "transfer"},
+            "release": {"create", "edit", "delete", "upload"}, "repo": {"create", "delete", "edit", "rename", "archive"},
+            "gist": {"create", "edit", "delete"}}
+CURL_VAL = {"-X", "-d", "-H", "-o", "-u", "-A", "-e", "-F", "-T", "-b", "-c", "-m", "-w", "-x", "-K", "-E", "-y", "-Y", "--request", "--data", "--data-raw",
+            "--data-binary", "--data-urlencode", "--header", "--output", "--user", "--user-agent", "--referer", "--form", "--upload-file", "--json",
+            "--cookie", "--cookie-jar", "--max-time", "--proxy", "--cert", "--cacert", "--connect-timeout", "--retry", "--url", "--resolve", "--oauth2-bearer"}
+CURL_BODY = {"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "-T", "--upload-file", "--json"}
+SSH_VAL = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-E", "-e", "-I", "-m", "-O", "-Q", "-S", "-w", "-W", "-B"}
+FILE_FLAGS = {"--body-file", "-F", "--input", "-T", "--upload-file", "--post-file", "--body-file="}
+LOCAL = re.compile(r"^(localhost|127(\.\d+){3}|::1|\[::1\]|0\.0\.0\.0|[^.]*\.localhost)$", re.I)
+SEPS = set(";&|()\n")
+
+
+def heredocs_out(cmd):
+    return re.sub(r"(<<-?\s*(['\"]?)(\w+)\2)([^\n]*\n).*?\n[ \t]*\3[ \t]*(?=\n|$)", r"\4", cmd, flags=re.S)
+
+
+def shell_segments(cmd, depth=0):
+    """The simple commands of a shell line as token lists. Static and approximate on purpose: a miss is a missing label, never a decision."""
+    if not isinstance(cmd, str) or not cmd.strip() or "\x00" in cmd or depth > 2:
+        return []
+    lx = shlex.shlex(heredocs_out(cmd), posix=True, punctuation_chars=";|&()<>\n")
+    lx.whitespace, lx.whitespace_split = " \t\r", True
+    try:
+        toks = list(lx)
+    except ValueError:
+        return []
+    segs, cur, skip = [], [], False
+    for i, t in enumerate(toks):
+        if skip:
+            skip = False
+        elif t and set(t) <= SEPS:
+            segs.append(cur)
+            cur = []
+        elif t and set(t) <= set("<>&"):
+            skip = True  # a redirection and its target
+            if cur and cur[-1].isdigit():
+                cur.pop()
+        else:
+            cur.append(t)
+    segs.append(cur)
+    res = []
+    for s in segs:
+        while s and (s[0] in WRAP or re.match(r"^[A-Za-z_]\w*=", s[0])):
+            s = s[1:]
+        if len(s) >= 3 and os.path.basename(s[0]) in ("bash", "sh", "zsh") and "-c" in s[1:-1]:
+            res += shell_segments(s[s.index("-c") + 1], depth + 1)
+        elif s:
+            res.append(s)
+    return res
+
+
+def host_of(u):
+    u = re.sub(r"^[A-Za-z][\w+.-]*://", "", u).split("/")[0].split("?")[0].rsplit("@", 1)[-1]
+    return re.sub(r":\d*$", "", u) if not u.startswith("[") else u.split("]")[0] + "]"
+
+
+def nonlocal_host(h):
+    return bool(h) and not LOCAL.match(h)
+
+
+def method_of(t, long=("--request",), short="-X"):
+    for i, x in enumerate(t):
+        if x in long or x == short:
+            return t[i + 1].upper() if i + 1 < len(t) else None
+        if x.startswith(short) and len(x) > 2:
+            return x[2:].upper()
+        for lf in long:
+            if x.startswith(lf + "="):
+                return x.split("=", 1)[1].upper()
+    return None
+
+
+def match_segment(t):
+    """The rule label of one simple command, or None."""
+    b = os.path.basename(t[0])
+    rest = t[1:]
+    if b == "git":
+        i = 0
+        while i < len(rest) and rest[i].startswith("-"):
+            i += 2 if rest[i] in ("-C", "-c", "--git-dir", "--work-tree", "--namespace") else 1
+        if i < len(rest) and rest[i] == "push" and not {"--dry-run", "-n"} & set(rest[i:]):
+            return "git push"
+    elif b == "gh":
+        pos = [x for x in rest if not x.startswith("-")]
+        if pos[:1] == ["api"]:
+            m = method_of(rest, ("--method",))
+            m = m or ("POST" if any(x in ("-f", "-F", "--field", "--raw-field", "--input") or x.startswith(("-f", "-F")) and len(x) > 2 and x[2] == "=" for x in rest) else "GET")
+            return None if m in ("GET", "HEAD") else "gh api " + m
+        if len(pos) >= 2 and pos[1] in GH_VERBS.get(pos[0], ()):
+            return "gh %s %s" % (pos[0], pos[1])
+    elif b in ("curl", "wget"):
+        m, body, urls, skip = method_of(rest), False, [], False
+        for x in rest:
+            if skip:
+                skip = False
+            elif b == "curl" and x in CURL_VAL:
+                skip = True
+                body = body or x in CURL_BODY
+            elif x.startswith("-"):
+                body = body or x.split("=")[0] in CURL_BODY or x.startswith(("--post-data", "--post-file", "--body-data", "--body-file")) or (b == "curl" and x.startswith("-d") and len(x) > 2)
+                if x.startswith("--method="):
+                    m = x.split("=", 1)[1].upper()
+            else:
+                urls.append(x)
+        if b == "wget" and "--method" in rest and rest.index("--method") + 1 < len(rest):
+            m = rest[rest.index("--method") + 1].upper()
+        if b == "curl" and (any(x in ("-G", "--get", "-I", "--head") for x in rest)):
+            return None
+        if m is None:
+            m = "POST" if body else "GET"
+        if m in ("GET", "HEAD", "OPTIONS") or (urls and not any(nonlocal_host(host_of(u)) for u in urls)):
+            return None
+        return "%s %s" % (b, m)
+    elif b in ("ssh", "scp", "rsync"):
+        if b == "ssh":
+            pos, skip = [], False
+            for x in rest:
+                if skip:
+                    skip = False
+                elif x in SSH_VAL:
+                    skip = True
+                elif not x.startswith("-"):
+                    pos.append(x)
+            return "ssh" if pos and nonlocal_host(host_of(pos[0])) else None
+        for x in rest:
+            m = re.match(r"^(?:[^@/\s:]+@)?([^/\s:@.][^/\s:@]*[^/\s:@]|[^/\s:@]):[^:]", x) if not x.startswith(("-", "/", ".")) else None
+            if m and nonlocal_host(m.group(1)):
+                return b
+    elif b in ("npm", "pnpm", "yarn", "cargo", "twine", "poetry"):
+        pos = [x for x in rest if not x.startswith("-")]
+        verb = "upload" if b == "twine" else "publish"
+        if pos[:1] in (["publish"], [verb]) and not {"--dry-run", "-n"} & set(rest):
+            return "%s %s" % (b, pos[0])
+    return None
+
+
+def owner_rules():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    res = []
+    try:
+        with open(os.path.join(base, "awt", "outbound"), encoding="utf-8", errors="replace") as g:
+            for ln in g.read().splitlines()[:200]:
+                ln = ln.strip()
+                try:
+                    if ln and not ln.startswith("#"):
+                        res.append((ln, re.compile(ln)))
+                except re.error:
+                    pass
+    except OSError:
+        pass
+    return res
+
+
+def file_shas(toks, cwd):
+    """sha of every existing regular file a command names as a body (`@f`, `k=@f`, or the value of a body-file flag)."""
+    paths = []
+    for i, x in enumerate(toks):
+        m = re.match(r"^(?:[^=@]*=)?@(.+)$", x)
+        if m:
+            paths.append(m.group(1))
+        elif i and (toks[i - 1] in FILE_FLAGS):
+            paths.append(x)
+        elif "=" in x and x.split("=", 1)[0] in FILE_FLAGS:
+            paths.append(x.split("=", 1)[1])
+    res = []
+    for p in paths:
+        try:
+            q = os.path.join(cwd or "", p)
+            if os.path.isfile(q) and os.path.getsize(q) < 50_000_000:
+                with open(q, "rb") as g:
+                    res.append(sha(g.read()))
+        except (OSError, ValueError):
+            res.append("unreadable")
+    return res
+
+
+def classify(tool, inp, cwd):
+    """[(rule, text, key)] for the outbound calls in one tool call. Labelling only: nothing here decides whether anything runs."""
+    tool = tool if isinstance(tool, str) else ""
+    inp = inp if isinstance(inp, dict) else {}
+    cwd = cwd if isinstance(cwd, str) else ""
+    rules, found = owner_rules(), []
+    if tool == "Bash":
+        cmd = inp.get("command")
+        segs = shell_segments(cmd)
+        for t in segs:
+            text = shlex.join(t)
+            rule = match_segment(t) or next(("owner:" + ln[:60] for ln, rx in rules if rx.search(text)), None)
+            if rule:
+                found.append((rule, text, sha(json.dumps([tool, text, file_shas(t, cwd), cwd]).encode())))
+        if not segs and isinstance(cmd, str) and cmd.strip() and "\x00" not in cmd:  # unparsable: only an owner line can label it
+            rule = next(("owner:" + ln[:60] for ln, rx in rules if rx.search(cmd)), None)
+            if rule:
+                found.append((rule, cmd, sha(json.dumps([tool, cmd, [], cwd]).encode())))
+    elif tool.startswith("mcp__"):
+        server, _, name = tool[5:].partition("__")
+        rule = None
+        if server not in ("paseo", "awt") and re.search(r"(?i)send|post|create|comment|publish", name):
+            rule = "mcp:" + tool
+        rule = rule or next(("owner:" + ln[:60] for ln, rx in rules if rx.search(tool)), None)
+        if rule:
+            try:
+                body = json.dumps(inp, sort_keys=True, ensure_ascii=False)
+            except (TypeError, ValueError):
+                body = ""
+            found.append((rule, tool + " " + body, sha(json.dumps([tool, body, cwd]).encode())))
+    return found
+
+
+def model_of(raw):
+    """The model of an event: the payload's (a string, or {id: ...}), else AWT_MODEL, else unknown:unset. Never empty."""
+    m = raw.get("model")
+    m = m.get("id") if isinstance(m, dict) else m
+    return cut(m.strip(), 200) if isinstance(m, str) and m.strip() else (os.environ.get("AWT_MODEL") or "").strip() or "unknown:unset"
+
+
+def norm_event(raw):
+    """One event from a Claude Code hook payload or from the plugin: {phase: before|after, tool, input, cwd, id, ok}. ok: True, False or None (unknown)."""
+    if not isinstance(raw, dict):
+        return None
+    if "hook_event_name" in raw:
+        name = raw["hook_event_name"]
+        if name not in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+            return None
+        resp = raw.get("tool_response")
+        ok = False if name == "PostToolUseFailure" else None if isinstance(resp, dict) and resp.get("interrupted") else True
+        return dict(phase="before" if name == "PreToolUse" else "after", tool=raw.get("tool_name"), input=raw.get("tool_input"), cwd=raw.get("cwd"), id=raw.get("tool_use_id"), ok=ok, model=model_of(raw))
+    if raw.get("phase") not in ("before", "after"):
+        return None
+    inp = raw.get("input") if isinstance(raw.get("input"), dict) else {"command": raw["command"]} if "command" in raw else {}
+    return dict(phase=raw["phase"], tool=raw.get("tool"), input=inp, cwd=raw.get("cwd"), id=raw.get("id"), ok=raw.get("ok") if raw.get("ok") in (True, False) else None, model=model_of(raw))
+
+
+def fam(e):
+    return e.get("of") or e["key"]
+
+
+def has_tid(e, tid):
+    return bool(tid) and (e.get("tool_call_id") == tid or any(h.get("tool_call_id") == tid for h in e["hist"]))
+
+
+def norm_how(s):
+    try:
+        return shlex.join(shlex.split(s))
+    except ValueError:
+        return s
+
+
+MODEL, LOCKED = ["unknown:unset"], [False]  # per process: the current event's model; whether this process holds the log lock
+
+
+def detect_event(ev):
+    """Apply one event to the ledger; returns the hook JSON for a resend, else None. Caller holds the lock."""
+    found = classify(ev["tool"], ev["input"], ev["cwd"])
+    if not found:
+        return None  # the common case: no lock, no log read
+    MODEL[0] = ev.get("model") or "unknown:unset"
+    if not LOCKED[0]:
+        lock()
+        LOCKED[0] = True
+    tid = ev["id"] if isinstance(ev["id"], str) else ""
+    D = load()
+    effs = list(D["eff"].values())
+    whole = norm_how(ev["input"].get("command")) if isinstance(ev["input"].get("command"), str) else None
+    ask = None
+    for rule, text, key in found:
+        declared = next((e for e in effs if e.get("origin") != "detected" and (e.get("how") or e.get("run")) and norm_how(e.get("how") or e["run"]) in (text, whole)), None)
+        if declared:  # the declared path owns this send: it is not recorded twice
+            if ev["phase"] == "before" and declared["state"] in ("sent", "unknown") and not ask:
+                ask = declared
+            continue
+        family = [e for e in effs if e.get("origin") == "detected" and fam(e) == key]
+        if ev["phase"] == "before":
+            prior = next((e for e in reversed(family) if e["state"] in ("sent", "unknown")), None)
+            if prior:
+                ask = ask or prior
+            elif not any(has_tid(e, tid) for e in family):
+                record_detected(rule, text, key, family, tid, "before")
+            continue
+        open_ = [e for e in family if e["state"] in ("planned", "begun")]
+        e = next((e for e in open_ if has_tid(e, tid)), None) or (open_[0] if open_ else None)
+        if e is None and any(has_tid(x, tid) for x in family):
+            continue  # this call is already settled: a replayed event
+        i = e["id"] if e else record_detected(rule, text, key, family, tid, "after", begin=False)
+        st = e["state"] if e else "planned"
+        if st == "planned":
+            emit("effect", model=MODEL[0], id=i, step="begun", attempt=1)
+        if ev["ok"] is True:
+            emit("effect", model=MODEL[0], id=i, step="sent", attempt=1, tool_call_id=tid or None)
+        else:
+            emit("effect", model=MODEL[0], id=i, step="unknown", attempt=1, tool_call_id=tid or None, why=("the tool call failed; it may have gone out" if ev["ok"] is False else "the tool call was interrupted; it may have gone out"))
+    if not ask:
+        return None
+    ref = next((h.get("ref") for h in reversed(ask["hist"]) if h.get("ref")), None)
+    why = "awt: this exact send is already %s as %s%s. %s If it did go out, nothing needs doing; to send again, approve." % (
+        ask["state"], ask["id"], " (%s)" % ref if ref else "", "It may have gone out." if ask["state"] == "unknown" else "")
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": why}}
+
+
+def record_detected(rule, text, key, family, tid, seen, begin=True):
+    """planned (+ begun) for one detected call. The first of a key uses it; a repeat of the same key gets its own derived key and `of`."""
+    i = new_id("e")
+    own = sha(json.dumps([key, tid, i]).encode()) if family else key
+    sec = secret(text)
+    label = "[withheld: matches secret pattern %s] %s" % (sec, rule) if sec else text
+    emit("effect", model=MODEL[0], id=i, step="planned", attempt=1, target=cut(rule + ": " + label, 200) if not sec else cut(label, 200), key=own, of=key if family else None,
+         how=None if sec else cut(text, 400), origin="detected", rule=rule, tool_call_id=tid or None, seen=seen)
+    if begin:
+        emit("effect", model=MODEL[0], id=i, step="begun", attempt=1)
+    return i
+
+
+def cmd_event(a):
+    global ROOT, BY
+    raw = json.loads(sys.stdin.read())  # one event, or a list of them (the plugin sends a turn's finished calls at once)
+    evs = [norm_event(x) for x in (raw if isinstance(raw, list) else [raw])[:500]]
+    evs = [e for e in evs if e and isinstance(e["input"], dict)]
+    root = find_root(a.dir) if evs else None
+    if not root:
+        return
+    ROOT = root
+    if BY == "agent":
+        BY = "hook"
+    for ev in evs:
+        res = detect_event(ev)
+        if res and a.hook:
+            sys.stdout.write(json.dumps(res))
+        elif res:
+            out(res["hookSpecificOutput"]["permissionDecisionReason"])
+
+
 # ---------- doctor and save ----------
 def netmount(path):
     try:
@@ -2367,6 +2714,15 @@ def ingest_one(store, path, rel_, name, e, reset, used):
 
 
 def cmd_ingest(a):
+    if a.event:  # one tool-call event on stdin (a host hook or the plugin): the ledger only, no transcript copy
+        try:
+            return cmd_event(a)
+        except BaseException as x:
+            if a.hook and not isinstance(x, KeyboardInterrupt):
+                return
+            if isinstance(x, (SystemExit, KeyboardInterrupt)):
+                raise
+            die("event failed: %s: %s" % (type(x).__name__, x), "pipe one hook event as JSON on stdin")
     try:
         store = store_dir()
         private_dir(store)
@@ -2545,8 +2901,8 @@ def derive_nodes(db, root):
             hist = e["hist"]
             begun = next((h for h in hist if h["step"] in ("begun", "claimed")), None)
             sent = next((h for h in reversed(hist) if h["step"] == "sent" and h.get("ref")), None)
-            db.execute("INSERT OR IGNORE INTO effects VALUES (?,?,?,?,?,?,'declared',NULL,?,?,?,NULL)", (e["id"], i, e["target"], e["key"], e["state"], e["attempt"],
-                       begun and begun.get("by"), begun and begun["ts"], sent and sent["ref"]))
+            db.execute("INSERT OR IGNORE INTO effects VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (e["id"], i, e["target"], e["key"], e["state"], e["attempt"], e.get("origin") or "declared", e.get("rule"),
+                       begun and begun.get("by"), begun and begun["ts"], sent and sent["ref"], e.get("tool_call_id")))
     return {p: i for p, i in join.items() if list(join.values()).count(i) == 1}
 
 
@@ -2669,7 +3025,7 @@ def build():
     V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
     V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
     V(sp, "doctor", opt=[(("--staged",), F)])
-    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F)])
+    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F), (("--event",), F)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
     V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing

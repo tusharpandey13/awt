@@ -52,7 +52,7 @@ Primary key `(session_id, tool_call_id)`. `tool_call_id` (`gen_ai.tool.call.id`)
 One row per valid line of every node log. `record_id` (the row's own id, `d-`, `q-`, `n-`, when there is one and it is unused, else `<node_id>#<line index among valid rows>`; effect rows always use the second form), `node_id`, `type`, `ts`, `by`, `fields` (the whole row as JSON, `json_extract` reads any field), `session_id` (always null: no deterministic join exists), `origin` (`person` or `plugin` when `by` says so, else `agent`).
 
 ### effects (any level)
-One row per effect id, folded from its rows: `effect_id`, `node_id`, `target`, `key`, `state` (`planned`, `begun`, `sent`, `unknown`, `dropped`), `attempt`, `origin` (`declared`; `detected` arrives with detection), `rule` (null until then), `begun_by`, `begun_at` (from the first `begun` row), `sent_ref` (`ref` of the last `sent` row), `tool_call_id` (null until detection).
+One row per effect id, folded from its rows: `effect_id`, `node_id`, `target`, `key`, `state` (`planned`, `begun`, `sent`, `unknown`, `dropped`), `attempt`, `origin` (`declared` or `detected`), `rule` (the detection pattern, null for declared), `begun_by`, `begun_at` (from the first `begun` row), `sent_ref` (`ref` of the last `sent` row), `tool_call_id` (of the detected call; null for a declared effect).
 
 ### ingest_sources
 A snapshot of `ingest/claude.offsets.json` taken at each build: `source`, `path` (relative to the projects directory), `inode`, `offset`, `adapter`, `last_run`, `errors` (canonical rows that were not JSON). It can lag the file until the next rebuild.

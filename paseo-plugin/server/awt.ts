@@ -13,12 +13,12 @@ export interface AwtResult {
 }
 
 /** Runs awt against one node. Never rejects: a missing binary, a timeout or a crash is a nonzero code. */
-export function awt(cfg: AwtConfig, dir: string, args: string[], by = "paseo-plugin"): Promise<AwtResult> {
+export function awt(cfg: AwtConfig, dir: string, args: string[], by = "paseo-plugin", input?: string): Promise<AwtResult> {
   const childEnv: NodeJS.ProcessEnv = { ...cfg.env };
   delete childEnv.AWT_DIR;
   return new Promise((resolve) => {
     try {
-      execFile(
+      const child = execFile(
         cfg.bin,
         ["--dir", dir, "--by", by, ...args],
         { timeout: cfg.timeoutMs, maxBuffer: 16 * 1024 * 1024, env: childEnv, signal: current.getStore() },
@@ -27,6 +27,7 @@ export function awt(cfg: AwtConfig, dir: string, args: string[], by = "paseo-plu
           resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? err?.message ?? "") });
         },
       );
+      if (input !== undefined) child.stdin?.on("error", () => {}).end(input);
     } catch (error) {
       resolve({ code: -1, stdout: "", stderr: String(error) });
     }
