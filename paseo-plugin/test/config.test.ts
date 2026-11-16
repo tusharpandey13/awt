@@ -24,3 +24,9 @@ test("AWT_RECEIPT accepts off as well as 0; anything unknown is on and flagged",
   assert.equal(readConfig({}).receipt, "on");
   assert.deepEqual([readConfig({ AWT_RECEIPT: "sometimes" }).receipt, readConfig({ AWT_RECEIPT: "sometimes" }).receiptBad], ["on", true]);
 });
+
+test("AWT_COMPACT_BRIEF is on unless it is 0", () => {
+  assert.equal(readConfig({}).compactBrief, true);
+  assert.equal(readConfig({ AWT_COMPACT_BRIEF: "1" }).compactBrief, true);
+  assert.equal(readConfig({ AWT_COMPACT_BRIEF: "0" }).compactBrief, false);
+});

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { execFile, execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -43,14 +43,14 @@ async function run(prov: Prov, title: string, prompt: string, extra: string[] = 
   return idOf(title);
 }
 /** Permission requests the harness had to answer so a journey could continue (each is a finding: the plugin did not pre-answer it). */
-const answered: { agent: string; name: string; description: string }[] = [];
+const answered: { agent: string; id: string; name: string; description: string }[] = [];
 /** `paseo run` and `paseo send` return while a permission is pending. Allow each once, record it, and wait for idle. */
 async function settle(id: string) {
   for (let i = 0; i < 12; i++) {
     let pend: any[] = [];
     try { pend = JSON.parse(px("permit", "ls", "--json") || "[]").filter((p: any) => p.agentId === id); } catch {}
     if (pend.length === 0) { try { await pexec("paseo", ["--home", st.home, "wait", id, "--timeout", "120"], { env: st.env, timeout: 150_000 }); } catch {} if (!JSON.parse(px("permit", "ls", "--json") || "[]").some((p: any) => p.agentId === id)) return; continue; }
-    for (const p of pend) { answered.push({ agent: id, name: p.name, description: String(p.description ?? "") }); try { px("permit", "allow", id, p.id); } catch {} }
+    for (const p of pend) { answered.push({ agent: id, id: String(p.id), name: p.name, description: String(p.description ?? "") }); try { px("permit", "allow", id, p.id); } catch {} }
   }
 }
 async function send(id: string, prompt: string) {
@@ -145,13 +145,18 @@ async function envProbe(j: Journey, prov: Prov, title: string, resumeFirst: stri
   j.check("plan.md in the node", existsSync(join(dir, "scratch", "plan.md")));
   const perms = mine.filter((h) => h.hook === "agent.permission.before");
   for (const p of perms) j.note(`permission.before: name=${p.payload.request.name} kind=${p.payload.request.kind} title=${p.payload.request.title} desc=${String(p.payload.request.description ?? "").replace(st.tmp, "$T").slice(0, 160)}`);
-  const wrote = perms.filter((p) => /plan\.md|scratch/.test(JSON.stringify(p.payload.request)));
-  j.note(`permission requests for the plan.md write: ${wrote.length}${wrote.length ? " (answered by the plugin? see pending check)" : ""}`);
+  // Which requests were the plugin's to answer is read from the structured request in the hook log (the path the tool was given),
+  // never from the description text. A request for a path inside this agent's node dir, or for the plugin's own tool, must not be
+  // among those the harness had to answer: the plugin answers those before the harness looks (agent.permission.before runs first).
+  const reqPath = (r: any): string => String(r?.input?.file_path ?? r?.input?.filePath ?? r?.input?.path ?? r?.detail?.filePath ?? r?.detail?.file_path ?? r?.detail?.path ?? "");
+  const underNode = (p: string) => !!p && (p === dir || p.startsWith(dir + "/") || p.startsWith(realpathSync(dir) + "/"));
+  const ours = perms.filter((p) => underNode(reqPath(p.payload.request)) || /(^|__)awt_resume$/.test(String(p.payload.request.name)));
+  j.note(`permission requests the plugin owns (node-dir path or its own tool): ${ours.length}`);
   const harnessAnswered = answered.filter((p) => p.agent === id);
-  // A pending Bash(awt ...) is a finding (unverified fact 1), not a failure: shell requests are the person's to answer. The plugin's own
-  // tool and the node write must never wait for a person.
-  const blocking = harnessAnswered.filter((p) => /awt_resume/.test(p.name) || /plan\.md|scratch/.test(`${p.name} ${p.description}`));
-  j.check("no permission for awt_resume or the plan.md write needed the harness to answer", blocking.length === 0, JSON.stringify(blocking.map((p) => p.name)));
+  const ourIds = new Set(ours.map((p) => String(p.payload.request.id)));
+  const blocking = harnessAnswered.filter((p) => ourIds.has(p.id));
+  if (!ours.some((p) => underNode(reqPath(p.payload.request)))) j.note("no permission request carried a node-dir path (the provider mode did not ask, or the path is not in the request): M6 had nothing to assert on the write");
+  j.check("no permission for awt_resume or a node-dir path needed the harness to answer", blocking.length === 0, JSON.stringify(blocking.map((p) => p.name)));
   for (const p of harnessAnswered) j.note(`FINDING: harness had to allow a pending permission: ${p.name}`);
   const bashAwt = perms.filter((p) => /awt/.test(JSON.stringify(p.payload.request.input ?? "")) && /bash|shell/i.test(p.payload.request.name + p.payload.request.kind));
   if (bashAwt.length) j.note(`FINDING (unverified fact 1): ${bashAwt.length} permission request(s) for Bash(awt ...)`);
@@ -211,6 +216,12 @@ test("E-P9 Claude Code: native subagent", { skip: !want("E-P9") }, async () => {
   j.finish();
 });
 
+/** M7: the brief arrives exactly once per completed compaction, after it, with no nudge and no "[auto] ok" after it. */
+function onceChecks(j: Journey, runs: Awaited<ReturnType<typeof compactRun>>[]) {
+  j.check("exactly one brief per completed compaction, after it (every run)", runs.every((r) => r.once && r.nMarks >= 1), runs.map((r) => `${r.nMarks}/${r.nCompleted}`).join(" "));
+  j.check("no nudge and no [auto] ok handoff after the brief (every run)", runs.every((r) => !r.nudged && !r.autoOk), runs.map((r) => `nudge=${r.nudged} autoOk=${r.autoOk}`).join(" "));
+}
+
 function findFiles(root: string, pred: (p: string) => boolean, out: string[] = []): string[] {
   if (!existsSync(root)) return out;
   for (const e of readdirSync(root, { withFileTypes: true })) { const p = join(root, e.name); if (e.isDirectory()) findFiles(p, pred, out); else if (pred(p)) out.push(p); }
@@ -218,9 +229,18 @@ function findFiles(root: string, pred: (p: string) => boolean, out: string[] = [
 }
 
 /** One compaction run; returns what was observed. */
-async function compactRun(prov: Prov, title: string, compactCmd: string) {
+async function compactRun(prov: Prov, title: string, compactCmd: string, bulk = false) {
   const a0 = argv().length;
-  const id = await run(prov, title, 'Run the shell command: awt note "before compact". Then reply DONE.');
+  let first = 'Run the shell command: awt note "before compact". Then reply DONE.';
+  if (bulk) {
+    // H2: pi refuses to compact a small session. Give it about 45k tokens of fictional text to read first.
+    const dir = join(st.tmp, "bulk");
+    mkdirSync(dir, { recursive: true });
+    const files = [1, 2, 3, 4].map((n) => join(dir, `parsekit-part${n}.txt`));
+    files.forEach((f, n) => writeFileSync(f, Array.from({ length: 900 }, (_, k) => `parsekit part ${n + 1} line ${k}: the tokenizer splits input into spans and the parser folds spans into nodes.`).join("\n")));
+    first = `Read each of these files completely, one tool call each: ${files.join(" ")}. Then run the shell command: awt note "before compact". Then reply DONE.`;
+  }
+  const id = await run(prov, title, first);
   await send(id, compactCmd);
   // The plugin sends the brief back when the compacting turn ends; let that turn finish before the next prompt.
   for (let i = 0; i < 30 && !JSON.stringify(await timeline(id)).includes(COMPACTED_MARK); i++) await sleep(1000);
@@ -245,7 +265,14 @@ async function compactRun(prov: Prov, title: string, compactCmd: string) {
   const sentBack = afterCompaction.some((i) => i.type === "user_message" && String(i.text ?? "").startsWith(COMPACTED_MARK));
   const brief = sentBack || (resumeTool.length > 0 ? firstWrite < 0 || resumeIdx < 0 || resumeIdx < firstWrite : resumeIdx >= 0 && (firstWrite < 0 || resumeIdx < firstWrite));
   const errs = [...JSON.stringify(tl).matchAll(/\[Error\][^"]{0,160}/g)].map((m) => m[0]);
-  return { id, tl, comp, brief, sentBack, errs, post, t1, resumeTool: resumeTool.length, receipts: receiptsOf(tl) };
+  // M7: once per compaction, after it, and neither a nudge nor an "[auto] ok" handoff follows the brief.
+  const marks = all.map((i, n) => ({ i, n })).filter((x) => x.i.type === "user_message" && String(x.i.text ?? "").startsWith(COMPACTED_MARK));
+  const completed = all.map((i, n) => ({ i, n })).filter((x) => x.i.type === "compaction" && x.i.status === "completed");
+  const once = marks.length === completed.length && marks.every((m, k) => m.n > completed[k].n);
+  const nudged = all.some((i) => i.type === "user_message" && String(i.text ?? "").startsWith("Before you stop, record where things stand"));
+  let autoOk = false;
+  try { autoOk = /\[auto\] ok\b/i.test(awt(nodeDir(id), "list", "state", "--all", "--json")); } catch {}
+  return { id, tl, comp, brief, sentBack, once, nMarks: marks.length, nCompleted: completed.length, nudged, autoOk, errs, post, t1, resumeTool: resumeTool.length, receipts: receiptsOf(tl) };
 }
 
 test("E-P10 Claude Code: compaction and transcript", { skip: !want("E-P10") }, async () => {
@@ -255,6 +282,7 @@ test("E-P10 Claude Code: compaction and transcript", { skip: !want("E-P10") }, a
   j.check("a compaction item with status completed (every run)", withComp.length === RUNS, `${withComp.length}/${RUNS}`);
   const ok = runs.filter((r) => r.brief).length;
   j.check(`brief returns after compaction in at least ${Math.ceil(RUNS * 0.8)} of ${RUNS} runs`, ok >= Math.ceil(RUNS * 0.8), `${ok}/${RUNS}`);
+  onceChecks(j, runs);
   const rows = findFiles(join(st.tmp, "claude", "projects"), (p) => p.endsWith(".jsonl") && !p.includes("/subagents/")).flatMap((f) => readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)));
   j.check("transcripts have system/compact_boundary rows", rows.some((r) => r.type === "system" && (r.subtype === "compact_boundary")), `rows=${rows.length}`);
   j.check("transcripts have isCompactSummary rows", rows.some((r) => r.isCompactSummary === true));
@@ -305,6 +333,7 @@ test("E-P13 opencode: compaction and transcript", { skip: !want("E-P13") }, asyn
   j.note(`session.time_compacting set on ${sql("select count(*) from session where time_compacting is not null")} sessions (opencode 1.19.3 records a compaction part, not this column, for /compact)`);
   const ok = runs.filter((r) => r.brief).length;
   j.check(`brief returns in at least ${Math.ceil(RUNS * 0.8)} of ${RUNS} runs`, ok >= Math.ceil(RUNS * 0.8), `${ok}/${RUNS}`);
+  onceChecks(j, runs);
   j.note("system prompt after compaction: SKIP (opencode keeps no request log in 1.19.3 that the harness can read)");
   j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} sentBack=${r.sentBack} errors=${JSON.stringify(r.errs)} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
   j.finish();
@@ -331,19 +360,26 @@ test("E-P15 pi: subagent", { skip: !want("E-P15") }, async () => {
 
 test("E-P16 pi: compaction and transcript", { skip: !want("E-P16") }, async () => {
   const j = new Journey("E-P16", "pi", "pi3");
-  const runs = await Promise.all(Array.from({ length: RUNS }, (_, i) => compactRun("pi", `pi3-${i}`, "/compact")));
+  const runs = await Promise.all(Array.from({ length: RUNS }, (_, i) => compactRun("pi", `pi3-${i}`, "/compact", true)));
   j.check("compaction timeline items (every run)", runs.filter((r) => r.comp.length > 0).length === RUNS, `${runs.filter((r) => r.comp.length > 0).length}/${RUNS}`);
   const files = findFiles(join(st.tmp, "pi", "sessions"), (p) => p.endsWith(".jsonl"));
   const rows = files.flatMap((f) => readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)));
   const comp = rows.filter((r) => r.type === "compaction");
-  // pi refuses to compact a session that is too small ("Nothing to compact") but Paseo still shows the compaction items; then there is nothing to check in the files.
+  // H2: a refused compaction (pi: "Nothing to compact") still shows compaction items in Paseo. That is not a compaction, so it can
+  // never be a PASS: the journey is SKIPPED, with the session-file evidence in the notes.
   const refused = runs.some((r) => r.errs.some((e) => /Nothing to compact|Already compacted/.test(e)));
-  if (refused && comp.length === 0) j.note(`FINDING: pi refused /compact in a small session (${runs.flatMap((r) => r.errs)[0]}); no compaction entry could be written, so the session-file check is skipped`);
-  else j.check("session files have compaction entries with firstKeptEntryId and tokensBefore", comp.length > 0 && comp.every((c) => c.firstKeptEntryId && c.tokensBefore !== undefined), `entries=${comp.length}`);
+  if (comp.length === 0 || refused) {
+    j.note(`SKIP: pi did not really compact (session entries=${comp.length}, errors=${JSON.stringify(runs.flatMap((r) => r.errs).slice(0, 2))}). Compaction items alone prove nothing.`);
+    j.note(`brief sent in ${runs.filter((r) => r.sentBack).length}/${RUNS} runs (a brief after a refused compaction is a plugin bug)`);
+    j.finish("SKIP");
+    return;
+  }
+  j.check("session files have compaction entries with firstKeptEntryId and tokensBefore", comp.every((c) => c.firstKeptEntryId && c.tokensBefore !== undefined), `entries=${comp.length}`);
   const idsOk = runs.every((r) => { const p = persistence(r.id); const f = p.nativeHandle && existsSync(p.nativeHandle) ? p.nativeHandle : ""; if (!f) return false; const hd = JSON.parse(readFileSync(f, "utf8").split("\n")[0]); return hd.id === p.sessionId; });
   j.check("header id equals persistence.sessionId (every run)", idsOk);
   const ok = runs.filter((r) => r.brief).length;
   j.check(`brief returns in at least ${Math.ceil(RUNS * 0.8)} of ${RUNS} runs`, ok >= Math.ceil(RUNS * 0.8), `${ok}/${RUNS}`);
+  onceChecks(j, runs);
   j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} sentBack=${r.sentBack} errors=${JSON.stringify(r.errs)} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
   j.finish();
 });
