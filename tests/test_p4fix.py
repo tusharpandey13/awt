@@ -112,5 +112,63 @@ class TestL2(P4):
         self.assertEqual(self.q("select count(*) from canonical where raw like '%pi:default%'"), [(1,)])  # kept in canonical
 
 
+class TestM6(P4):
+    def hits(self, word):
+        return self.q("select count(*) from fts_text where fts_text match ?", word)[0][0]
+
+    def delete(self, sql_where):
+        c = sqlite3.connect(self.ocdb)
+        for t, w in sql_where:
+            c.execute("DELETE FROM %s WHERE %s" % (t, w))
+        c.commit()
+        c.close()
+
+    def test_a_reverted_message_leaves_the_store_but_stays_in_the_canonical_file(self):
+        build_db(self.ocdb)
+        self.run_src("opencode", root=self.root)
+        self.assertEqual((self.hits("zephyr"), self.q("select count(*) from messages")), (1, [(5,)]))
+        self.delete([("part", "message_id='msg_03'"), ("message", "id='msg_03'")])
+        r = self.run_src("opencode", root=self.root)
+        self.assertEqual(self.q("select count(*) from messages where message_id='msg_03'"), [(0,)])
+        self.assertEqual(self.q("select count(*) from tool_calls where message_id='msg_03'"), [(0,)])
+        self.assertEqual(self.hits("zephyr"), 0)
+        got = self.canon_rows("opencode")
+        self.assertEqual(len([g for g in got if g["raw"].get("id") == "msg_03"]), 2)  # the old row and its tombstone
+        self.assertTrue([g for g in got if g["raw"].get("id") == "msg_03"][-1]["raw"]["deleted"])
+        self.assertIn("rows from 1 opencode", r.stdout)
+        inc = self.logical()
+        self.ok("ingest", "--rebuild", root=self.root)
+        self.assertEqual(self.logical(), inc)
+        self.assertIn("0 rows", self.run_src("opencode", root=self.root).stdout)  # nothing more to append
+
+    def test_a_deleted_session_leaves_the_store(self):
+        build_db(self.ocdb)
+        self.run_src("opencode", root=self.root)
+        self.delete([("part", "session_id='%s'" % S), ("message", "session_id='%s'" % S), ("session", "id='%s'" % S)])
+        self.run_src("opencode", root=self.root)
+        self.assertEqual(self.q("select (select count(*) from sessions), (select count(*) from messages), (select count(*) from tool_calls), (select count(*) from turns)"), [(0, 0, 0, 0)])
+        self.assertEqual(self.hits("zephyr"), 0)
+        self.assertEqual(len(self.canon_rows("opencode")), 16 + 16)
+        inc = self.logical()
+        self.ok("ingest", "--rebuild", root=self.root)
+        self.assertEqual(self.logical(), inc)
+
+    def test_a_row_that_comes_back_is_live_again(self):
+        build_db(self.ocdb)
+        self.run_src("opencode", root=self.root)
+        self.delete([("part", "message_id='msg_05'"), ("message", "id='msg_05'")])
+        self.run_src("opencode", root=self.root)
+        self.assertEqual(self.q("select count(*) from messages"), [(4,)])
+        fx = json.load(open(os.path.join(FX, "opencode.json")))
+        c = sqlite3.connect(self.ocdb)
+        for m in fx["messages"]:
+            if m["id"] == "msg_05":
+                c.execute("INSERT INTO message VALUES (?,?,?,?,?)", (m["id"], m["session_id"], m["time_created"], m["time_updated"], json.dumps(m["data"])))
+        c.commit()
+        c.close()
+        self.run_src("opencode", root=self.root)
+        self.assertEqual(self.q("select count(*) from messages"), [(5,)])
+
+
 if __name__ == "__main__":
     unittest.main()

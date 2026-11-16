@@ -2471,9 +2471,28 @@ def iso_ms(ms):
     return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (int(ms) % 1000)
 
 
+def oc_known(store, out):
+    """({(table, id) live in the canonical file after its tombstones}, {(table, id) ever in it})."""
+    alive, seen = set(), set()
+    try:
+        with open(os.path.join(store, out), "rb") as g:
+            for ln in g:
+                try:
+                    r = json.loads(ln)["raw"]
+                    k = (r["table"], r["id"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                seen.add(k)
+                alive.discard(k) if r.get("deleted") else alive.add(k)
+    except OSError:
+        pass
+    return alive, seen
+
+
 def ingest_opencode(store):
     """opencode.db (read-only) as canonical rows: one per session, message and part row, raw = its columns with `data` parsed.
-    Incremental per session by max time_updated; a row changed since is appended again and the store keeps the last one. Unknown schema: recorded as an error, nothing read."""
+    Incremental per session by max time_updated; a row changed since is appended again and the store keeps the last one. A row opencode deleted since (revert, deleted session) is appended as a tombstone
+    `{table, id, session_id, deleted: true}` (found by comparing the ids it still holds with the file's, only when their count changed); the file keeps the history, the derivation drops the row. Unknown schema: recorded as an error, nothing read."""
     path = opencode_db()
 
     def work(files, errors, save):
@@ -2498,12 +2517,26 @@ def ingest_opencode(store):
             except (sqlite3.Error, ValueError) as x:
                 errors["opencode.db"] = "%s: %s" % (type(x).__name__, str(x)[:200])
                 return 0, 0
+            for sid in sorted(set(files) - {r[0] for r in sessions}):  # a session opencode deleted: tombstone everything of it that is still live
+                e = files[sid]
+                if e.get("out") and not e.get("gone"):
+                    alive, _ = oc_known(store, e["out"])
+                    total += append_rows(store, e["out"], "opencode", sid, [dict(table=t, id=i, session_id=sid, deleted=True) for t, i in sorted(alive)], lambda r: "opencode.db:%s:%s" % (r["table"], r["id"]), ts)
+                    e["gone"], e["n"] = True, -1
+                    save()
             for srow in sessions:
                 srec = dict(zip(scols, srow))
                 sid = srec["id"]
                 try:
                     e = dict(files.get(sid) or dict(out=None, cursor=0, at=[]))
+                    e.pop("gone", None)
                     cur, at = e["cursor"], set(e["at"])
+                    live = {("session", sid)} | {(t, r[0]) for t in ("message", "part") for r in db.execute("SELECT id FROM %s WHERE session_id=?" % t, (sid,))}
+                    tomb, back = [], set()
+                    if e["out"] and e.get("n") != len(live):
+                        alive, seen = oc_known(store, e["out"])
+                        tomb = [dict(table=t, id=i, session_id=sid, deleted=True) for t, i in sorted(alive - live)]
+                        back = (live & seen) - alive  # deleted earlier, back now: read again whatever its time_updated
                     items = []
                     if srec["time_updated"] >= cur:
                         items.append(("session", sid, sid, srec["time_created"], srec["time_updated"], srec, None))
@@ -2514,11 +2547,23 @@ def ingest_opencode(store):
                             except (TypeError, ValueError):
                                 d = {"_unparsed": data}
                             items.append((tbl, rid, sid, tc, tu, d, mid))
+                    for tbl, rid in sorted(back):  # same columns as above, by id
+                        if tbl == "session":
+                            if not items or items[0][0] != "session":
+                                items.insert(0, ("session", sid, sid, srec["time_created"], srec["time_updated"], srec, None))
+                        elif not any(i[0] == tbl and i[1] == rid for i in items):
+                            r = db.execute("SELECT time_created, time_updated, data, %s FROM %s WHERE id=?" % ("message_id" if tbl == "part" else "NULL", tbl), (rid,)).fetchone()
+                            try:
+                                d = json.loads(r[2])
+                            except (TypeError, ValueError):
+                                d = {"_unparsed": r[2]}
+                            items.append((tbl, rid, sid, r[0], r[1], d, r[3]))
                     keys = lambda i: "%s:%s:%s" % (i[0], i[1], i[4])
-                    new = [i for i in items if keys(i) not in at]
+                    new = [i for i in items if keys(i) not in at or (i[0], i[1]) in back]
                     top = max([cur] + [i[4] for i in items])
                     e["at"] = sorted(keys(i) for i in items if i[4] == top)
-                    if not new:
+                    e["n"] = len(live)
+                    if not new and not tomb:
                         e["cursor"] = top
                         if e != files.get(sid):
                             files[sid] = e
@@ -2527,7 +2572,7 @@ def ingest_opencode(store):
                         continue
                     if e["out"] is None:
                         e["out"] = os.path.join("log", "opencode", iso_ms(srec["time_created"])[:7], safe_name(sid) + ".jsonl")
-                    raws = [dict(table=i[0], id=i[1], session_id=i[2], **({"message_id": i[6]} if i[0] == "part" else {}), time_created=i[3], time_updated=i[4], data=i[5]) for i in new]
+                    raws = tomb + [dict(table=i[0], id=i[1], session_id=i[2], **({"message_id": i[6]} if i[0] == "part" else {}), time_created=i[3], time_updated=i[4], data=i[5]) for i in new]
                     total += append_rows(store, e["out"], "opencode", sid, raws, lambda r: "opencode.db:%s:%s" % (r["table"], r["id"]), ts)
                     e["cursor"] = top
                     files[sid] = e
@@ -2931,8 +2976,11 @@ def derive_opencode(db, sid, rows, place):
     A turn starts at each user message. A message's text is its text parts; a `tool` part is a tool call (status error: the error text is the result)."""
     cur_ = {"session": {}, "message": {}, "part": {}}
     for _, r in rows:
-        if isinstance(r, dict) and r.get("table") in cur_ and isinstance(r.get("data"), dict):
-            cur_[r["table"]][r.get("id")] = r
+        if isinstance(r, dict) and r.get("table") in cur_:
+            if r.get("deleted") is True:  # a tombstone: opencode deleted the row (revert, deleted session)
+                cur_[r["table"]].pop(r.get("id"), None)
+            elif isinstance(r.get("data"), dict):
+                cur_[r["table"]][r.get("id")] = r
     ss = next(iter(cur_["session"].values()), None)
     if ss is None:
         return
