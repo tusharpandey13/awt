@@ -3,7 +3,7 @@ import { test, afterEach } from "node:test";
 import { mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentPayload, exists, openReq, rig, type Rig } from "./harness.js";
-import { AWT_BLOCK } from "../server/prompt.js";
+import { AWT_BLOCK, COMPACTED_MARK } from "../server/prompt.js";
 
 const rigs: Rig[] = [];
 const mk = (...a: Parameters<typeof rig>) => {
@@ -509,4 +509,85 @@ test("PJ12 hostile project names never escape the tree or reach disk as secrets"
   for (const n of r.nodes()) for (const f of readdirSync(join(r.root, n.path), { recursive: true, encoding: "utf8" })) {
     if (f.endsWith("events.jsonl")) assert.ok(!readFileSync(join(r.root, n.path, f), "utf8").includes(AKIA), f);
   }
+});
+
+const entry = (seq: number, item: Record<string, unknown>) => ({ provider: "claude", item, seqStart: seq, seqEnd: seq }); // Paseo 0.15.4's entry shape
+const compactedPage = (...tail: Record<string, unknown>[]) => ({
+  entries: [entry(1, { type: "user_message", text: "/compact" }), entry(2, { type: "compaction", status: "loading" }), entry(3, { type: "compaction", status: "completed", trigger: "manual" }), ...tail.map((t, i) => entry(4 + i, t))],
+});
+
+test("R5 a turn that ends with a completed compaction gets the brief sent back, once", async () => {
+  const r = mk({}, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.awt(open.env.AWT_DIR, "note", "before compact");
+  const done = { kind: "completed" };
+  const end = (t: string) => r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: t, outcome: done, timeline: [] });
+  r.pages.set("agt_1", compactedPage());
+  await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t1" });
+  await end("t1");
+  assert.equal(r.sent.length, 1);
+  assert.ok(r.sent[0].text.startsWith(COMPACTED_MARK), r.sent[0].text);
+  assert.ok(r.sent[0].text.includes("# awt task"), r.sent[0].text);
+  // the same page again (our own message not yet in it): no second message
+  await end("t2");
+  assert.equal(r.sent.length, 1);
+  // our message is the last user message now: nothing to do
+  r.pages.set("agt_1", { entries: [...compactedPage().entries, entry(9, { type: "user_message", text: r.sent[0].text }), entry(10, { type: "assistant_message", text: "ok" })] });
+  await end("t3");
+  assert.equal(r.sent.length, 1);
+  assert.deepEqual(r.logs, []);
+});
+
+test("R5 no brief for a loading compaction, a failed turn, a subagent, or an agent with no node", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  await r.call("agent.open.before", openReq("agt_s", { labels: { "paseo.parent-agent-id": "agt_1" } }));
+  const page = compactedPage();
+  r.pages.set("agt_1", { entries: page.entries.slice(0, 2) });
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "a", outcome: { kind: "completed" }, timeline: [] });
+  r.pages.set("agt_1", page);
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "b", outcome: { kind: "failed", error: { message: "x" } }, timeline: [] });
+  r.pages.set("agt_s", page);
+  await r.call("agent.turn.after", { agent: agentPayload("agt_s"), turnId: "c", outcome: { kind: "completed" }, timeline: [] });
+  r.pages.set("agt_x", page);
+  await r.call("agent.turn.after", { agent: agentPayload("agt_x"), turnId: "d", outcome: { kind: "completed" }, timeline: [] });
+  assert.deepEqual(r.sent, []);
+});
+
+test("R5 a compaction outside any turn (pi /compact) gets its brief at the next turn end, once, also after a reload", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: [...compactedPage().entries, entry(9, { type: "user_message", text: "go on" }), entry(10, { type: "assistant_message", text: "done" })] });
+  const end = (t: string) => r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: t, outcome: { kind: "completed" }, timeline: [] });
+  await end("a");
+  assert.equal(r.sent.length, 1);
+  await end("b");
+  assert.equal(r.sent.length, 1);
+  r.restart(); // empty memory: the old compaction is answered once more, never in a loop
+  await end("c");
+  assert.equal(r.sent.length, 2);
+  await end("d");
+  assert.equal(r.sent.length, 2);
+  // a later compaction is a new one
+  r.pages.set("agt_1", { entries: [...compactedPage().entries, entry(11, { type: "compaction", status: "completed" })] });
+  await end("e");
+  assert.equal(r.sent.length, 3);
+});
+
+test("R5 the compaction brief replaces the nudge for that turn", async () => {
+  const r = mk({ AWT_NUDGE: "1" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", compactedPage());
+  await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t1" });
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "t1", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(r.sent.length, 1);
+  assert.ok(r.sent[0].text.startsWith(COMPACTED_MARK));
+});
+
+test("P8 permission: the plugin's own awt_resume tool is allowed, a look-alike is not", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_a"));
+  for (const name of ["mcp__paseo__awt_resume", "awt_resume"]) await r.call("agent.permission.before", ask("agt_a", name, { name, kind: "tool" }));
+  for (const name of ["mcp__other__awt_resume", "awt_resume2", "mcp__paseo__create_agent", "Bash"]) await r.call("agent.permission.before", ask("agt_a", name, { name, kind: "tool" }));
+  assert.deepEqual(r.answered.map((x) => x.requestId), ["mcp__paseo__awt_resume", "awt_resume"]);
 });

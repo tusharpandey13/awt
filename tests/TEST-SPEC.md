@@ -466,7 +466,7 @@ Pass:
 
 **E-P11 opencode: env, tool, permissions, receipts** (opencode; gaps 1-4). As E-P8 with `--provider opencode`, plus: count `opencode serve` processes whose argv contains `$T` before and after starting 3 agents (fact: `AWT_DIR` forces a dedicated server). Record the count; more than agents + 1 fails.
 
-Pass: as E-P8. The `plan.md` write is auto-allowed through `external_directory`; record whether Paseo took the legacy or the 2.x path (from the shape of `request` in H5) and the opencode version.
+Pass: as E-P8, except that the `awt_resume` tool call is not required: Paseo 0.15.4 does not offer plugin tools to opencode, so a missing call is a recorded finding and the agent falls back to `BRIEF.md` or `awt resume`. The `plan.md` write is auto-allowed through `external_directory`; record whether Paseo took the legacy or the 2.x path (from the shape of `request` in H5) and the opencode version.
 
 **E-P12 opencode: child session** (opencode; gap 5). Agent `oc2`: "Use the task tool to have a subagent run: awt note \"from the child\"."
 
@@ -480,7 +480,7 @@ Pass:
 
 Pass:
 - a `compaction` timeline item;
-- a `part` with `data.type = "compaction"` and a set `session.time_compacting` for the agent's session;
+- a `part` with `data.type = "compaction"` (opencode 1.19.3 does not set `session.time_compacting` for `/compact`; the column is recorded as a note, not a check);
 - the brief comes back as in E-P10, at least 4 of 5 runs;
 - record whether the plugin prompt block is still in the `system` of the next request (from the opencode request log, if one exists; otherwise SKIP with the reason).
 

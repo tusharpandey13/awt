@@ -9,6 +9,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { createPaseoClient } from "@getpaseo/client";
+import { COMPACTED_MARK } from "../server/prompt.js";
+import { RECEIPT_KIND } from "../shared/receipt.js";
 import { type Stack, paseo, realStores, scrub, startStack, stopStack } from "./paid-env.js";
 
 const ON = process.env.AWT_E2E_PAID === "1";
@@ -66,7 +68,7 @@ function items(x: any, out: any[] = []): any[] {
   if (x && typeof x === "object") { if (typeof x.type === "string" && (x.callId || x.messageId || x.kind || x.status || x.id)) out.push(x); for (const v of Object.values(x)) items(v, out); }
   return out;
 }
-const receiptsOf = (tl: any) => items(tl).filter((i) => i.type === "plugin" && i.kind === "awt.receipt");
+const receiptsOf = (tl: any) => items(tl).filter((i) => i.type === "plugin" && i.kind === RECEIPT_KIND);
 const toolCalls = (tl: any) => items(tl).filter((i) => i.type === "tool_call");
 
 // Provider store readers (tokens and cost). Claude has no marginal cost on a subscription; its dollar figure is an estimate at Haiku-class list prices.
@@ -121,6 +123,7 @@ async function envProbe(j: Journey, prov: Prov, title: string, resumeFirst: stri
   const id = await run(prov, title, `${resumeFirst} Then run the shell command: awt note "${prov} probe". Then write the file $AWT_DIR/scratch/plan.md with one line, using your file-writing tool, not the shell. Reply DONE.`, extra);
   j.check("agent exists", !!id);
   const dir = nodeDir(id);
+  for (let i = 0; i < 20 && !hooks().slice(h0).some((h) => h.hook === "agent.turn.after" && hookAgent(h) === id); i++) await sleep(500);
   const hs = hooks().slice(h0);
   const mine = hs.filter((h) => hookAgent(h) === id);
   const names = (n: string) => hs.filter((h) => h.hook === n);
@@ -134,6 +137,7 @@ async function envProbe(j: Journey, prov: Prov, title: string, resumeFirst: stri
   const calls = toolCalls(tl);
   const resume = calls.find((c) => /awt_resume/.test(c.name));
   if (prov === "pi") j.note(`awt_resume tool call ${resume ? "present" : "absent (fell back to: " + (argv().slice(a0).some((x) => x.argv[0] === "resume") ? "awt resume" : "nothing") + ")"}`);
+  else if (prov === "opencode" && !resume) j.note("FINDING: opencode was never offered awt_resume. Paseo 0.15.4 gives opencode's bridge plugin a static tool manifest without plugin tools (agent tools are bound per session only for MCP). The agent fell back to BRIEF.md or awt resume.");
   else j.check("tool call awt_resume completed without error", !!resume && resume.status === "completed" && !resume.error, JSON.stringify(resume ?? null).slice(0, 200));
   const mineArgv = argv().slice(a0).filter((x) => x.AWT_BY === id);
   const note = mineArgv.find((x) => x.argv[0] === "note");
@@ -144,11 +148,16 @@ async function envProbe(j: Journey, prov: Prov, title: string, resumeFirst: stri
   const wrote = perms.filter((p) => /plan\.md|scratch/.test(JSON.stringify(p.payload.request)));
   j.note(`permission requests for the plan.md write: ${wrote.length}${wrote.length ? " (answered by the plugin? see pending check)" : ""}`);
   const harnessAnswered = answered.filter((p) => p.agent === id);
-  j.check("no permission needed the harness to answer", harnessAnswered.length === 0, JSON.stringify(harnessAnswered.map((p) => p.name)));
+  // A pending Bash(awt ...) is a finding (unverified fact 1), not a failure: shell requests are the person's to answer. The plugin's own
+  // tool and the node write must never wait for a person.
+  const blocking = harnessAnswered.filter((p) => /awt_resume/.test(p.name) || /plan\.md|scratch/.test(`${p.name} ${p.description}`));
+  j.check("no permission for awt_resume or the plan.md write needed the harness to answer", blocking.length === 0, JSON.stringify(blocking.map((p) => p.name)));
   for (const p of harnessAnswered) j.note(`FINDING: harness had to allow a pending permission: ${p.name}`);
   const bashAwt = perms.filter((p) => /awt/.test(JSON.stringify(p.payload.request.input ?? "")) && /bash|shell/i.test(p.payload.request.name + p.payload.request.kind));
   if (bashAwt.length) j.note(`FINDING (unverified fact 1): ${bashAwt.length} permission request(s) for Bash(awt ...)`);
-  const rc = receiptsOf(tl);
+  // The receipt is appended after the plugin's own awt calls, a moment after turn.after is logged.
+  let rc = receiptsOf(tl);
+  for (let i = 0; i < 15 && rc.length === 0; i++) { await sleep(1000); rc = receiptsOf(await timeline(id)); }
   j.check("exactly 1 receipt with counts.note == 1", rc.length === 1 && rc[0].data?.counts?.note === 1, JSON.stringify(rc.map((r) => r.data?.counts)));
   return { id, dir, tl };
 }
@@ -213,9 +222,15 @@ async function compactRun(prov: Prov, title: string, compactCmd: string) {
   const a0 = argv().length;
   const id = await run(prov, title, 'Run the shell command: awt note "before compact". Then reply DONE.');
   await send(id, compactCmd);
+  // The plugin sends the brief back when the compacting turn ends; let that turn finish before the next prompt.
+  for (let i = 0; i < 30 && !JSON.stringify(await timeline(id)).includes(COMPACTED_MARK); i++) await sleep(1000);
+  await settle(id);
   const mark = argv().length;
   const t1 = Date.now();
   await send(id, "Continue the parsekit task. First re-read your task brief, then write one more note about what you remember.");
+  // pi's /compact runs outside any turn, so its brief is sent when the next turn ends, a moment after the harness sees the turn end.
+  for (let i = 0; i < 30 && !JSON.stringify(await timeline(id)).includes(COMPACTED_MARK); i++) await sleep(1000);
+  await settle(id);
   const tl = await timeline(id);
   const comp = items(tl).filter((i) => i.type === "compaction");
   const post = argv().slice(mark).filter((x) => x.AWT_BY === id);
@@ -226,8 +241,11 @@ async function compactRun(prov: Prov, title: string, compactCmd: string) {
   const ci = all.findIndex((i) => i.type === "compaction");
   const resumeTool = all.slice(ci < 0 ? all.length : ci).filter((i) => i.type === "tool_call" && /awt_resume/.test(i.name));
   // The brief is back when a resume (tool or command) happens after compaction and before any awt write.
-  const brief = resumeTool.length > 0 ? firstWrite < 0 || resumeIdx < 0 || resumeIdx < firstWrite : resumeIdx >= 0 && (firstWrite < 0 || resumeIdx < firstWrite);
-  return { id, tl, comp, brief, post, t1, resumeTool: resumeTool.length, receipts: receiptsOf(tl) };
+  const afterCompaction = all.slice(ci < 0 ? all.length : ci);
+  const sentBack = afterCompaction.some((i) => i.type === "user_message" && String(i.text ?? "").startsWith(COMPACTED_MARK));
+  const brief = sentBack || (resumeTool.length > 0 ? firstWrite < 0 || resumeIdx < 0 || resumeIdx < firstWrite : resumeIdx >= 0 && (firstWrite < 0 || resumeIdx < firstWrite));
+  const errs = [...JSON.stringify(tl).matchAll(/\[Error\][^"]{0,160}/g)].map((m) => m[0]);
+  return { id, tl, comp, brief, sentBack, errs, post, t1, resumeTool: resumeTool.length, receipts: receiptsOf(tl) };
 }
 
 test("E-P10 Claude Code: compaction and transcript", { skip: !want("E-P10") }, async () => {
@@ -240,8 +258,8 @@ test("E-P10 Claude Code: compaction and transcript", { skip: !want("E-P10") }, a
   const rows = findFiles(join(st.tmp, "claude", "projects"), (p) => p.endsWith(".jsonl") && !p.includes("/subagents/")).flatMap((f) => readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)));
   j.check("transcripts have system/compact_boundary rows", rows.some((r) => r.type === "system" && (r.subtype === "compact_boundary")), `rows=${rows.length}`);
   j.check("transcripts have isCompactSummary rows", rows.some((r) => r.isCompactSummary === true));
-  j.check("no transcript row contains awt.receipt", !rows.some((r) => JSON.stringify(r).includes("awt.receipt")));
-  j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
+  j.check("no transcript row contains the receipt kind", !rows.some((r) => /awt[.-]receipt/.test(JSON.stringify(r))));
+  j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} sentBack=${r.sentBack} errors=${JSON.stringify(r.errs)} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
   j.finish();
 });
 
@@ -284,11 +302,11 @@ test("E-P13 opencode: compaction and transcript", { skip: !want("E-P13") }, asyn
   const runs = await Promise.all(Array.from({ length: RUNS }, (_, i) => compactRun("opencode", `oc3-${i}`, "/compact")));
   j.check("a compaction timeline item (every run)", runs.filter((r) => r.comp.length > 0).length === RUNS, `${runs.filter((r) => r.comp.length > 0).length}/${RUNS}`);
   j.check("a part with data.type = compaction", Number(sql("select count(*) from part where json_extract(data,'$.type')='compaction'")) >= RUNS);
-  j.check("session.time_compacting set", Number(sql("select count(*) from session where time_compacting is not null")) >= 1);
+  j.note(`session.time_compacting set on ${sql("select count(*) from session where time_compacting is not null")} sessions (opencode 1.19.3 records a compaction part, not this column, for /compact)`);
   const ok = runs.filter((r) => r.brief).length;
   j.check(`brief returns in at least ${Math.ceil(RUNS * 0.8)} of ${RUNS} runs`, ok >= Math.ceil(RUNS * 0.8), `${ok}/${RUNS}`);
   j.note("system prompt after compaction: SKIP (opencode keeps no request log in 1.19.3 that the harness can read)");
-  j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
+  j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} sentBack=${r.sentBack} errors=${JSON.stringify(r.errs)} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
   j.finish();
 });
 
@@ -318,30 +336,40 @@ test("E-P16 pi: compaction and transcript", { skip: !want("E-P16") }, async () =
   const files = findFiles(join(st.tmp, "pi", "sessions"), (p) => p.endsWith(".jsonl"));
   const rows = files.flatMap((f) => readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)));
   const comp = rows.filter((r) => r.type === "compaction");
-  j.check("session files have compaction entries with firstKeptEntryId and tokensBefore", comp.length > 0 && comp.every((c) => c.firstKeptEntryId && c.tokensBefore !== undefined), `entries=${comp.length}`);
+  // pi refuses to compact a session that is too small ("Nothing to compact") but Paseo still shows the compaction items; then there is nothing to check in the files.
+  const refused = runs.some((r) => r.errs.some((e) => /Nothing to compact|Already compacted/.test(e)));
+  if (refused && comp.length === 0) j.note(`FINDING: pi refused /compact in a small session (${runs.flatMap((r) => r.errs)[0]}); no compaction entry could be written, so the session-file check is skipped`);
+  else j.check("session files have compaction entries with firstKeptEntryId and tokensBefore", comp.length > 0 && comp.every((c) => c.firstKeptEntryId && c.tokensBefore !== undefined), `entries=${comp.length}`);
   const idsOk = runs.every((r) => { const p = persistence(r.id); const f = p.nativeHandle && existsSync(p.nativeHandle) ? p.nativeHandle : ""; if (!f) return false; const hd = JSON.parse(readFileSync(f, "utf8").split("\n")[0]); return hd.id === p.sessionId; });
   j.check("header id equals persistence.sessionId (every run)", idsOk);
   const ok = runs.filter((r) => r.brief).length;
   j.check(`brief returns in at least ${Math.ceil(RUNS * 0.8)} of ${RUNS} runs`, ok >= Math.ceil(RUNS * 0.8), `${ok}/${RUNS}`);
-  j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
+  j.note(`per run: ${runs.map((r) => `${r.id.slice(0, 6)} comp=${r.comp.map((c) => c.status).join("/")} resumeTool=${r.resumeTool} sentBack=${r.sentBack} errors=${JSON.stringify(r.errs)} post=${r.post.map((x) => x.argv[0]).join(",")}`).join(" | ")}`);
   j.finish();
 });
+
+/** The labels Paseo stored for an agent (`paseo ls` and `paseo inspect` do not print them). */
+function labelsOf(id: string): Record<string, string> {
+  const walk = (d: string): string => { if (!existsSync(d)) return ""; for (const e of readdirSync(d, { withFileTypes: true })) { const p = join(d, e.name); if (e.isDirectory()) { const r = walk(p); if (r) return r; } else if (e.name === `${id}.json`) return p; } return ""; };
+  const f = walk(join(st.home, "agents"));
+  return f ? JSON.parse(readFileSync(f, "utf8")).labels ?? {} : {};
+}
 
 test("E-P17 Paseo-level subagent started by a real agent", { skip: !want("E-P17") }, async () => {
   const j = new Journey("E-P17", "claude", "cc4");
   const id = await run("claude", "cc4", `Use the Paseo create_agent tool to start a subagent in this workspace (provider claude, model ${MODEL.claude}) that runs: awt note "kid via paseo". Wait for it to finish, then reply DONE.`);
-  await sleep(5000);
-  const kids = agents().filter((a) => a.id !== id && a.name !== "cc4");
-  const kid = kids.find((a) => /kid|awt note/.test(JSON.stringify(a)) || true);
-  j.check("a child agent exists", !!kid, JSON.stringify(agents().map((a) => a.name)));
+  // The child is its own agent in default mode: its Bash(awt ...) request waits for a person (a finding, as in E-P8). Answer it, then wait for the child.
+  let kid: any;
+  for (let i = 0; i < 30 && !kid; i++) { kid = agents().find((a) => a.id !== id && labelsOf(a.id)["paseo.parent-agent-id"] === id); if (!kid) await sleep(1000); }
+  j.check("a child agent exists with label paseo.parent-agent-id = cc4's id", !!kid, JSON.stringify(agents().map((a) => a.name)));
   if (kid) {
-    const labels = JSON.stringify(JSON.parse(px("inspect", kid.id, "--json") || "{}"));
-    j.check("child label paseo.parent-agent-id = cc4", labels.includes(id) && /paseo\.parent-agent-id/.test(labels), labels.slice(0, 300));
+    await settle(kid.id);
+    for (let i = 0; i < 20 && receiptsOf(await timeline(kid.id)).length === 0; i++) await sleep(1000);
     const pdir = nodeDir(id), kdir = nodeDir(kid.id);
     j.check("child's node sits under cc4's node", !!kdir && kdir.startsWith(join(pdir, "agents") + "/"), `${kdir.replace(st.tmp, "$T")}`);
-    const kt = await timeline(kid.id);
-    const kr = receiptsOf(kt);
+    const kr = receiptsOf(await timeline(kid.id));
     j.check("child's receipt: counts.note == 1, counts.state == 0", kr.length >= 1 && kr[0].data.counts.note === 1 && (kr[0].data.counts.state ?? 0) === 0, JSON.stringify(kr.map((r) => r.data.counts)));
+    j.note(`child permission requests the harness answered: ${answered.filter((p) => p.agent === kid.id).map((p) => p.name).join(",") || "none"}`);
   }
   j.finish();
 });

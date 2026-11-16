@@ -7,7 +7,7 @@ import type { PluginHookAgent, PluginHookContext, PluginServerContext } from "@g
 import { awt, parseJson, withSignal } from "./awt.js";
 import type { AwtConfig } from "./config.js";
 import { readConfig } from "./config.js";
-import { NUDGE, withBlock } from "./prompt.js";
+import { NUDGE, afterCompaction, withBlock } from "./prompt.js";
 import { Tree, clean, cut } from "./tree.js";
 import { readProjects } from "./projects.js";
 import { readReceipt } from "./receipt.js";
@@ -29,6 +29,26 @@ export function lastAssistantText(page: unknown): string | null {
   // A streamed reply can arrive as several items with one messageId: join them.
   const text = last.id === undefined ? last.text : found.filter((f) => f.id === last.id).map((f) => f.text).join("");
   return text.trim() ? text : null;
+}
+
+/**
+ * The newest completed compaction on a timeline page: a `compaction` item with `status: "completed"`. Claude Code, opencode and pi
+ * all show a compaction to Paseo this way. `seq` is the entry's `seqEnd` (Paseo 0.15.4) or `seq` when the page has one; `inLastTurn` is true when
+ * no user message comes after it (it happened during, or as, the turn that just ended).
+ */
+export function lastCompaction(page: unknown): { seq: number | null; inLastTurn: boolean } | null {
+  let found: { seq: number | null; inLastTurn: boolean } | null = null;
+  const walk = (v: unknown, depth: number, seq: number | null): void => {
+    if (depth > 6 || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) return void v.forEach((x) => walk(x, depth + 1, seq));
+    const o = v as Record<string, unknown>;
+    const here = typeof o.seqEnd === "number" ? o.seqEnd : typeof o.seq === "number" ? o.seq : seq;
+    if (o.type === "user_message") found &&= { ...found, inLastTurn: false };
+    else if (o.type === "compaction" && o.status === "completed") found = { seq: here, inLastTurn: true };
+    else Object.values(o).forEach((x) => walk(x, depth + 1, here));
+  };
+  walk(page, 0, null);
+  return found;
 }
 
 type Log = (message: string) => void;
@@ -127,6 +147,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   const withDir = new Set<string>();
   /** When each agent was last nudged. It is nudged again only after it has recorded state since. */
   const nudgedAt = new Map<string, number>();
+  /** The `seq` of the compaction each agent last got its brief back for (never twice for one). */
+  const compacted = new Map<string, number>();
   /** Parent of each agent seen in open.before, whose request carries labels (the later hooks' agent payload may not). */
   const parents = new Map<string, string>();
   /** After a reload withDir is empty; an agent that already has a node is still tracked. */
@@ -236,6 +258,33 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     return node;
   };
 
+  /**
+   * Paseo gives a plugin no hook at compaction and no way to put text into the next prompt. What it does show is the
+   * `compaction` item, so when a turn ends with a compaction the agent has not had its brief back for, the plugin sends the brief
+   * into the chat. A compaction that came before the turn's own user message (pi's `/compact` runs outside any turn) is caught
+   * here too, one turn late. True when it sent the brief.
+   */
+  const briefAfterCompaction = async (id: string, ctx: PluginHookContext): Promise<boolean> => {
+    const ref = ctx.paseo.agents.ref(id);
+    const c = lastCompaction(await ref.timeline.refetch({ direction: "tail", limit: 50 }));
+    if (!c) return false;
+    const seen = compacted.get(id);
+    // Without a seq (not expected) only a compaction inside this turn counts, so a page that repeats cannot send twice.
+    if (c.seq === null ? !c.inLastTurn : seen !== undefined && c.seq <= seen) return false;
+    // After a plugin reload `seen` is empty; an old compaction then gets its brief once more, which is harmless.
+    const r = await tree.onNode(`paseo:agent/${id}`, (node) => awt(cfg, node, ["resume"], id));
+    if (!r || r.code !== 0 || !r.stdout.trim()) return false;
+    if (c.seq !== null) compacted.set(id, c.seq);
+    try {
+      await ref.send(afterCompaction(r.stdout));
+    } catch (error) {
+      if (seen === undefined) compacted.delete(id);
+      else compacted.set(id, seen);
+      throw error;
+    }
+    return true;
+  };
+
   const awtResume = defineAgentTool({
     name: "awt_resume",
     title: "awt resume",
@@ -304,6 +353,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     const started = turnStart.get(agent.id);
     turnStart.delete(agent.id);
     await safe(log, "agent.turn.after", undefined, async () => {
+      if (outcome.kind === "completed" && !parentOf(agent) && (await tracked(agent.id)) && (await briefAfterCompaction(agent.id, ctx))) return;
       if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !(await tracked(agent.id))) return;
       if (!cfg.nudge && !cfg.autoHandoff) return;
       const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
@@ -363,10 +413,14 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     });
   }));
 
-  // The one permission the plugin answers: an agent touching its own node dir, which is always outside its cwd. Anything else
-  // (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
+  // The permissions the plugin answers: its own awt_resume tool (it only reads the caller's brief), and an agent touching its own
+  // node dir, which is always outside its cwd. Anything else (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
   add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
     await safe(log, "agent.permission.before", undefined, async () => {
+      if (request.name === "awt_resume" || request.name === "mcp__paseo__awt_resume") {
+        await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+        return;
+      }
       const targets = permissionTargets(request as Parameters<typeof permissionTargets>[0]);
       if (!targets) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);
