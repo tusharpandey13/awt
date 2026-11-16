@@ -1,6 +1,6 @@
 # store.db schema
 
-`$AWT_STORE/store.db` is SQLite, derived only: `awt ingest --rebuild` deletes it and builds it again from the canonical JSONL under `$AWT_STORE/log/` and the node logs (`.awt/events.jsonl`). Nothing is written to it that cannot be rebuilt. Read it with `sqlite3 -readonly`, DuckDB `ATTACH ... (TYPE sqlite, READ_ONLY)` or any SQLite client. Schema version 1 (`schema_meta.schema_version`); a version change means a rebuild, never a migration.
+`$AWT_STORE/store.db` is SQLite, derived only: `awt ingest --rebuild` deletes it and builds it again from the canonical JSONL under `$AWT_STORE/log/` and the node logs (`.awt/events.jsonl`). Nothing is written to it that cannot be rebuilt. Read it with `sqlite3 -readonly`, DuckDB `ATTACH ... (TYPE sqlite, READ_ONLY)` or any SQLite client. Schema version 2 (`schema_meta.schema_version`); a version change means a rebuild, never a migration.
 
 **Naming.** Where an OpenTelemetry GenAI attribute fits, the column is that attribute without the `gen_ai.` prefix, dots to underscores. **Semconv version pinned: 1.37.0** (`schema_meta.semconv_version`). The GenAI conventions are in development status; a column named for an attribute follows the pinned version, not later renames. Every other column is awt-specific.
 
@@ -35,21 +35,21 @@
 | `node_id` | | set only when `cwd` equals the real path of exactly one node, else null |
 | `join_confidence` | | `cwd` when `node_id` is set, else null (decision 4) |
 | `cwd` | | first `cwd` seen |
-| `request_model` | `gen_ai.request.model` | first assistant `message.model` |
+| `request_model` | `gen_ai.request.model` | first assistant `message.model` (`<synthetic>` ignored) |
 | `started_at`, `ended_at` | | first and last record timestamp |
 | `source`, `adapter` | | `claude`, adapter version |
 
 ### turns (L6)
-`turn_id` (`<session_id>:<n>`), `session_id`, `seq` (0-based), `started_at`, `ended_at` (last record timestamp inside the turn), `outcome` (null: not inferable from transcripts), `paseo_turn` (0: inferred from user-message boundaries).
+`turn_id` (`<session_id>:<n>`), `session_id`, `seq` (0-based), `started_at`, `ended_at` (last record timestamp inside the turn), `outcome` (null: not inferable from transcripts), `paseo_turn` (0: inferred from user-message boundaries), `request_model` and `response_model` (first and last assistant `message.model` in the turn; `<synthetic>` ignored).
 
 ### messages (L7)
-Primary key `(session_id, message_id)`. `message_id` is the record `uuid`. `turn_id` is null before the first prompt. `seq` is the canonical row number. `role`, `ts`, `text` (text blocks joined by newline; whole), `parent_id` (`parentUuid`), `response_finish_reasons` (`gen_ai.response.finish_reasons`; a JSON array with the record's `stop_reason`, or null).
+Primary key `(session_id, message_id)`. `message_id` is the record `uuid`. `turn_id` is null before the first prompt. `seq` is the canonical row number. `role`, `ts`, `text` (text blocks joined by newline; whole), `parent_id` (`parentUuid`), `response_finish_reasons` (`gen_ai.response.finish_reasons`; a JSON array with the record's `stop_reason`, or null), `response_model` (`gen_ai.response.model`: the assistant record's `message.model`, null for user messages; a model switch inside a session shows as two values).
 
 ### tool_calls (L7)
 Primary key `(session_id, tool_call_id)`. `tool_call_id` (`gen_ai.tool.call.id`), `message_id` (the assistant message that made the call), `tool_name` (`gen_ai.tool.name`), `args` (`gen_ai.tool.call.arguments`: JSON, sorted keys), `result_excerpt` (first 4,096 characters of the result), `result_sha256` (of the whole result), `is_error` (0/1), `started_at` (call message time), `ended_at` (result message time).
 
 ### records (any level)
-One row per valid line of every node log. `record_id` (the row's own id, `d-`, `q-`, `n-`, when there is one and it is unused, else `<node_id>#<line index among valid rows>`; effect rows always use the second form), `node_id`, `type`, `ts`, `by`, `fields` (the whole row as JSON, `json_extract` reads any field), `session_id` (always null: no deterministic join exists), `origin` (`person` or `plugin` when `by` says so, else `agent`).
+One row per valid line of every node log. `record_id` (the row's own id, `d-`, `q-`, `n-`, when there is one and it is unused, else `<node_id>#<line index among valid rows>`; effect rows always use the second form), `node_id`, `type`, `ts`, `by`, `fields` (the whole row as JSON, `json_extract` reads any field), `origin` (`person` or `plugin` when `by` says so, else `agent`), `model` (NOT NULL: the row's `model`; `unknown:unset` when written without one, `unknown:legacy` for rows older than model tracking), `session_id` and `turn_id` (set when the row's `session` field (`AWT_SESSION`) or `by` names a session or conversation id, and for the turn also when `ts` lies inside the session's span; else null).
 
 ### effects (any level)
 One row per effect id, folded from its rows: `effect_id`, `node_id`, `target`, `key`, `state` (`planned`, `begun`, `sent`, `unknown`, `dropped`), `attempt`, `origin` (`declared`; `detected` arrives with detection), `rule` (null until then), `begun_by`, `begun_at` (from the first `begun` row), `sent_ref` (`ref` of the last `sent` row), `tool_call_id` (null until detection).

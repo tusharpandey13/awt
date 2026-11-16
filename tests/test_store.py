@@ -64,7 +64,7 @@ class TestTables(Store):
                   "schema_meta", "canonical", "fts_text"):
             self.assertIn(t, names)
         meta = dict(self.q("select key, value from schema_meta"))
-        self.assertEqual(meta["schema_version"], "1")
+        self.assertEqual(meta["schema_version"], "2")
         self.assertEqual(meta["semconv_version"], "1.37.0")
 
     def test_sessions_turns_messages_tool_calls(self):
