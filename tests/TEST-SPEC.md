@@ -197,8 +197,10 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 | D1, D2 | `doctor` warns for each detected provider without the hook (none for absent providers, never `fail`), and says `ok` after install |
 | P1, P2 | The opencode plugin exposes only `experimental.session.compacting`, pushes the framed brief (with a decision's text), and pushes nothing without `AWT_DIR` |
 | P3, P4, P5 | The pi extension adds `awt_record` only after `session_compact` (or a resumed branch with a `compaction` entry), keeps the text stable across turns, and does nothing without `AWT_DIR` |
+| L1 (`test_hooks_e2e.py`, `AWT_E2E_LOCAL=1`) | Real opencode 1.19.3 with the plugin installed, a fake OpenAI-compatible model (`tests/fake/openai-compat.mjs`), `POST /session/:id/summarize`: the one request made carries the frame and the decision token; the session's messages hold no awt text and only opencode's own compaction pair |
+| L2 (same) | Real pi 1.5.0 over RPC: after `compact`, the next request's system message carries the frame and the token, one request was made by the compaction itself, and no user message carries the record |
 
-Gated (not run here): a real opencode or pi session compacting against a model, and the Claude Code journey on Haiku (`AWT_E2E_PAID=1`, `paseo-plugin/test/paid.test.ts`, scenarios W, C and the controls).
+Gated (not run by default): L1 and L2 (`AWT_E2E_LOCAL=1`, unpaid, need opencode or pi installed; opencode fetches its provider package), a real model compacting and continuing through opencode or pi, and the Claude Code journey on Haiku (`AWT_E2E_PAID=1`, `paseo-plugin/test/paid.test.ts`, scenarios W, C and the controls).
 
 ## Ingest (`test_ingest.py`; chaos `ingest-*`, `save-removed-and-staged-scan`)
 
