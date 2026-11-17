@@ -1258,15 +1258,6 @@ def write_atomic(path, text, mode=0o644):
     os.replace(tmp, path)
 
 
-def merge_claude_settings(path, uninstall):
-    """Add or remove the SessionStart `compact` hook. Returns what happened; every other key and every other hook stays as it was,
-    even in an entry that also holds awt's hook. A symlinked settings file is followed: the target is written."""
-    path = os.path.realpath(path)
-    for attempt in range(3):
-        try:
-            with open(path, encoding="utf-8") as g:
-                raw = g.read()
-            sig = os.stat(path)
 @contextlib.contextmanager
 def dir_lock(d):
     """Exclusive flock on the directory itself, so awt writers (several `init --hooks` at once) take turns and no lock file is left behind.
@@ -1284,13 +1275,22 @@ def dir_lock(d):
         os.close(fd)
 
 
-            sig = (sig.st_mtime_ns, sig.st_size)
+def merge_claude_settings(path, uninstall):
     path = os.path.realpath(path)
     with dir_lock(os.path.dirname(path)):
         return merge_claude_settings_locked(path, uninstall)
 
 
 def merge_claude_settings_locked(path, uninstall):
+    """Add or remove the SessionStart `compact` hook. Returns what happened; every other key and every other hook stays as it was,
+    even in an entry that also holds awt's hook. A symlinked settings file is followed: the target is written."""
+    path = os.path.realpath(path)
+    for attempt in range(3):
+        try:
+            with open(path, encoding="utf-8") as g:
+                raw = g.read()
+            sig = os.stat(path)
+            sig = (sig.st_mtime_ns, sig.st_size)
             st = json.loads(raw) if raw.strip() else {}
         except FileNotFoundError:
             raw, sig, st = None, None, {}

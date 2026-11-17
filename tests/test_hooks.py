@@ -154,7 +154,6 @@ class Hooks(test_awt.Base):
         r = self.run_hook(self.hook_cmd(), awt_dir=self.root)
         self.assertLessEqual(len(r.stdout), 4400 + len(FRAME) + 1)
 
-    def test_g4_silent_when_the_node_is_gone_or_awt_is_missing(self):
     def test_g9_framed_brief_keeps_the_newest_notes(self):
         self.init()
         for i in range(8):
@@ -180,6 +179,7 @@ class Hooks(test_awt.Base):
         self.assertLessEqual(len(r.stdout), 4400 + len(FRAME) + 1)
         self.assertIn("## Recent notes", r.stdout)
 
+    def test_g4_silent_when_the_node_is_gone_or_awt_is_missing(self):
         self.init()
         self.ok("decide", "token-zq41", "--why", "test")
         cmd = self.hook_cmd()
@@ -267,12 +267,12 @@ class Hooks(test_awt.Base):
         os.makedirs(self.oc)
         self.install("all")
         self.assertTrue(all(x.startswith("ok ") for x in self.doctor_lines()))
-        for p in (self.settings, os.path.join(self.oc, "plugins", "awt-context.js"), os.path.join(self.pi, "extensions", "awt-context.ts")):
+        for p in (self.settings, os.path.join(self.cx, "hooks.json"), os.path.join(self.oc, "plugins", "awt-context.js"), os.path.join(self.pi, "extensions", "awt-context.ts")):
             test = test_awt.slurp(p)
             with open(p, "w") as g:
-                g.write(test.replace(shlex.quote(test_awt.AWT) if p == self.settings else json.dumps(test_awt.AWT), "/no/such/awt" if p == self.settings else '"/no/such/awt"'))
+                g.write(test.replace(shlex.quote(test_awt.AWT) if p.endswith(".json") else json.dumps(test_awt.AWT), "/no/such/awt" if p.endswith(".json") else '"/no/such/awt"'))
         lines = self.doctor_lines()
-        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(len(lines), 4, lines)
         self.assertTrue(all(x.startswith("warn ") and "/no/such/awt" in x and "ask the person" in x for x in lines), lines)
 
     def test_l1_backups_do_not_overwrite_each_other_and_are_pruned(self):
@@ -360,6 +360,14 @@ class Hooks(test_awt.Base):
             self.assertTrue(any("claude compaction hook missing" in x for x in r.stdout.splitlines()), r.stdout)
 
     # ---- doctor (D1-D2)
+    def test_d0_doctor_outside_a_task_reports_machine_checks_and_exits_0(self):
+        r = self.ok("doctor", root="")
+        self.assertIn("ok no task root here: per-node checks skipped", r.stdout)
+        self.assertIn("--dir <node>", r.stdout)
+        self.assertNotIn("fail", r.stdout)
+        r = self.bad("doctor", "--dir", os.path.join(self.tmp, "nowhere"), root="")
+        self.assertIn("fail no task root", r.stdout)
+
     def doctor_lines(self):
         r = self.awt("doctor", root="")
         return [x for x in r.stdout.splitlines() if "compaction hook" in x]
@@ -378,7 +386,7 @@ class Hooks(test_awt.Base):
         os.makedirs(self.oc)
         self.install("all")
         lines = self.doctor_lines()
-        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(len(lines), 4, lines)
         self.assertTrue(all(x.startswith("ok ") for x in lines), lines)
         self.ok("init", "--hooks", "all", "--uninstall", root="")
         self.assertTrue(all(x.startswith("warn ") for x in self.doctor_lines()))
@@ -437,14 +445,6 @@ class PluginFiles(test_awt.Base):
             const ev = () => ({ systemPromptOptions: { sections: {} } })
             const before = ev(); await on.before_agent_start(before)
             await on.session_start({}, { sessionManager: { getBranch: () => %s } })
-    def test_d0_doctor_outside_a_task_reports_machine_checks_and_exits_0(self):
-        r = self.ok("doctor", root="")
-        self.assertIn("ok no task root here: per-node checks skipped", r.stdout)
-        self.assertIn("--dir <node>", r.stdout)
-        self.assertNotIn("fail", r.stdout)
-        r = self.bad("doctor", "--dir", os.path.join(self.tmp, "nowhere"), root="")
-        self.assertIn("fail no task root", r.stdout)
-
             const resumed = ev(); await on.before_agent_start(resumed)
             await on.session_compact({})
             const after = ev(); await on.before_agent_start(after)
