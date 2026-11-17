@@ -18,6 +18,7 @@ Companion to `SPEC.md`. It covers the node tree, the Paseo plugin and `migrate-p
 | `tests/test_recall.py` | Active recall: `find --like`, related lines on `decide`/`ask`, `list --since`, the template and prompt pointers | always |
 | `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots | always |
 | `tests/test_detect.py` | Detected effects: rules, keys, resend `ask`, declared matching, secrets, silence | always |
+| `tests/test_hooks.py` | Compaction context: settings merge, `AWT_DIR` gate, framing line, doctor, the opencode plugin and pi extension loaded by node against fake hosts | always (the node part needs Node) |
 | `tests/test_docs.py` | Existing. Extended: every `awt` command shown in the docs and the tree-form `AGENTS.md` block uses real verbs and flags | always |
 | `tests/chaos.py` | Existing. New attacks in groups `tree`, `migrate`; the plugin attacks (C30-C40) are in `paseo-plugin/test/resilience.test.ts` | `--quick` in CI, full nightly |
 | `paseo-plugin/test/*.test.ts` | Plugin hooks, driven by recorded payloads against real `awt` | always (needs Node) |
@@ -175,6 +176,29 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R3b The plugin block is at most 260 characters and names `BRIEF.md` and `awt_resume`; `find --like` moved to `help agents`.
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
+
+## Compaction context (`test_hooks.py`; SPEC, Context after compaction)
+
+| ID | Proves |
+|---|---|
+| H1 | `init --hooks claude` creates one `SessionStart` entry with `matcher: compact`, an `AWT_DIR` gate and `resume --hook --framed`; no backup for a new file, no temp left |
+| H2 | A second install changes nothing and makes no backup |
+| H3 | Other keys, other `SessionStart` hooks and other events are kept as they were |
+| H4 | An existing file is backed up before the change |
+| H5, H5b | `--uninstall` removes only awt's entry, leaves no empty `hooks`, and is idempotent |
+| H6, H6b | A file that is not JSON is refused untouched; a moved `awt` updates the entry in place |
+| H7 | With `HOME` and the config variables in a temp dir, nothing else is written |
+| H8 | `--hooks` with `--goal` etc., and `--uninstall` alone, are exit 2 |
+| G1 | Running the hook command without `AWT_DIR`, even inside a task directory, prints nothing |
+| G2 | With `AWT_DIR` it prints the frame line, then exactly `resume`; the frame has no instruction words |
+| G3 | At max fill the output is at most 4,400 plus the frame line |
+| G4 | A missing node or a missing `awt` binary: exit 0, no output, no stderr |
+| G5, G6 | `--framed` without `--hook` is exit 2; plain `resume --hook` is unchanged |
+| D1, D2 | `doctor` warns for each detected provider without the hook (none for absent providers, never `fail`), and says `ok` after install |
+| P1, P2 | The opencode plugin exposes only `experimental.session.compacting`, pushes the framed brief (with a decision's text), and pushes nothing without `AWT_DIR` |
+| P3, P4, P5 | The pi extension adds `awt_record` only after `session_compact` (or a resumed branch with a `compaction` entry), keeps the text stable across turns, and does nothing without `AWT_DIR` |
+
+Gated (not run here): a real opencode or pi session compacting against a model, and the Claude Code journey on Haiku (`AWT_E2E_PAID=1`, `paseo-plugin/test/paid.test.ts`, scenarios W, C and the controls).
 
 ## Ingest (`test_ingest.py`; chaos `ingest-*`, `save-removed-and-staged-scan`)
 
