@@ -1,0 +1,29 @@
+{
+ "id": "agt_cc1",
+ "provider": "claude",
+ "cwd": "/work/parsekit",
+ "workspaceId": "ws_parsekit",
+ "createdAt": "2026-10-23T12:23:00.000Z",
+ "config": {
+  "model": "m",
+  "mcpServers": {
+   "paseo": {
+    "type": "http",
+    "url": "http://127.0.0.1:1/mcp",
+    "headers": {
+     "Authorization": "Bearer PLACEHOLDER"
+    }
+   }
+  }
+ },
+ "persistence": {
+  "provider": "claude",
+  "sessionId": "3f0c1a2b-0000-4000-8000-00000000aaaa",
+  "nativeHandle": "3f0c1a2b-0000-4000-8000-00000000aaaa",
+  "metadata": {
+   "cwd": "/work/parsekit"
+  }
+ },
+ "title": "parsekit work",
+ "labels": {}
+}

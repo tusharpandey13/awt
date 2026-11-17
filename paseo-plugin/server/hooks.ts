@@ -11,6 +11,7 @@ import { NUDGE, withBlock } from "./prompt.js";
 import { Tree, clean, cut } from "./tree.js";
 import { readProjects } from "./projects.js";
 import { readReceipt } from "./receipt.js";
+import { Pipe } from "./pipe.js";
 import { RECEIPT_KIND, RECEIPT_VERSION } from "../shared/receipt.js";
 import { RESEND_KIND, RESEND_VERSION } from "../shared/resend.js";
 import { callEvents, permissionEvent, resendReason, type DetectEvent } from "./detect.js";
@@ -162,13 +163,22 @@ function modelTracker() {
   };
 }
 
-export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): () => void {
+/** What a permission request touches: a file path or a command, as Paseo shows it. */
+function permissionTarget(request: unknown): string | undefined {
+  const d = (request as { detail?: Record<string, unknown> }).detail;
+  const v = d && (d.filePath ?? d.command);
+  return typeof v === "string" ? v : Array.isArray(v) ? v.join(" ") : undefined;
+}
+
+export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): (() => void) & { idle: () => Promise<void> } {
   const cfg = readConfig(env);
   const models = modelTracker();
   const asked = new Map<string, DetectEvent>(); // permission requests awt recorded, until they are answered
   const tree = new Tree(cfg, log);
   if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, off, changes or on; showing receipts`);
   const turnStart = new Map<string, number>();
+  const pipe = new Pipe(cfg, log);
+  const answeredByPlugin = new Set<string>();
   /** Tool call ids already sent to `awt ingest --event`, per agent (the last 500). awt ignores a repeat anyway; this saves the process. */
   const calls = new Map<string, Set<string>>();
   /** Agents whose last open.before gave them an AWT_DIR. Only these are nudged. */
@@ -357,6 +367,13 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     const started = turnStart.get(agent.id);
     turnStart.delete(agent.id);
     const model = await models.of(agent, ctx); // re-read every turn: a model switch shows in the writes that follow
+    // The Paseo pipe: this turn's outcome and model, for the store. Detached: it never delays or fails the turn.
+    if (pipe.on) {
+      const ev = { event: "turn" as const, eid: `turn:${agent.id}:${turnId ?? started ?? Date.now()}`, agentId: agent.id, turnId: turnId ?? undefined, provider: agent.provider, model,
+        startedAt: started === undefined ? undefined : new Date(started).toISOString(), endedAt: new Date().toISOString(), outcome: outcome.kind,
+        code: outcome.kind === "failed" ? outcome.error.code : undefined };
+      pipe.add(ev, true);
+    }
     await safe(log, "agent.turn.after", undefined, () => withModel(model, async () => {
       if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !(await tracked(agent.id))) return;
       if (!cfg.nudge && !cfg.autoHandoff) return;
@@ -433,7 +450,21 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
 
   // The one permission the plugin answers: an agent touching its own node dir, which is always outside its cwd. Anything else
   // (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
+  add(server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, ctx) => {
+    const mine = answeredByPlugin.delete(`${agent.id}:${requestId}`);
+    pipe.add({ event: "permission_resolved", eid: `permres:${agent.id}:${requestId}`, agentId: agent.id, requestId, decision: resolution.behavior, decidedBy: mine ? "plugin" : "person", ts: new Date().toISOString() });
+    // A person denied a request awt recorded as begun: that call never ran, so the effect goes back to not-sent (awt: phase "denied"). A restart forgets the pending requests, and such an effect stays begun for `effect mark`.
+    const ev = asked.get(requestId);
+    asked.delete(requestId);
+    if (!ev || resolution?.behavior !== "deny") return;
+    await safe(log, "agent.permission.after detect", undefined, async () => withModel(await models.of(agent, ctx), async () => {
+      const node = await tree.find(`paseo:agent/${agent.id}`);
+      if (node) await awt(cfg, node, ["ingest", "--event", "--hook"], agent.id, JSON.stringify({ ...ev, phase: "denied" }));
+    }));
+  }));
+
   add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
+    pipe.add({ event: "permission", eid: `perm:${agent.id}:${request.id}`, agentId: agent.id, requestId: request.id, provider: agent.provider, tool: request.name, target: permissionTarget(request), ts: new Date().toISOString() });
     // Detected effects: a shell or MCP request that awt labels as outbound is recorded; a resend is left for the person with a note. Never denies.
     await safe(log, "agent.permission.before detect", undefined, async () => withModel(await models.of(agent, ctx), async () => {
       const ev = permissionEvent(agent, request);
@@ -453,20 +484,16 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       if (!targets) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);
       if (!node || !insideNode(node, targets)) return;
-      await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+      answeredByPlugin.add(`${agent.id}:${request.id}`);
+      try {
+        await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+      } catch (error) {
+        answeredByPlugin.delete(`${agent.id}:${request.id}`); // not answered: the person's later answer is the person's
+        throw error;
+      }
     });
   }));
-  // A person denied a request awt recorded as begun: that call never ran, so the effect goes back to not-sent (awt: phase "denied"). A restart forgets the pending requests, and such an effect stays begun for `effect mark`.
-  add(server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, ctx) => {
-    const ev = asked.get(requestId);
-    asked.delete(requestId);
-    if (!ev || resolution?.behavior !== "deny") return;
-    await safe(log, "agent.permission.after detect", undefined, async () => withModel(await models.of(agent, ctx), async () => {
-      const node = await tree.find(`paseo:agent/${agent.id}`);
-      if (node) await awt(cfg, node, ["ingest", "--event", "--hook"], agent.id, JSON.stringify({ ...ev, phase: "denied" }));
-    }));
-  }));
-  return () => removers.forEach((r) => r());
+  return Object.assign(() => (pipe.flush(), removers.forEach((r) => r())), { idle: () => pipe.idle() });
 }
 
 export type { PluginHookAgent };

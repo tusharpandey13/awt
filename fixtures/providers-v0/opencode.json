@@ -1,0 +1,325 @@
+{
+ "session": {
+  "id": "ses_parsekit000001",
+  "project_id": "prj_parsekit",
+  "parent_id": null,
+  "slug": "calm-tree",
+  "directory": "/work/parsekit",
+  "title": "parsekit tokenizer",
+  "version": "1.0.0",
+  "share_url": null,
+  "summary_additions": null,
+  "summary_deletions": null,
+  "summary_files": null,
+  "summary_diffs": null,
+  "revert": null,
+  "permission": null,
+  "time_created": 1792758200000,
+  "time_updated": 1792758209000,
+  "time_compacting": null,
+  "time_archived": null,
+  "workspace_id": null,
+  "path": null,
+  "agent": "build",
+  "model": null,
+  "cost": 0.01,
+  "tokens_input": 30,
+  "tokens_output": 12,
+  "tokens_reasoning": 0,
+  "tokens_cache_read": 0,
+  "tokens_cache_write": 0,
+  "metadata": null
+ },
+ "messages": [
+  {
+   "id": "msg_01",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758200000,
+   "time_updated": 1792758201000,
+   "data": {
+    "role": "user",
+    "time": {
+     "created": 1792758200000
+    },
+    "agent": "build",
+    "model": {
+     "providerID": "testprov",
+     "modelID": "oc-test-1"
+    }
+   }
+  },
+  {
+   "id": "msg_02",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758201000,
+   "time_updated": 1792758202000,
+   "data": {
+    "role": "assistant",
+    "time": {
+     "created": 1792758201000,
+     "completed": 1792758201500
+    },
+    "parentID": "msg_01",
+    "modelID": "oc-test-1",
+    "providerID": "testprov",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/parsekit",
+     "root": "/work/parsekit"
+    },
+    "cost": 0.004,
+    "tokens": {
+     "input": 10,
+     "output": 5,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     },
+     "total": 15
+    },
+    "finish": "tool-calls"
+   }
+  },
+  {
+   "id": "msg_03",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758204000,
+   "time_updated": 1792758205000,
+   "data": {
+    "role": "assistant",
+    "time": {
+     "created": 1792758204000,
+     "completed": 1792758204500
+    },
+    "parentID": "msg_01",
+    "modelID": "oc-test-1",
+    "providerID": "testprov",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/parsekit",
+     "root": "/work/parsekit"
+    },
+    "cost": 0.006,
+    "tokens": {
+     "input": 20,
+     "output": 7,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     },
+     "total": 27
+    },
+    "finish": "stop"
+   }
+  },
+  {
+   "id": "msg_04",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758207000,
+   "time_updated": 1792758208000,
+   "data": {
+    "role": "user",
+    "time": {
+     "created": 1792758207000
+    },
+    "agent": "build",
+    "model": {
+     "providerID": "testprov",
+     "modelID": "oc-test-2"
+    }
+   }
+  },
+  {
+   "id": "msg_05",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758208000,
+   "time_updated": 1792758209000,
+   "data": {
+    "role": "assistant",
+    "time": {
+     "created": 1792758208000,
+     "completed": 1792758209000
+    },
+    "parentID": "msg_04",
+    "modelID": "oc-test-2",
+    "providerID": "testprov",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/parsekit",
+     "root": "/work/parsekit"
+    },
+    "cost": 0.002,
+    "tokens": {
+     "input": 8,
+     "output": 4
+    },
+    "finish": "stop"
+   }
+  }
+ ],
+ "parts": [
+  {
+   "id": "prt_01",
+   "message_id": "msg_01",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758200000,
+   "time_updated": 1792758200010,
+   "data": {
+    "type": "text",
+    "text": "add a tokenizer to parsekit"
+   }
+  },
+  {
+   "id": "prt_02",
+   "message_id": "msg_02",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758201001,
+   "time_updated": 1792758201011,
+   "data": {
+    "type": "step-start",
+    "snapshot": "abc"
+   }
+  },
+  {
+   "id": "prt_03",
+   "message_id": "msg_02",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758201002,
+   "time_updated": 1792758201012,
+   "data": {
+    "type": "reasoning",
+    "text": "check the lexer",
+    "time": {
+     "start": 1792758201002,
+     "end": 1792758201003
+    }
+   }
+  },
+  {
+   "id": "prt_04",
+   "message_id": "msg_02",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758201003,
+   "time_updated": 1792758201013,
+   "data": {
+    "type": "text",
+    "text": "reading lexer.py",
+    "time": {
+     "start": 1792758201003,
+     "end": 1792758201004
+    }
+   }
+  },
+  {
+   "id": "prt_05",
+   "message_id": "msg_02",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758201004,
+   "time_updated": 1792758201014,
+   "data": {
+    "type": "tool",
+    "callID": "call_o1",
+    "tool": "read",
+    "state": {
+     "status": "completed",
+     "input": {
+      "filePath": "lexer.py"
+     },
+     "output": "def lex(): pass",
+     "title": "lexer.py",
+     "metadata": {},
+     "time": {
+      "start": 1792758201004,
+      "end": 1792758201100
+     }
+    }
+   }
+  },
+  {
+   "id": "prt_06",
+   "message_id": "msg_02",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758201200,
+   "time_updated": 1792758201210,
+   "data": {
+    "type": "step-finish",
+    "reason": "tool-calls",
+    "snapshot": "abc",
+    "cost": 0.004,
+    "tokens": {
+     "input": 10,
+     "output": 5
+    }
+   }
+  },
+  {
+   "id": "prt_07",
+   "message_id": "msg_03",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758204001,
+   "time_updated": 1792758204011,
+   "data": {
+    "type": "tool",
+    "callID": "call_o2",
+    "tool": "bash",
+    "state": {
+     "status": "error",
+     "input": {
+      "command": "pytest -q"
+     },
+     "error": "1 failed",
+     "time": {
+      "start": 1792758204001,
+      "end": 1792758205000
+     }
+    }
+   }
+  },
+  {
+   "id": "prt_08",
+   "message_id": "msg_03",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758205100,
+   "time_updated": 1792758205110,
+   "data": {
+    "type": "text",
+    "text": "the zephyr test fails",
+    "time": {
+     "start": 1792758205100,
+     "end": 1792758205200
+    }
+   }
+  },
+  {
+   "id": "prt_09",
+   "message_id": "msg_04",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758207000,
+   "time_updated": 1792758207010,
+   "data": {
+    "type": "text",
+    "text": "now add docs"
+   }
+  },
+  {
+   "id": "prt_10",
+   "message_id": "msg_05",
+   "session_id": "ses_parsekit000001",
+   "time_created": 1792758208500,
+   "time_updated": 1792758209000,
+   "data": {
+    "type": "text",
+    "text": "docs added",
+    "time": {
+     "start": 1792758208500,
+     "end": 1792758209000
+    }
+   }
+  }
+ ]
+}

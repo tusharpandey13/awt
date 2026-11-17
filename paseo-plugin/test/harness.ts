@@ -12,6 +12,12 @@ type Handler = (payload: any, ctx: any) => Promise<any>;
 export interface Rig {
   tmp: string;
   root: string;
+  /** The store the pipe writes to (AWT_STORE). The pipe is off in a rig unless it is given `AWT_PIPE: "1"`. */
+  store: string;
+  /** The model Paseo reports for an agent (`runtimeInfo.model`); an agent not in it reports none. */
+  models: Map<string, string | null>;
+  /** Resolves when every pipe batch sent so far has finished. */
+  idle(): Promise<void>;
   /** The temp file the plugin reads as Paseo's projects.json (AWT_PASEO_PROJECTS). Absent until `writeProjects`. */
   projectsFile: string;
   /** Writes projects.json rows in Paseo's shape (`projectId`, `displayName`, `customName`, `rootPath`, `archivedAt`). */
@@ -26,6 +32,8 @@ export interface Rig {
   /** Plugin timeline rows appended through `agents.ref(id).timeline.append`. Set `failAppend` to make the append throw. */
   appended: { id: string; item: { type: string; id?: string; kind: string; version: number; data: any } }[];
   failAppend: { on: boolean };
+  /** While on, `respondToPermission` throws. */
+  failRespond: { on: boolean };
   /** What the fake daemon reports as an agent's resolved model (`runtimeInfo.model`). Absent: the provider default, unknown to Paseo. Set to null: no snapshot. */
   runtime: Map<string, string | null>;
   call(name: string, payload: unknown): Promise<any>;
@@ -42,7 +50,7 @@ export function rig(extraEnv: Record<string, string | undefined> = {}, workspace
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), "awtplug-")));
   const root = join(tmp, "root");
   const projectsFile = join(tmp, "projects.json");
-  const env: Record<string, string | undefined> = { ...process.env, AWT_DIR: undefined, HOME: tmp, AWT_BIN: AWT, AWT_ROOT: root, AWT_TIMEOUT_MS: "60000", AWT_PASEO_PROJECTS: projectsFile, GIT_CONFIG_GLOBAL: "/dev/null", ...extraEnv };
+  const env: Record<string, string | undefined> = { ...process.env, AWT_DIR: undefined, HOME: tmp, AWT_BIN: AWT, AWT_ROOT: root, AWT_TIMEOUT_MS: "60000", AWT_PASEO_PROJECTS: projectsFile, GIT_CONFIG_GLOBAL: "/dev/null", AWT_STORE: join(tmp, "store"), AWT_PASEO_HOME: join(tmp, "paseo-home"), AWT_PIPE: "0", AWT_PIPE_DELAY_MS: "20", ...extraEnv };
   for (const k of ["AWT_DIR", ...Object.keys(extraEnv)]) if (env[k] === undefined) delete env[k]; // undefined means truly unset
   const hooks = new Map<string, Handler>();
   const logs: string[] = [];
@@ -52,8 +60,10 @@ export function rig(extraEnv: Record<string, string | undefined> = {}, workspace
   const answered: { id: string; requestId: string; behavior: string }[] = [];
   const appended: Rig["appended"] = [];
   const failAppend = { on: false };
+  const failRespond = { on: false };
   const runtime = new Map<string, string | null>();
-  const start = () => registerHooks({ addHook: (name: string, fn: Handler) => (hooks.set(name, fn), () => hooks.delete(name)) } as any, env, (m) => logs.push(m));
+  let stop: { idle: () => Promise<void> } = { idle: async () => {} };
+  const start = () => (stop = registerHooks({ addHook: (name: string, fn: Handler) => (hooks.set(name, fn), () => hooks.delete(name)) } as any, env, (m) => logs.push(m)));
   start();
   // Typed against the SDK, so a mock cannot drift from the real shapes.
   const project: Awaited<ReturnType<PaseoApi["projects"]["list"]>>["projects"][number] = { projectId: "prj_1", projectDisplayName: "parsekit", projectRootPath: "/tmp/parsekit", projectKind: "git" };
@@ -71,12 +81,12 @@ export function rig(extraEnv: Record<string, string | undefined> = {}, workspace
       },
     },
     projects: { list: async () => ({ requestId: "r1", projects: [project] }) },
-    agents: { ref: (id: string) => ({ runtimeInfo: null as unknown, refresh: async function (this: { runtimeInfo: unknown }) { const m = runtime.get(id); this.runtimeInfo = m ? { provider: "claude", sessionId: null, model: m } : null; return null; }, timeline: { append: async (item: Rig["appended"][number]["item"]) => { if (failAppend.on) throw new Error("append refused"); appended.push({ id, item }); return { ok: true }; }, refetch: async () => ({ entries: [...(said.get(id) ?? []).map((text) => ({ item: { type: "assistant_message", text } })), ...(items.get(id) ?? []).map((item) => ({ item }))] }) }, send: async (text: string) => void sent.push({ id, text }), respondToPermission: async (o: { requestId: string; response: { behavior: string } }) => void answered.push({ id, requestId: o.requestId, behavior: o.response.behavior }) }) as unknown as ReturnType<PaseoApi["agents"]["ref"]> },
+    agents: { ref: (id: string) => ({ runtimeInfo: null as unknown, refresh: async function (this: { runtimeInfo: unknown }) { const m = runtime.get(id); this.runtimeInfo = m ? { provider: "claude", sessionId: null, model: m } : null; return null; }, timeline: { append: async (item: Rig["appended"][number]["item"]) => { if (failAppend.on) throw new Error("append refused"); appended.push({ id, item }); return { ok: true }; }, refetch: async () => ({ entries: [...(said.get(id) ?? []).map((text) => ({ item: { type: "assistant_message", text } })), ...(items.get(id) ?? []).map((item) => ({ item }))] }) }, send: async (text: string) => void sent.push({ id, text }), respondToPermission: async (o: { requestId: string; response: { behavior: string } }) => { if (failRespond.on) throw new Error("respond refused"); answered.push({ id, requestId: o.requestId, behavior: o.response.behavior }); } }) as unknown as ReturnType<PaseoApi["agents"]["ref"]> },
   } satisfies Partial<{ [K in keyof PaseoApi]: Partial<PaseoApi[K]> }>;
   const ctx = { paseo, signal: new AbortController().signal };
   const run = (dir: string, args: string[]) => execFileSync(AWT, ["--dir", dir, ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
-    tmp, root, projectsFile, writeProjects: (rows) => writeFileSync(projectsFile, JSON.stringify(rows)), logs, sent, said, items, answered, appended, failAppend, runtime, hooks,
+    tmp, root, store: join(tmp, "store"), runtime, models: runtime, idle: () => stop.idle(), projectsFile, writeProjects: (rows) => writeFileSync(projectsFile, JSON.stringify(rows)), logs, sent, said, items, answered, appended, failAppend, failRespond, hooks,
     restart: () => (hooks.clear(), void start()),
     call: async (name, payload) => {
       const h = hooks.get(name);

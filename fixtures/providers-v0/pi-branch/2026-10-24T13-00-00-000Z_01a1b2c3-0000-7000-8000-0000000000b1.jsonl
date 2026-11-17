@@ -1,0 +1,16 @@
+{"type": "session", "version": 3, "id": "01a1b2c3-0000-7000-8000-0000000000b1", "timestamp": "2026-10-24T13:00:00.000Z", "cwd": "/work/parsekit"}
+{"type": "model_change", "id": "e1", "parentId": null, "timestamp": "2026-10-24T13:00:01.000Z", "provider": "testprov", "modelId": "pi-test-1"}
+{"type": "message", "id": "m1", "parentId": "e1", "timestamp": "2026-10-24T13:00:10.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "add a tokenizer to parsekit"}]}}
+{"type": "message", "id": "m2", "parentId": "m1", "timestamp": "2026-10-24T13:00:12.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "reading lexer.py"}, {"type": "toolCall", "id": "call_b1", "name": "read", "arguments": {"path": "lexer.py"}}], "model": "pi-test-1", "stopReason": "toolUse"}}
+{"type": "message", "id": "m3", "parentId": "m2", "timestamp": "2026-10-24T13:00:13.000Z", "message": {"role": "toolResult", "content": [{"type": "text", "text": "def lex(): pass"}], "toolCallId": "call_b1", "toolName": "read", "isError": false}}
+{"type": "message", "id": "m4", "parentId": "m3", "timestamp": "2026-10-24T13:00:14.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "the lexer is tiny, planning a table-driven design"}], "model": "pi-test-1", "stopReason": "stop"}}
+{"type": "message", "id": "m5", "parentId": "m4", "timestamp": "2026-10-24T13:00:30.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "use a regex tokenizer"}]}}
+{"type": "model_change", "id": "e2", "parentId": "m5", "timestamp": "2026-10-24T13:00:31.000Z", "provider": "testprov", "modelId": "pi-test-9"}
+{"type": "message", "id": "m6", "parentId": "e2", "timestamp": "2026-10-24T13:00:32.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "regex tokenizer sketched"}], "model": "pi-test-9", "stopReason": "stop"}}
+{"type": "message", "id": "m7", "parentId": "m4", "timestamp": "2026-10-24T13:01:00.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "use a hand written scanner"}]}}
+{"type": "message", "id": "m8", "parentId": "m7", "timestamp": "2026-10-24T13:01:02.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "the scanner is finished and verbose"}], "model": "pi-test-1", "stopReason": "stop"}}
+{"type": "message", "id": "m9", "parentId": "m8", "timestamp": "2026-10-24T13:01:30.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "add docs"}]}}
+{"type": "message", "id": "m10", "parentId": "m9", "timestamp": "2026-10-24T13:01:32.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "docs added"}], "model": "pi-test-1", "stopReason": "stop"}}
+{"type": "custom_message", "id": "cm1", "parentId": "m10", "timestamp": "2026-10-24T13:01:33.000Z", "customType": "note", "content": "extension note", "display": true}
+{"type": "context_edit", "id": "ce1", "parentId": "cm1", "timestamp": "2026-10-24T13:01:40.000Z", "targetId": "m8", "replacement": {"content": [{"type": "text", "text": "scanner condensed"}]}}
+{"type": "context_edit", "id": "ce2", "parentId": "ce1", "timestamp": "2026-10-24T13:01:41.000Z", "targetId": "m4", "replacement": null}
