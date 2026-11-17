@@ -3237,7 +3237,18 @@ def ingest_ccusage(store):
     if not exe:
         die("ccusage not found (looked for %s)" % ccusage_cmd(), "install it with: npm install -g ccusage (or set AWT_CCUSAGE to its path), then: awt ingest --source ccusage")
     try:
-        r = subprocess.run([exe, "session", "--json", "--offline"], capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL)
+        # own process group: the npm `ccusage` is a Node wrapper around a native binary, and a timeout must stop both
+        p = subprocess.Popen([exe, "session", "--json", "--offline"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            so, se = p.communicate(timeout=900)
+        except BaseException:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            p.communicate()
+            raise
+        r = subprocess.CompletedProcess(p.args, p.returncode, so, se)
         if r.returncode != 0:
             raise ValueError("exit %d: %s" % (r.returncode, (r.stderr or "").strip()[:200]))
         data = json.loads(r.stdout)
