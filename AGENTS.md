@@ -6,7 +6,7 @@ Changing this repository rather than using the tool? Read [Working on this repos
 
 ## Install the CLI
 
-Needs Python 3.9 or later. `git` is optional; it powers `awt save` and the "changed since last handoff" part of the brief.
+Needs Python 3.9 or later. `git` is optional; it powers `awt doctor --staged` and the "changed since last handoff" part of the brief.
 
 **On your `PATH`** (recommended when you have several tasks):
 
@@ -84,7 +84,7 @@ awt effect mark e-3c91d0aa sent --ref https://example.slack.com/archives/C1/p1
 
 `--how` is only text. A failed send: `mark ... not-sent --why "..."`. Unsure: `mark ... unknown --why "..."`. A `begun` effect blocks `status done` until it is marked. If an effect is `unknown`, it may already have gone out: run `awt effect show <id>`, tell a person, and wait. Never resend it.
 
-**Committing:** `awt save "message"` commits the task directory locally and never pushes. Run it only when a person asks.
+**Committing:** `git commit` the task directory only when a person asks, and run `awt doctor --staged` first. Never push.
 
 The full lookup table, every refusal and what to do about it, and the subagent rules are in `awt help agents`.
 

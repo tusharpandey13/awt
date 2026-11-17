@@ -87,18 +87,20 @@ class Base(unittest.TestCase):
 
 
 BASIC = {
-    "workspaces/parsekit-main": ("workspace", "paseo:workspace/wks_1", "active"),
-    "workspaces/parsekit-main/tasks/imported": ("task", "paseo:task/wks_1/imported", "active"),
-    "workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite": ("agent", "paseo:agent/agt_1", "active"),
-    "workspaces/parsekit-main/tasks/imported/agents/review-the-plan": ("agent", "paseo:agent/agt_2", "active"),
-    "workspaces/parsekit-retry-bug": ("workspace", "paseo:workspace/wks_2", "active"),
-    "workspaces/parsekit-retry-bug/tasks/imported": ("task", "paseo:task/wks_2/imported", "active"),
-    "workspaces/parsekit-retry-bug/tasks/imported/agents/fix-retry-storm": ("agent", "paseo:agent/agt_3", "active"),
-    "workspaces/parsekit-retry-bug/tasks/imported/agents/fix-retry-storm/agents/explore-backoff": ("agent", "paseo:agent/agt_4", "active"),
-    "workspaces/parsekit-retry-bug/tasks/imported/agents/fix-retry-storm/agents/explore-backoff/agents/read-the-rfc": ("agent", "paseo:agent/agt_5", "active"),
-    "workspaces/docs-site-main": ("workspace", "paseo:workspace/wks_3", "active"),
-    "workspaces/docs-site-main/tasks/imported": ("task", "paseo:task/wks_3/imported", "active"),
-    "workspaces/docs-site-main/tasks/imported/agents/draft-changelog": ("agent", "paseo:agent/agt_6", "done"),
+    "projects/parsekit": ("project", "paseo:project/prj_1", "active"),
+    "projects/docs-site": ("project", "paseo:project/prj_2", "active"),
+    "projects/parsekit/workspaces/parsekit-main": ("workspace", "paseo:workspace/wks_1", "active"),
+    "projects/parsekit/workspaces/parsekit-main/tasks/imported": ("task", "paseo:task/wks_1/imported", "active"),
+    "projects/parsekit/workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite": ("agent", "paseo:agent/agt_1", "active"),
+    "projects/parsekit/workspaces/parsekit-main/tasks/imported/agents/review-the-plan": ("agent", "paseo:agent/agt_2", "active"),
+    "projects/parsekit/workspaces/parsekit-retry-bug": ("workspace", "paseo:workspace/wks_2", "active"),
+    "projects/parsekit/workspaces/parsekit-retry-bug/tasks/imported": ("task", "paseo:task/wks_2/imported", "active"),
+    "projects/parsekit/workspaces/parsekit-retry-bug/tasks/imported/agents/fix-retry-storm": ("agent", "paseo:agent/agt_3", "active"),
+    "projects/parsekit/workspaces/parsekit-retry-bug/tasks/imported/agents/fix-retry-storm/agents/explore-backoff": ("agent", "paseo:agent/agt_4", "active"),
+    "projects/parsekit/workspaces/parsekit-retry-bug/tasks/imported/agents/fix-retry-storm/agents/explore-backoff/agents/read-the-rfc": ("agent", "paseo:agent/agt_5", "active"),
+    "projects/docs-site/workspaces/docs-site-main": ("workspace", "paseo:workspace/wks_3", "active"),
+    "projects/docs-site/workspaces/docs-site-main/tasks/imported": ("task", "paseo:task/wks_3/imported", "active"),
+    "projects/docs-site/workspaces/docs-site-main/tasks/imported/agents/draft-changelog": ("agent", "paseo:agent/agt_6", "done"),
 }
 
 
@@ -113,7 +115,7 @@ class Basic(Base):
 
     def test_refs_and_goals(self):
         self.ok(snap="basic")
-        ws = os.path.join(self.root, "workspaces", "parsekit-main")
+        ws = os.path.join(self.root, "projects", "parsekit", "workspaces", "parsekit-main")
         refs = json.loads(self.awt("list", "refs", "--json", node=ws))
         targets = {r["target"] for r in refs}
         self.assertEqual(targets, {"/tmp/parsekit", "paseo:project/prj_1", "paseo:workspace/wks_1"})
@@ -121,7 +123,7 @@ class Basic(Base):
         r = json.loads(self.awt("resume", "--json", node=agent))
         self.assertEqual(r["goal"], "Review the plan")
         self.assertEqual([x["target"] for x in json.loads(self.awt("list", "refs", "--json", node=agent))], ["paseo:agent/agt_2"])
-        self.assertEqual([x["kind"] for x in r["lineage"]], ["root", "workspace", "task"])
+        self.assertEqual([x["kind"] for x in r["lineage"]], ["root", "project", "workspace", "task"])
 
     def test_m5_dry_run_writes_nothing(self):
         r = self.ok("--dry-run", snap="basic")
@@ -150,13 +152,13 @@ class Basic(Base):
         self.ok(snap=p)
         n = self.nodes()
         self.assertEqual(len(n), len(BASIC) + 1)
-        self.assertEqual(n["workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")
-        self.assertIn("workspaces/parsekit-main/tasks/imported/agents/review-the-plan", n)  # never renamed
-        self.assertIn("workspaces/parsekit-main/tasks/imported/agents/brand-new", n)
+        self.assertEqual(n["projects/parsekit/workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")
+        self.assertIn("projects/parsekit/workspaces/parsekit-main/tasks/imported/agents/review-the-plan", n)  # never renamed
+        self.assertIn("projects/parsekit/workspaces/parsekit-main/tasks/imported/agents/brand-new", n)
         snap["agents"][0]["archived"] = False
         write_json(p, snap)
         self.ok(snap=p)
-        self.assertEqual(self.nodes()["workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")  # awt owns the status after import
+        self.assertEqual(self.nodes()["projects/parsekit/workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")  # awt owns the status after import
 
     def test_m8_no_timeline_text(self):
         snap = read_json(os.path.join(FIX, "basic.json"))
@@ -193,15 +195,16 @@ class Shapes(Base):
     def test_m3_ambiguous(self):
         self.ok(snap="ambiguous")
         n = self.nodes()
-        un = [p for p in n if p.count("/") == 1 and n[p][1].startswith("paseo:unassigned/")]
+        un = [p for p in n if p.count("/") == 3 and n[p][1].startswith("paseo:unassigned/")]
         self.assertEqual(len(un), 2)  # shared cwd, and /tmp/elsewhere
-        self.assertEqual(sorted(un), ["workspaces/unassigned-elsewhere", "workspaces/unassigned-parsekit"])
+        self.assertEqual(sorted(un), ["projects/unassigned/workspaces/unassigned-elsewhere", "projects/unassigned/workspaces/unassigned-parsekit"])
+        self.assertEqual(n["projects/unassigned"], ("project", "paseo:project/unassigned", "active"))
         rep = self.report()
         self.assertIn("agt_1", rep)
         self.assertIn("agt_3", rep)
         self.assertIn("cwd matches 2 workspaces", rep)
         exact = [p for p, v in n.items() if v[1] == "paseo:agent/agt_2"][0]
-        self.assertTrue(exact.startswith("workspaces/parsekit-second/"))
+        self.assertTrue(exact.startswith("projects/parsekit/workspaces/parsekit-second/"))
 
     def test_m4_background_skipped_and_listed(self):
         self.ok(snap="ambiguous")
@@ -211,7 +214,7 @@ class Shapes(Base):
     def test_orphans(self):
         self.ok(snap="orphans")
         n = self.nodes()
-        base = "workspaces/parsekit-main/tasks/imported/agents/"
+        base = "projects/unassigned/workspaces/parsekit-main/tasks/imported/agents/"  # no projectId: the unassigned project
         for name in ("lost-child", "cycle-a", "cycle-a/agents/cycle-b", "child-of-background"):
             self.assertIn(base + name.replace("cycle-a/", "cycle-a/"), n)
         rep = self.report()
@@ -229,7 +232,7 @@ class Shapes(Base):
         self.assertIn("paseo:agent/../evil", keys)  # only a key, never a path
         self.assertEqual(keys.count("paseo:agent/agt_1"), 1)
         self.assertEqual(len(set(keys)), len(keys))
-        self.assertIn("workspaces/parsekit-no-agents", n)
+        self.assertIn("projects/parsekit/workspaces/parsekit-no-agents", n)
         for p in n:
             for part in p.split("/"):
                 self.assertRegex(part, r"^[a-z0-9-]+$")
@@ -258,7 +261,7 @@ class Shapes(Base):
 
     def test_exit_1_when_an_item_is_neither_imported_nor_listed(self):
         self.ok(snap="basic")  # make the root, then take away the right to add to it
-        ws = os.path.join(self.root, "workspaces")
+        ws = os.path.join(self.root, "projects", "parsekit", "workspaces")
         snap = read_json(os.path.join(FIX, "basic.json"))
         snap["workspaces"].append(dict(id="wks_9", projectId="prj_1", project="parsekit", name="late", cwd="/tmp/parsekit", archived=False))
         p = os.path.join(self.tmp, "late.json")
@@ -274,7 +277,7 @@ class Shapes(Base):
 
     def test_archived_workspace_with_an_active_child_is_noted_not_forced(self):
         self.ok(snap="basic")
-        task = os.path.join(self.root, "workspaces", "parsekit-main", "tasks", "imported")
+        task = os.path.join(self.root, "projects", "parsekit", "workspaces", "parsekit-main", "tasks", "imported")
         self.awt("ask", "who owns the lexer?", node=task)  # the task cannot be finished while this is open
         snap = read_json(os.path.join(FIX, "basic.json"))
         snap["workspaces"][0]["archived"] = True
@@ -282,8 +285,8 @@ class Shapes(Base):
         write_json(p, snap)
         self.ok(snap=p)
         n = self.nodes()
-        self.assertEqual(n["workspaces/parsekit-main"][2], "active")
-        self.assertEqual(n["workspaces/parsekit-main/tasks/imported"][2], "active")
+        self.assertEqual(n["projects/parsekit/workspaces/parsekit-main"][2], "active")
+        self.assertEqual(n["projects/parsekit/workspaces/parsekit-main/tasks/imported"][2], "active")
         notes = self.report().split("## Notes")[1].split("##")[0]
         self.assertRegex(notes, r"workspace wks_1 could not be marked done")
 
@@ -338,7 +341,7 @@ class HomeSource(Base):
         write_json(f, a)
         self.ok(home=h)
         n = self.nodes()
-        self.assertEqual(n["workspaces/docs-site-main"][2], "done")
+        self.assertEqual(n["projects/docs-site/workspaces/docs-site-main"][2], "done")
         self.assertNotIn("paseo:workspace/wks_2", [v[1] for v in n.values()])
         self.assertNotIn("paseo:agent/agt_2", [v[1] for v in n.values()])
         rep = self.report()
@@ -418,13 +421,232 @@ class Secrets(Base):
         self.assertNotIn(TOKEN, r.stdout + r.stderr + self.report())
 
 
+class ProjectLevel(Base):
+    """Phase 1: project nodes, moves under projects/<slug>/workspaces/, archive, idempotence."""
+    SKIP = (os.path.join("legacy", "paseo-migration.md"),)
+
+    def three_projects_snapshot(self):
+        snap = read_json(os.path.join(FIX, "basic.json"))
+        snap["agents"].append(dict(id="agt_9", name="Stray", provider="claude", model="m", cwd="/tmp/elsewhere", workspaceId=None, parentAgentId=None, archived=False, background=False))
+        p = os.path.join(self.tmp, "three.json")
+        write_json(p, snap)
+        return p
+
+    def legacy_tree(self):
+        """The layout before phase 1: workspaces directly under the root, as the old migrate-paseo wrote them."""
+        self.awt("init", "--kind", "root")
+        made = {}
+        for wid, name, refs in (("wks_1", "parsekit--main", ["paseo:project/prj_1"]), ("wks_2", "parsekit--retry-bug", ["paseo:project/prj_1"]),
+                                ("wks_3", "docs-site--main", []), ("wks_gone", "old--thing", [])):
+            r = self.awt("init", "--kind", "workspace", "--name", name, "--key", "paseo:workspace/" + wid).split()
+            node = os.path.join(self.root, r[1])
+            made[wid] = node
+            for t in refs:
+                self.awt("ref", t, "--title", "parsekit", node=node)
+            self.awt("init", "--kind", "task", "--name", "imported", "--goal", "g", "--done", "d", "--key", "paseo:task/%s/imported" % wid, node=node)
+            self.awt("note", "keep me " + wid, node=node)
+        r = self.awt("init", "--kind", "workspace", "--name", "my own").split()  # not Paseo's: never moved
+        made["mine"] = os.path.join(self.root, r[1])
+        return made
+
+    def test_p1_two_projects_and_an_unassigned_workspace(self):
+        r = self.ok(snap=self.three_projects_snapshot())
+        n = self.nodes()
+        ws = {k: v for k, v in n.items() if v[0] == "workspace"}
+        self.assertEqual(sorted(ws), ["projects/docs-site/workspaces/docs-site-main", "projects/parsekit/workspaces/parsekit-main",
+                                      "projects/parsekit/workspaces/parsekit-retry-bug", "projects/unassigned/workspaces/unassigned-elsewhere"])
+        prj = {k: v for k, v in n.items() if v[0] == "project"}
+        self.assertEqual(prj, {"projects/parsekit": ("project", "paseo:project/prj_1", "active"), "projects/docs-site": ("project", "paseo:project/prj_2", "active"),
+                               "projects/unassigned": ("project", "paseo:project/unassigned", "active")})
+        self.assertIn("3 projects created", r.stdout)
+        self.assertIn("Projects: 3 created", self.report())
+        first = tree_hash(self.root, self.SKIP)
+        r = self.ok(snap=self.three_projects_snapshot())
+        self.assertEqual(tree_hash(self.root, self.SKIP), first)
+        self.assertIn("0 projects created, 0 workspaces moved", r.stdout)
+
+    def test_p2_project_node_has_name_key_and_root_path_ref(self):
+        self.ok(home=HOME)
+        prj = os.path.join(self.root, "projects", "parsekit")
+        refs = json.loads(self.awt("list", "refs", "--json", node=prj))
+        self.assertEqual({x["target"] for x in refs}, {"/tmp/parsekit", "paseo:project/prj_1"})
+        rows = json.loads(self.awt("list", "nodes", "--all", "--json"))
+        self.assertIn("parsekit", [r["name"] for r in rows if r["kind"] == "project"])
+
+    def test_p3_custom_name_wins_over_display_name(self):
+        h = tempfile.mkdtemp(dir=self.tmp) + "/h"
+        shutil.copytree(HOME, h)
+        f = os.path.join(h, "projects", "projects.json")
+        rows = read_json(f)
+        rows[0]["customName"] = "Parser Kit"
+        write_json(f, rows)
+        self.ok(home=h)
+        n = self.nodes()
+        self.assertEqual(n["projects/parser-kit"], ("project", "paseo:project/prj_1", "active"))
+        self.assertIn("projects/parser-kit/workspaces/parser-kit-main", n)
+
+    def test_p4_legacy_workspaces_move_by_ref_then_workspaces_json_then_unassigned(self):
+        self.ok(snap="basic")  # only to make the root; replaced below
+        shutil.rmtree(self.root)
+        made = self.legacy_tree()
+        before = {k: read_text(os.path.join(v, "tasks", "imported", ".awt", "events.jsonl")) for k, v in made.items() if k != "mine"}
+        r = self.ok(snap="basic")
+        n = self.nodes()
+        by_key = {v[1]: k for k, v in n.items()}
+        self.assertEqual(by_key["paseo:workspace/wks_1"], "projects/parsekit/workspaces/parsekit-main")
+        self.assertEqual(by_key["paseo:workspace/wks_2"], "projects/parsekit/workspaces/parsekit-retry-bug")
+        self.assertEqual(by_key["paseo:workspace/wks_3"], "projects/docs-site/workspaces/docs-site-main")  # no ref: workspaces.json said prj_2
+        self.assertEqual(by_key["paseo:workspace/wks_gone"], "projects/unassigned/workspaces/old-thing")  # neither
+        self.assertEqual([k for k, v in n.items() if v[0] == "workspace" and v[1] is None], ["workspaces/my-own"])
+        self.assertFalse(os.path.exists(made["wks_1"]))
+        self.assertIn("4 workspaces moved", r.stdout)
+        for k, old in before.items():  # the subtree moved whole: records untouched
+            moved = os.path.join(self.root, by_key["paseo:workspace/" + k], "tasks", "imported", ".awt", "events.jsonl")
+            self.assertEqual(read_text(moved), old)
+        self.assertIn("keep me wks_1", self.awt("list", "notes", node=os.path.join(self.root, by_key["paseo:workspace/wks_1"])))
+        self.assertEqual(n["projects/parsekit/workspaces/parsekit-main/tasks/imported"][1], "paseo:task/wks_1/imported")
+
+    def test_p5_rerun_moves_nothing(self):
+        self.ok(snap="basic")
+        shutil.rmtree(self.root)
+        self.legacy_tree()
+        self.ok(snap="basic")
+        first = tree_hash(self.root, self.SKIP)
+        r = self.ok(snap="basic")
+        self.assertEqual(tree_hash(self.root, self.SKIP), first)
+        self.assertIn("0 workspaces moved", r.stdout)
+        self.assertIn("0 projects created", r.stdout)
+
+    def test_p6_keyed_refs_resolve_after_the_move(self):
+        self.ok(snap="basic")
+        shutil.rmtree(self.root)
+        made = self.legacy_tree()
+        other = made["mine"]
+        self.awt("ref", made["wks_1"], "--title", "the first", "--kind", "node", node=other)
+        self.ok(snap="basic")
+        refs = json.loads(self.awt("list", "refs", "--json", node=other))
+        target = os.path.realpath(os.path.join(other, refs[0]["path"]))
+        self.assertEqual(target, os.path.join(self.root, "projects", "parsekit", "workspaces", "parsekit-main"))
+
+    def test_p7_name_collision_in_the_project_gets_a_suffix_and_loses_nothing(self):
+        self.ok(snap="basic")
+        shutil.rmtree(self.root)
+        made = self.legacy_tree()
+        self.awt("init", "--kind", "project", "--name", "parsekit", "--key", "paseo:project/prj_1")
+        self.awt("init", "--kind", "workspace", "--name", "parsekit--main", node=os.path.join(self.root, "projects", "parsekit"))  # same slug, no key
+        self.ok(snap="basic")
+        n = self.nodes()
+        self.assertEqual(n["projects/parsekit/workspaces/parsekit-main"][1], None)
+        self.assertEqual(n["projects/parsekit/workspaces/parsekit-main-2"][1], "paseo:workspace/wks_1")
+
+    def test_p8_an_interrupted_move_finishes_on_rerun(self):
+        self.ok(snap="basic")
+        shutil.rmtree(self.root)
+        made = self.legacy_tree()
+        # what a run killed after creating the project and moving one node leaves behind
+        self.awt("init", "--kind", "project", "--name", "parsekit", "--key", "paseo:project/prj_1")
+        dest = os.path.join(self.root, "projects", "parsekit", "workspaces")
+        os.makedirs(dest)
+        os.rename(made["wks_1"], os.path.join(dest, "parsekit-main"))
+        self.ok(snap="basic")
+        done = tree_hash(self.root, self.SKIP)
+        keys = [v[1] for v in self.nodes().values() if v[1]]
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertEqual(sorted(k for k in keys if k.startswith("paseo:workspace/")), ["paseo:workspace/wks_1", "paseo:workspace/wks_2", "paseo:workspace/wks_3", "paseo:workspace/wks_gone"])
+        self.assertEqual(os.listdir(os.path.join(self.root, "workspaces")), ["my-own"])
+        self.ok(snap="basic")
+        self.assertEqual(tree_hash(self.root, self.SKIP), done)
+
+    def test_p9_archived_project_is_done_or_paused(self):
+        h = tempfile.mkdtemp(dir=self.tmp) + "/h"
+        shutil.copytree(HOME, h)
+        pf = os.path.join(h, "projects", "projects.json")
+        rows = read_json(pf)
+        rows[0]["archivedAt"] = "2026-02-01T00:00:00.000Z"  # parsekit: work below is open
+        rows[1]["archivedAt"] = "2026-02-01T00:00:00.000Z"  # docs-site: everything below archived too
+        write_json(pf, rows)
+        wf = os.path.join(h, "projects", "workspaces.json")
+        ws = read_json(wf)
+        ws[2]["archivedAt"] = "2026-02-01T00:00:00.000Z"
+        write_json(wf, ws)
+        self.ok(home=h)
+        n = self.nodes()
+        self.assertEqual(n["projects/parsekit"][2], "paused")  # its workspaces are still active
+        self.assertEqual(n["projects/docs-site"][2], "done")
+        self.assertRegex(self.report().split("## Notes")[1], r"project prj_1 is paused, not done")
+
+    def test_p10_archive_is_checked_on_every_run(self):
+        h = tempfile.mkdtemp(dir=self.tmp) + "/h"
+        shutil.copytree(HOME, h)
+        self.ok(home=h)
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "active")
+        pf = os.path.join(h, "projects", "projects.json")
+        rows = read_json(pf)
+        rows[1]["archivedAt"] = "2026-02-01T00:00:00.000Z"
+        write_json(pf, rows)
+        wf = os.path.join(h, "projects", "workspaces.json")
+        ws = read_json(wf)
+        ws[2]["archivedAt"] = "2026-02-01T00:00:00.000Z"
+        write_json(wf, ws)
+        self.ok(home=h)
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "done")
+
+    def test_p10b_paused_project_becomes_done_when_work_closes(self):
+        h = tempfile.mkdtemp(dir=self.tmp) + "/h"
+        shutil.copytree(HOME, h)
+        pf = os.path.join(h, "projects", "projects.json")
+        rows = read_json(pf)
+        rows[1]["archivedAt"] = "2026-02-01T00:00:00.000Z"  # docs-site: its workspace is still active
+        write_json(pf, rows)
+        self.ok(home=h)
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "paused")
+        self.ok(home=h)  # nothing changed: still paused
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "paused")
+        wf = os.path.join(h, "projects", "workspaces.json")
+        ws = read_json(wf)
+        ws[2]["archivedAt"] = "2026-02-01T00:00:00.000Z"
+        write_json(wf, ws)
+        self.ok(home=h)
+        self.assertEqual(self.nodes()["projects/docs-site"][2], "done")
+
+    def test_p11_dry_run_on_a_legacy_tree_writes_nothing_and_says_what_moves(self):
+        self.ok(snap="basic")
+        shutil.rmtree(self.root)
+        self.legacy_tree()
+        before = tree_hash(self.root)
+        r = self.ok("--dry-run", snap="basic")
+        self.assertEqual(tree_hash(self.root), before)
+        self.assertRegex(r.stdout, r"move workspaces/parsekit-main under project key=paseo:project/prj_1")
+        self.assertRegex(r.stdout, r"move workspaces/old-thing under project key=paseo:project/unassigned")
+        self.assertNotRegex(r.stdout, r"my-own")
+
+    def test_p12_dry_run_without_a_root_names_the_projects(self):
+        r = self.ok("--dry-run", snap="basic")
+        self.assertIn("project parsekit key=paseo:project/prj_1", r.stdout)
+        self.assertFalse(os.path.exists(self.root))
+
+    def test_p13_hostile_project_rows(self):
+        snap = read_json(os.path.join(FIX, "basic.json"))
+        snap["projects"] += [dict(id="prj_" + TOKEN, name="x", path="/tmp/x"), dict(id="prj_1", name="dup", path="/tmp/dup"), dict(id="prj_3", name="p " + TOKEN, path="/tmp/" + TOKEN, archived="yes"),
+                             "not an object", dict(id=None, name="n")]
+        p = os.path.join(self.tmp, "h.json")
+        write_json(p, snap)
+        r = self.ok(snap=p)
+        self.assertNotIn(TOKEN, r.stdout + r.stderr + self.report())
+        n = self.nodes()
+        keys = [v[1] for v in n.values()]
+        self.assertEqual(keys.count("paseo:project/prj_1"), 1)
+        self.assertIn("paseo:project/prj_3", keys)
+        self.assertEqual(n["projects/parsekit"][1], "paseo:project/prj_1")
+
+
 class Reruns(Base):
     def test_user_status_survives_a_rerun(self):
         self.ok(snap="basic")
-        node = os.path.join(self.root, "workspaces", "parsekit-main", "tasks", "imported", "agents", "plan-the-parser-rewrite")
+        node = os.path.join(self.root, "projects", "parsekit", "workspaces", "parsekit-main", "tasks", "imported", "agents", "plan-the-parser-rewrite")
         self.awt("status", "done", node=node)
         self.ok(snap="basic")
-        self.assertEqual(self.nodes()["workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")
+        self.assertEqual(self.nodes()["projects/parsekit/workspaces/parsekit-main/tasks/imported/agents/plan-the-parser-rewrite"][2], "done")
 
     def test_counts_created_and_present(self):
         r = self.ok(snap="basic")

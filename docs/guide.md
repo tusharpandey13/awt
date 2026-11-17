@@ -103,11 +103,11 @@ If the last session recorded no handoff, the brief says so and shows what change
 
 **Quarantined rows.** A malformed or illegal row is skipped and counted, never fatal. `doctor` warns, and the brief's inventory line shows the count. Don't hand-edit `.awt/`. Rows are skipped, not deleted, so nothing is lost; the spec has no command to list which rows were skipped.
 
-**`save` refused.** It needs this directory to be the root of its own git repo. If it isn't a repo, or sits inside another one, run `git init` here yourself. Files that match the secret scan are unstaged and reported. It never pushes.
+**`save` is gone.** Use `git add -A && awt doctor --staged && git commit -m "message"`. `doctor --staged` refuses when a staged file matches the secret scan; put it in `.git/hooks/pre-commit` to run on every commit.
 
 ## 6. Backups and privacy
 
-`./awt save "message"` commits the directory locally. `scratch/`, `.awt/claims/`, `.awt/blobs/` and `.awt/runs/` are git-ignored, so snapshots and run logs are not in commits. Back up the directory itself if you need those.
+Commit the directory locally with `git commit`. `scratch/`, `.awt/claims/`, `.awt/blobs/` and `.awt/runs/` are git-ignored, so snapshots and run logs are not in commits. Back up the directory itself if you need those.
 
 The directory holds internal chats and docs. If you add a git remote, make it private; `doctor` warns when one exists. Avoid iCloud, Dropbox and network folders: `doctor` warns there too.
 

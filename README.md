@@ -121,7 +121,7 @@ The tradeoff is lost context between workers: each knows only what the files say
 
 ## Keep task data private
 
-A task directory often holds internal chats and documents. `./awt save "message"` commits it locally and never pushes. If you add a remote, make sure it is private; `./awt doctor` warns when a remote exists.
+A task directory often holds internal chats and documents. Commit it with plain `git commit`; run `awt doctor --staged` (for example from `.git/hooks/pre-commit`) to catch secrets first. If you add a remote, make sure it is private; `./awt doctor` warns when a remote exists.
 
 ## Migrating from wt
 

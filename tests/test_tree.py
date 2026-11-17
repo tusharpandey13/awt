@@ -154,6 +154,102 @@ class Create(TreeBase):
         self.assertEqual([r["type"] for r in self.rows_of(plain)], ["task"])
 
 
+class Projects(TreeBase):
+    """Phase 1: the project level (SPEC.md, "Node tree": root > project > workspace > task > agent)."""
+
+    def chain_in_project(self):
+        root = self.make_root()
+        prj = self.mk("project", "parsekit", root, "--key", "paseo:project/prj_1")
+        ws = self.mk("workspace", "main", prj)
+        task = self.mk("task", "Fix retry", ws, "--goal", "fix it", "--done", "merged")
+        agent = self.mk("agent", "chat-1", task)
+        return root, prj, ws, task, agent
+
+    def test_p1_layout_and_lineage(self):
+        root, prj, ws, task, agent = self.chain_in_project()
+        self.assertEqual(prj, os.path.join(root, "projects", "parsekit"))
+        self.assertEqual(ws, os.path.join(prj, "workspaces", "main"))
+        first = self.rows_of(prj)[0]
+        self.assertEqual((first["type"], first["kind"], first["name"], first["key"]), ("node", "project", "parsekit", "paseo:project/prj_1"))
+        self.assertTrue({"context", "docs", "misc"} <= set(os.listdir(prj)))
+        r = json.loads(self.ok("resume", "--json", root=agent).stdout)
+        self.assertEqual([x["kind"] for x in r["lineage"]], ["root", "project", "workspace", "task"])
+        tree = self.ok("list", "tree", root=root).stdout
+        self.assertRegex(tree, r"project parsekit")
+        self.ok("doctor", root=root)
+
+    def test_p2_legal_pairs(self):
+        root, prj, ws, task, agent = self.chain_in_project()
+        for kind, parent in (("project", prj), ("project", ws), ("project", task), ("project", agent), ("task", prj), ("agent", prj)):
+            r = self.refuses("init", "--kind", kind, "--name", "x", "--goal", "g", "--done", "d", root=parent)
+            self.assertRegex(r.stderr, r"may contain")
+        self.assertIn("workspace", self.refuses("init", "--kind", "task", "--name", "x", "--goal", "g", "--done", "d", root=prj).stderr)
+
+    def test_p3_key_found_from_anywhere_and_idempotent(self):
+        root, prj, ws, task, agent = self.chain_in_project()
+        before = self.events_of(root)
+        self.assertEqual(self.mk("project", "other name", root, "--key", "paseo:project/prj_1"), prj)
+        self.assertEqual(os.listdir(os.path.join(root, "projects")), ["parsekit"])
+        self.assertEqual(before, self.events_of(root))
+
+    def test_p4_legacy_workspace_under_root_still_works_and_doctor_warns_only_in_a_mixed_tree(self):
+        root = self.make_root()
+        legacy = self.mk("workspace", "old", root, "--key", "paseo:workspace/wks_old")
+        task = self.mk("task", "t", legacy, "--goal", "g", "--done", "d")
+        self.ok("resume", root=task)
+        d = self.ok("doctor", root=root).stdout
+        self.assertNotRegex(d, r"warn .*workspaces/old")  # no projects: behaves as before
+        self.mk("project", "parsekit", root)
+        d = self.ok("doctor", root=root).stdout
+        self.assertRegex(d, r"warn workspaces/old: .*directly under the root.*migrate-paseo")
+        self.assertNotIn("fail", d)
+
+    def test_p5_status_done_or_paused_like_a_workspace(self):
+        root, prj, ws, task, agent = self.chain_in_project()
+        r = self.refuses("status", "done", root=prj)
+        self.assertRegex(r.stderr, r"workspace main is active")
+        self.refuses("status", "done", root=root)  # the root needs the project done too
+        self.ok("status", "done", root=task)
+        self.ok("status", "done", root=ws)
+        self.assertIn("project parsekit", self.refuses("status", "done", root=root).stderr)
+        self.ok("status", "done", root=prj)
+        self.assertEqual(json.loads(self.ok("resume", "--json", root=prj).stdout)["status"], "done")
+        self.ok("status", "paused", root=prj)
+
+    def test_p6_doctor_flags_done_project_with_active_workspace(self):
+        root, prj, ws, task, agent = self.chain_in_project()
+        self.ok("status", "paused", root=prj)
+        with open(os.path.join(prj, ".awt", "events.jsonl"), "a", encoding="utf-8") as g:
+            g.write(json.dumps(dict(type="status", status="done", ts="2026-01-01T00:00:00.000Z", by="t")) + "\n")
+        self.assertRegex(self.ok("doctor", root=root).stdout, r"warn projects/parsekit is done but .*workspaces/main is still active")
+
+    def test_p7_project_in_wrong_dir_is_a_warning(self):
+        root, prj, ws, task, agent = self.chain_in_project()
+        os.rename(prj, os.path.join(root, "workspaces", "parsekit"))
+        d = self.ok("doctor", root=root).stdout
+        self.assertRegex(d, r"a project sits in workspaces/")
+
+    def test_p8_moved_subtree_still_resolves_by_key(self):
+        root = self.make_root()
+        legacy = self.mk("workspace", "old", root, "--key", "paseo:workspace/wks_1")
+        task = self.mk("task", "t", legacy, "--goal", "g", "--done", "d")
+        other = self.mk("task", "u", self.mk("workspace", "w2", root), "--goal", "g", "--done", "d")
+        self.ok("ref", legacy, "--title", "the old one", "--kind", "node", root=other)
+        prj = self.mk("project", "parsekit", root, "--key", "paseo:project/prj_1")
+        os.makedirs(os.path.join(prj, "workspaces"), exist_ok=True)
+        moved = os.path.join(prj, "workspaces", "old")
+        os.rename(legacy, moved)
+        refs = json.loads(self.ok("list", "refs", "--json", root=other).stdout)
+        self.assertEqual(os.path.realpath(os.path.join(other, refs[0]["path"])), os.path.realpath(moved))
+        self.assertEqual(self.mk("workspace", "again", prj, "--key", "paseo:workspace/wks_1"), moved)
+
+    def test_p9_standalone_project_init_needs_name(self):
+        root = self.make_root()
+        self.bad("init", "--kind", "project", root=root, code=2)
+        self.ok("init", "--kind", "project", "--name", "solo", root=root)
+        self.assertTrue(os.path.isdir(os.path.join(root, "projects", "solo")))
+
+
 class Converting(TreeBase):
     def test_standalone_task_moved_into_workspace_becomes_child(self):  # T14
         root = self.make_root()
@@ -368,7 +464,7 @@ class Isolation(TreeBase):
         self.assertNotIn(os.path.basename(t2), r.stdout)
         self.assertEqual(len(self.rows_of(os.path.join(iw, r.stdout.split()[1]), "node")), 1)
 
-    def test_misc_listing_and_save_skip_nested_nodes(self):
+    def test_misc_listing_skips_nested_nodes(self):
         root, ws, task, agent, sub = self.chain()
         inner = os.path.join(task, "misc", "side")
         os.makedirs(inner)
@@ -378,11 +474,6 @@ class Isolation(TreeBase):
         out = self.ok("list", "misc", root=task).stdout
         self.assertIn("mine.md", out)
         self.assertNotIn("theirs.md", out)
-        subprocess.run(["git", "init", "-q", task], check=True, env=self.env)
-        self.ok("save", "m", root=task)
-        files = subprocess.run(["git", "-C", task, "ls-files"], capture_output=True, text=True, env=self.env).stdout
-        self.assertIn("misc/mine.md", files)
-        self.assertNotIn("theirs.md", files)
 
     def test_parallel_agents_keep_their_own_logs(self):  # T50
         root, ws, task, agent, sub = self.chain()

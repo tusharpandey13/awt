@@ -9,6 +9,7 @@ import type { AwtConfig } from "./config.js";
 import { readConfig } from "./config.js";
 import { NUDGE, withBlock } from "./prompt.js";
 import { Tree, clean, cut } from "./tree.js";
+import { readProjects } from "./projects.js";
 import { readReceipt } from "./receipt.js";
 import { RECEIPT_KIND, RECEIPT_VERSION } from "../shared/receipt.js";
 
@@ -78,6 +79,7 @@ export function insideNode(node: string, targets: string[]): boolean {
   });
 }
 
+const UNASSIGNED = "unassigned";
 const short = (id: string) => id.replace(/[^A-Za-z0-9]/g, "").slice(0, 8) || "agent";
 const sha = (s: string) => createHash("sha1").update(s).digest("hex").slice(0, 16);
 
@@ -146,6 +148,40 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     return tree.ensure(workspaceNode, "task", "main", `paseo:task/${workspaceKeyPart}/main`, { goal: "Work in this workspace", done: "ongoing" });
   };
 
+  /** The project's display name and root path as the SDK lists them; projects.json, when it has the row, wins over both. */
+  const sdkProject = async (ctx: PluginHookContext | undefined, projectId: string | null): Promise<{ name: string | null; rootPath: string | null }> => {
+    try {
+      const p = projectId ? (await ctx?.paseo.projects.list())?.projects.find((x) => x.projectId === projectId) : undefined;
+      return { name: p?.projectDisplayName ?? null, rootPath: p?.projectRootPath ?? null };
+    } catch {
+      return { name: null, rootPath: null }; // best effort
+    }
+  };
+
+  /** The `paseo:project/<id>` node under the root (`unassigned` when there is no project), found or created, with its refs. */
+  const projectNode = async (root: string, projectId: string | null, hint: { name?: string | null; rootPath?: string | null } = {}): Promise<string> => {
+    const id = projectId || UNASSIGNED;
+    const key = `paseo:project/${id}`;
+    const row = projectId ? readProjects(cfg.projectsFile).get(projectId) : undefined;
+    const name = projectId ? row?.name ?? hint.name ?? projectId : UNASSIGNED;
+    const rootPath = projectId ? row?.rootPath ?? hint.rootPath ?? null : null;
+    const existing = await tree.find(key);
+    if (existing) return existing; // refs were written when it was made; migrate-paseo repairs a project killed before them
+    const node = await tree.ensure(root, "project", name, key, { goal: name, done: "ongoing", fallback: `project-${short(id)}` });
+    await tree.ensureRefs(node, [...(rootPath ? [{ target: rootPath, title: "root path" }] : []), ...(projectId ? [{ target: key, title: name }] : [])]);
+    return node;
+  };
+
+  /** The project node, or the root when the project cannot be made: a workspace directly under the root is still readable, and the agent keeps awt. */
+  const underProject = async (root: string, projectId: string | null, hint: { name?: string | null; rootPath?: string | null } = {}): Promise<string> => {
+    try {
+      return await projectNode(root, projectId, hint);
+    } catch (error) {
+      log(`awt plugin: project node failed, placing the workspace under the root: ${error instanceof Error ? error.message : String(error)}`);
+      return root;
+    }
+  };
+
   const workspaceNode = async (workspaceId: string | null, cwd: string, ctx?: PluginHookContext): Promise<{ node: string; part: string }> => {
     const root = await tree.root();
     if (workspaceId) {
@@ -164,16 +200,19 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       } catch {
         /* best effort */
       }
-      return { node: await createWorkspace(root, workspaceId, name, dir, projectId, null), part: workspaceId };
+      const p = await sdkProject(ctx, projectId);
+      return { node: await createWorkspace(root, workspaceId, name, dir, projectId, p.name, p.rootPath), part: workspaceId };
     }
     const key = `paseo:unassigned/${sha(cwd)}`;
-    const node = await tree.ensure(root, "workspace", `unassigned--${basename(cwd) || "root"}`, key, { goal: `unassigned--${basename(cwd) || "root"}`, done: "ongoing", fallback: "unassigned" });
+    const node = await tree.ensure(await underProject(root, null), "workspace", `unassigned--${basename(cwd) || "root"}`, key, { goal: `unassigned--${basename(cwd) || "root"}`, done: "ongoing", fallback: "unassigned" });
     return { node, part: `unassigned-${sha(cwd)}` };
   };
 
-  const createWorkspace = async (root: string, id: string, name: string | null, cwd: string, projectId: string | null, projectName: string | null): Promise<string> => {
+  const createWorkspace = async (root: string, id: string, name: string | null, cwd: string, projectId: string | null, sdkName: string | null, sdkRoot: string | null): Promise<string> => {
+    const projectName = (projectId ? readProjects(cfg.projectsFile).get(projectId)?.name : null) ?? sdkName;
     const label = `${projectName ?? (basename(cwd) || "workspace")}--${name ?? id}`;
-    const node = await tree.ensure(root, "workspace", label, `paseo:workspace/${id}`, { goal: label, done: "ongoing", fallback: `workspace-${short(id)}` });
+    const project = await underProject(root, projectId, { name: sdkName, rootPath: sdkRoot });
+    const node = await tree.ensure(project, "workspace", label, `paseo:workspace/${id}`, { goal: label, done: "ongoing", fallback: `workspace-${short(id)}` });
     await tree.ensureRefs(node, [
       ...(cwd ? [{ target: cwd, title: "working directory" }] : []),
       ...(projectId ? [{ target: `paseo:project/${projectId}`, title: projectName ?? "project" }] : []),
@@ -214,14 +253,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
 
   add(server.addHook("workspace.create.after", async ({ workspace }, ctx) => {
     await safe(log, "workspace.create.after", undefined, async () => {
-      let projectName: string | null = null;
-      try {
-        const res = await ctx.paseo.projects.list();
-        projectName = res.projects.find((p) => p.projectId === workspace.projectId)?.projectDisplayName ?? null;
-      } catch {
-        /* best effort */
-      }
-      const node = await createWorkspace(await tree.root(), workspace.id, workspace.name, workspace.cwd, workspace.projectId, projectName);
+      const p = await sdkProject(ctx, workspace.projectId);
+      const node = await createWorkspace(await tree.root(), workspace.id, workspace.name, workspace.cwd, workspace.projectId, p.name, p.rootPath);
       await taskFor(node, workspace.id);
     });
   }));
@@ -321,6 +354,12 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   add(server.addHook("workspace.archive.after", async ({ workspace }) => {
     await safe(log, "workspace.archive.after", undefined, async () => {
       await tree.onNode(`paseo:workspace/${workspace.id}`, (node) => tree.setStatusDoneOrPaused(node));
+    });
+    // The SDK has no project archive hook and `projects.list` has no `archivedAt`: projects.json is the only source.
+    await safe(log, "workspace.archive.after project", undefined, async () => {
+      const id = workspace.projectId;
+      if (!id || !readProjects(cfg.projectsFile).get(id)?.archived) return;
+      await tree.onNode(`paseo:project/${id}`, (node) => tree.setStatusDoneOrPaused(node));
     });
   }));
 

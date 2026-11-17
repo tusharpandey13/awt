@@ -302,34 +302,11 @@ class TestBrief(Base):
         self.assertNotIn("skip.md", out)
         self.assertIn("1 files newer", out)
 
-    def test_save(self):
+    def test_save_was_removed(self):
         self.init()
-        self.bad("save", "m")  # not a git repo
-        outer = os.path.join(self.tmp, "outer")
-        os.mkdir(outer)
-        subprocess.run(["git", "init", "-q", outer], check=True, env=self.env)
-        inner = os.path.join(outer, "task")
-        os.mkdir(inner)
-        self.ok("init", root=inner)
-        r = self.bad("save", "m", root=inner)
-        self.assertIn("another repo", r.stderr)
-        self.assertEqual(subprocess.run(["git", "-C", outer, "log"], capture_output=True, env=self.env).returncode, 128)
-        # real repo
-        subprocess.run(["git", "init", "-q", self.root], check=True, env=self.env)
-        self.write("misc/leak.txt", "key " + AKIA + "\n")
-        self.write("docs/ok.md", "fine\n")
-        nested = self.p("misc", "sub")
-        subprocess.run(["git", "init", "-q", nested], check=True, env=self.env)
-        self.write("misc/sub/f.txt", "n")
-        r = self.ok("save", "first")
-        self.assertIn("saved", r.stdout)
-        self.assertIn("leak.txt", r.stderr)
-        self.assertIn("nested", r.stderr)
-        files = subprocess.run(["git", "-C", self.root, "ls-files"], capture_output=True, text=True, env=self.env).stdout
-        self.assertIn("docs/ok.md", files)
-        self.assertNotIn("leak.txt", files)
-        self.assertNotIn("sub", files)
-        self.assertIn("nothing", self.ok("save", "again").stdout)
+        r = self.bad("save", "m", code=2)
+        self.assertIn("git commit", r.stderr)
+        self.assertIn("awt doctor --staged", r.stderr)
 
 
 class TestEffects(Base):
