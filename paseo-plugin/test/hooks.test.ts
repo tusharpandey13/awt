@@ -683,7 +683,8 @@ test("M5 the tail asked for is wide enough for a compaction early in a long turn
   r.pages.set("agt_1", { entries: long });
   await endTurn(r, "t1");
   assert.equal(r.sent.length, 1);
-  assert.ok(r.refetchOpts.every((o) => o.direction === "tail" && Number(o.limit) >= 300), JSON.stringify(r.refetchOpts));
+  // The compaction/stand-in read is wide; the detect scan (phase 3) has its own 200-item tail.
+  assert.ok(r.refetchOpts.every((o) => o.direction === "tail") && r.refetchOpts.some((o) => Number(o.limit) >= 300), JSON.stringify(r.refetchOpts));
 });
 
 test("H2 no brief when an error row follows the compaction (pi: Nothing to compact)", async () => {
