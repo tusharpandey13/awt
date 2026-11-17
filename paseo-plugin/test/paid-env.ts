@@ -65,7 +65,7 @@ os.execv(${JSON.stringify(join(REPO, "awt"))},[${JSON.stringify(join(REPO, "awt"
     HOME: tmp, TMPDIR: tmpdir(), TERM: "dumb", TZ: "UTC", LANG: "en_US.UTF-8", USER: process.env.USER,
     PATH: `${join(tmp, "bin")}:/Users/${process.env.USER}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
     CLAUDE_CONFIG_DIR: join(tmp, "claude"), XDG_DATA_HOME: join(tmp, "xdg", "data"), XDG_CONFIG_HOME: join(tmp, "xdg", "config"), PI_CODING_AGENT_DIR: join(tmp, "pi"),
-    AWT_BIN: join(REPO, "awt"), AWT_ROOT: root, AWT_TIMEOUT_MS: "20000", AWT_HOOK_LOG: hookLog,
+    AWT_BIN: join(REPO, "awt"), AWT_ROOT: root, AWT_TIMEOUT_MS: "20000", AWT_COMPACT_BRIEF: "1", AWT_HOOK_LOG: hookLog,
   };
   if (opts.claude) { const t = claudeToken(); if (!t) throw new Error("no usable Claude credential in the keychain"); secrets.push(t); env.CLAUDE_CODE_OAUTH_TOKEN = t; }
   if (opts.deepseek) { const k = deepseekKey(); if (!k) throw new Error("no deepseek credential"); secrets.push(k); env.DEEPSEEK_API_KEY = k; }
