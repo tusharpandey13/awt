@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, stat, subprocess, tempfile, time, urllib.parse
+import argparse, contextlib, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, stat, subprocess, tempfile, time, urllib.parse
 import itertools, math
 try:
     import sqlite3
@@ -18,7 +18,10 @@ A = "./awt"
 ROWMAX = 4096
 TOTAL = 4400
 BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200, lineage=300, children=500,
-              task_goal=400, task_state=600, task_questions=300, task_effects=250, task_decisions=250)
+              notes=300, task_goal=400, task_state=600, task_questions=300, task_effects=250, task_decisions=250)
+
+FRAMED_BUDGET = dict(changes=200)  # framed mode makes room for the newest notes (notes=300) inside the same 4,400 total
+NOTES_SHOWN, NOTE_CUT = 5, 100
 
 K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, newer=8, walk=20000)
 CAPS = {
@@ -263,7 +266,7 @@ If `./relay` exists and the work splits into parts, do not run them all in one s
 USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
   init --kind root|project|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
-  init --hooks claude|opencode|pi|all [--uninstall]   (person only, ask first: edits the provider's own config; agents never run it)
+  init --hooks claude|codex|opencode|pi|all [--uninstall]   (person only, ask first: edits the provider's own config; agents never run it)
   state --now T --next T      note T                   decide C --why T         ask T
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
@@ -742,15 +745,24 @@ def git(path, *args):
 
 
 # ---------- brief and listing ----------
+def one(s):
+    """Framed record only: free text becomes one line that cannot start a heading, so a note, state, question or file name cannot forge the record's structure."""
+    if not FRAMED:
+        return s
+    s = " ".join(str(s).split())
+    return "\\" + s if s.startswith("#") else s
+
+
 def cut(s, n=None):
     n = n or K["line"]
+    s = one(s)
     return s if len(s) <= n else s[:n - 1] + "~"
 
 
 def fit(head, lines, key, sect, suffix=""):
     """head plus as many lines as fit the budget. The overflow line points at `awt list sect`; a first line that is too long is cut."""
-    budget, o, n = BUDGET[key], [head], len(head) + 1
-    more = lambda k: c("+%d more: ./awt list %s" % (k, sect)) + suffix
+    budget, o, n = (FRAMED_BUDGET if FRAMED and key in FRAMED_BUDGET else BUDGET)[key], [head], len(head) + 1
+    more = (lambda k: "+%d more" % k) if FRAMED else (lambda k: c("+%d more: ./awt list %s" % (k, sect)) + suffix)
     reserve = len(more(999)) + 1
     for i, ln in enumerate(lines):
         room = budget - n - 1 - (reserve if i < len(lines) - 1 else 0)
@@ -805,7 +817,7 @@ def children_section(kids):
             "out.md %s, %s" % (ago(r["out_ts"]), size(r["out_bytes"])) if r["out_ts"] else "no state yet"
         n = r["open_questions"] + r["attention_effects"]
         rows.append((RANK.get(r["status"], 0), -epoch(r["state_ts"]) if r["state_ts"] else 0, "%s %s [%s]%s %s" % (
-            r["kind"], r["name"], r["status"], " (%d open)" % n if n else "", tail)))
+            r["kind"], one(r["name"]), r["status"], " (%d open)" % n if n else "", tail)))
     rows.sort(key=lambda r: r[:2])
     return fit("## Children", [r[2] for r in rows], "children", "nodes")
 
@@ -873,8 +885,8 @@ def brief(scope=None, git_section=True):
     sts = state_order(D, scope)
     if sts:
         s = sts[0]
-        o.append(fit("## State", ["[%s] %s\nnow: %s\nnext: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"])] +
-                     ["[%s] %s: %s" % (x.get("scope", "main"), ago(x["ts"]), cut(x["now"], 100)) for x in sts[1:]], "state", "state"))
+        o.append(fit("## State", ["[%s] %s\nnow: %s\nnext: %s" % (one(s.get("scope", "main")), ago(s["ts"]), one(s["now"]), one(s["next"]))] +
+                     ["[%s] %s: %s" % (one(x.get("scope", "main")), ago(x["ts"]), cut(x["now"], 100)) for x in sts[1:]], "state", "state"))
     if kids:
         o.append(children_section(kids))
     if D["open_q"]:
@@ -911,12 +923,17 @@ def brief(scope=None, git_section=True):
         ds.sort(key=lambda d: "rule" not in (d.get("tags") or []))
         o.append(fit("## Decisions", ["%s %s%s" % (d["id"], "[rule] " if "rule" in (d.get("tags") or []) else "", cut(d["choice"], 120)) for d in ds] + inherited,
                      "decisions", "decisions", "; inherited: awt find --up rule" if inherited and not FRAMED else ""))
+    if FRAMED and D["notes"]:
+        # the newest NOTES_SHOWN notes, each cut so that all of them fit; the rest are counted, with no command to run
+        total, k = len(D["notes"]), min(NOTES_SHOWN, len(D["notes"]))
+        w = min(NOTE_CUT, (BUDGET["notes"] - len("## Recent notes") - 1 - (10 if total > k else 0)) // k - 3)
+        o.append(fit("## Recent notes", ["- " + cut(n["text"], w) for n in D["notes"][-k:][::-1]] + (["+%d more" % (total - k)] if total > k else []), "notes", "notes"))
     refs = [ref_view(r) for r in D["refs"].values()]
     inv = "Inventory: %d refs (%d no-access), " % (len(refs), sum(r["access"] == "none" for r in refs)) + ", ".join(
         "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))
     if D["bad"]:
         inv += "; %d quarantined rows" % D["bad"]
-    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c("./awt list | ./awt find <term>")]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % D["unread"]] if D["unread"] else []), "inventory", "state"))
+    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c("./awt list | ./awt find <term>")]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % one(D["unread"])] if D["unread"] else []), "inventory", "state"))
     if not sts and not FRAMED:
         o.append(c('No handoff yet. Before stopping: ./awt state --now "..." --next "..."\n'))
     return "".join(o)
@@ -1210,11 +1227,15 @@ def init_child(a):
             os.close(lockfd)
 
 
+JSON_HOOKS = ("claude", "codex")  # providers whose hook is an entry merged into a JSON file (same SessionStart shape)
+
+
 def hook_paths():
     """Where each provider's awt context hook lives; the environment variables are the providers' own."""
     home = os.path.expanduser("~")
     oc = os.environ.get("OPENCODE_CONFIG_DIR") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "opencode")
     return dict(claude=os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude"), "settings.json"),
+                codex=os.path.join(os.environ.get("CODEX_HOME") or os.path.join(home, ".codex"), "hooks.json"),
                 opencode=os.path.join(oc, "plugins", "awt-context.js"),
                 pi=os.path.join(os.environ.get("PI_CODING_AGENT_DIR") or os.path.join(home, ".pi", "agent"), "extensions", "awt-context.ts"))
 
@@ -1249,16 +1270,47 @@ def write_atomic(path, text, mode=0o644):
     os.replace(tmp, path)
 
 
+@contextlib.contextmanager
+def dir_lock(d):
+    """Exclusive flock on the directory itself, so awt writers (several `init --hooks` at once) take turns and no lock file is left behind.
+    Advisory: Claude Code takes no lock, so a write of its own can still land in the window between our last check and the rename."""
+    os.makedirs(d, exist_ok=True)
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as x:  # NFS (EBADF: the lock needs a writable fd), SMB/AFP (ENOTSUP), ENOLCK: go on unlocked; the stat re-check still guards the write
+        print("note: cannot lock %s (%s); going on without the lock" % (d, x.strerror or x), file=sys.stderr)
+        os.close(fd)
+        yield
+        return
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
 def merge_claude_settings(path, uninstall):
+    path = os.path.realpath(path)
+    if uninstall and not os.path.isdir(os.path.dirname(path)):
+        return "absent"  # a provider that is not there: create nothing
+    with dir_lock(os.path.dirname(path)):
+        return merge_claude_settings_locked(path, uninstall)
+
+
+def merge_claude_settings_locked(path, uninstall):
     """Add or remove the SessionStart `compact` hook. Returns what happened; every other key and every other hook stays as it was,
     even in an entry that also holds awt's hook. A symlinked settings file is followed: the target is written."""
     path = os.path.realpath(path)
     for attempt in range(3):
         try:
             with open(path, encoding="utf-8") as g:
+                sig = os.fstat(g.fileno())  # taken before the read, so a write inside the read window shows up at the re-check
+                sig = (sig.st_mtime_ns, sig.st_size)
                 raw = g.read()
-            sig = os.stat(path)
-            sig = (sig.st_mtime_ns, sig.st_size)
             st = json.loads(raw) if raw.strip() else {}
         except FileNotFoundError:
             raw, sig, st = None, None, {}
@@ -1342,16 +1394,26 @@ def cmd_hooks(a):
     """init --hooks: put the awt record into each provider's context after a compaction, silently. Touches only the provider's own files."""
     if a.kind or a.goal or a.done or a.name or a.key:
         die("--hooks stands alone", "run it without --goal, --done, --kind, --name or --key", 2)
-    want = ["claude", "opencode", "pi"] if a.hooks == "all" else [a.hooks]
+    want = ["claude", "codex", "opencode", "pi"] if a.hooks == "all" else [a.hooks]
     paths = hook_paths()
     me = json.dumps(awt_path())
     for prov in want:
         p = paths[prov]
-        if prov == "claude":
+        if prov in JSON_HOOKS:
             res = merge_claude_settings(p, a.uninstall)
+            if prov == "codex" and not a.uninstall and codex_inline_hooks(p):
+                out("warn %s has an inline [hooks] table; Codex merges it with hooks.json and warns at every start; move those hooks into hooks.json or remove one of the two" % os.path.join(os.path.dirname(p), "config.toml"))
         else:
             res = install_file(p, (OC_PLUGIN if prov == "opencode" else PI_EXT).replace("__AWT_BIN__", me), a.uninstall)
         out("hooks %s: %s %s" % (prov, res, p))
+
+
+def codex_inline_hooks(hooks_json):
+    try:
+        with open(os.path.join(os.path.dirname(hooks_json), "config.toml"), encoding="utf-8", errors="replace") as g:
+            return re.search(r"^\s*\[+\s*hooks\s*[\].]", g.read(), re.M) is not None
+    except OSError:
+        return False
 
 
 def hook_state(prov):
@@ -1360,7 +1422,7 @@ def hook_state(prov):
     try:
         with open(p, encoding="utf-8") as g:
             txt = g.read()
-        if prov == "claude":
+        if prov in JSON_HOOKS:
             hs = [h for e in json.loads(txt)["hooks"]["SessionStart"] if isinstance(e, dict) and e.get("matcher") == "compact"
                   for h in e.get("hooks") or [] if isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))]
             if not hs:
@@ -1380,7 +1442,7 @@ def hook_state(prov):
 def hook_checks(line):
     """doctor: one line per detected provider; warns when the compaction hook is missing or pins an awt that is gone. Reads only; never fails."""
     for prov, p in hook_paths().items():
-        cfg = os.path.dirname(os.path.dirname(p)) if prov != "claude" else os.path.dirname(p)
+        cfg = os.path.dirname(p) if prov in JSON_HOOKS else os.path.dirname(os.path.dirname(p))
         if not os.path.isdir(cfg):
             continue
         st, pin = hook_state(prov)
@@ -2793,8 +2855,11 @@ def cmd_doctor(a):
     hook_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
-        line("fail", "no task root (./awt init)")
-        sys.exit(1)
+        if a.dir or os.environ.get("AWT_DIR"):
+            line("fail", "no task root at %s (./awt init)" % (a.dir or "AWT_DIR " + os.environ["AWT_DIR"]))
+        else:
+            line("ok", "no task root here: per-node checks skipped (run in a task directory, or: awt doctor --dir <node>)")
+        sys.exit(1 if "fail" in res else 0)
     line("ok", "task root " + ROOT)
     pr = P(".awt", ".probe-%d" % os.getpid())
     try:
@@ -4660,7 +4725,7 @@ def build():
         return q
     T, F = {}, dict(action="store_true")
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T),
-                         (("--hooks",), dict(choices=["claude", "opencode", "pi", "all"])), (("--uninstall",), F)])
+                         (("--hooks",), dict(choices=["claude", "codex", "opencode", "pi", "all"])), (("--uninstall",), F)])
     V(sp, "resume", opt=[(("--hook",), F), (("--framed",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
     V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F)])
