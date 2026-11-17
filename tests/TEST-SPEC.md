@@ -230,7 +230,7 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 | B9, B10 | `resume --hook` refreshes it; outside a node it prints and writes nothing |
 | B11 | Agent fixture with no `AGENTS.md`: running the `SessionStart` command from its `settings.json` (as the host would) prints the brief, and `BRIEF.md` matches |
 | B12 | The settings template has `SessionStart` with no `matcher` (runs after compaction) |
-| B13 | The standalone AGENTS block is short, names `BRIEF.md`, `decide`, `ask`, the subagent line, and has no handoff line |
+| B13 | The standalone AGENTS block is short, names `BRIEF.md`, `decide`, `ask`, the subagent line, says what the plugin and the Claude Code hooks record, and asks for a `state` handoff without claiming everything is recorded |
 | B14 to B16 | Tree: every node kind gets a brief at creation; a child write refreshes the parent; a task write refreshes the agents below it |
 | B17 | The tree block names `$AWT_DIR/BRIEF.md` and `$AWT_DIR/out.md` |
 | P2 | The plugin block is at most 260 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `decide`, `ask`; no `state`, no `find --like` |

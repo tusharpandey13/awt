@@ -122,10 +122,11 @@ class Prompt(test_awt.Base):
         self.init()
         t = test_awt.slurp(self.p("AGENTS.md"))
         body = t.split("-->", 1)[1].rsplit("<!--", 1)[0]
-        for want in ("BRIEF.md", "./awt decide", "./awt ask", "Everything else is recorded", "Subagents"):
+        for want in ("BRIEF.md", "./awt decide", "./awt ask", "Paseo plugin", "./awt state --now", "Claude Code hooks", "Subagents"):
             self.assertIn(want, body)
-        for gone in ("state", "supersede", "capture"):
-            self.assertNotIn(gone, body)  # decision 15: no handoff line
+        self.assertNotIn("Everything else is recorded", body)  # false without the plugin (M4)
+        for gone in ("supersede", "capture"):
+            self.assertNotIn(gone, body)
         self.assertLessEqual(len(body), 520, len(body))
 
 

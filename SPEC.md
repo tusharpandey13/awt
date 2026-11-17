@@ -254,11 +254,11 @@ The block is wrapped in `<!-- awt:begin -->` and `<!-- awt:end -->`. On re-init,
 ```markdown
 # Task workspace (awt)
 
-Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. With the Paseo plugin, handoffs and sends are recorded for you; without it, Claude Code hooks record detected sends, so leave a handoff with `./awt state --now "..." --next "..."`. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
 **Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
 ```
 
-About 250 characters of prompt plus the subagent line. There is no handoff line (ARCHITECTURE-v2-DECISIONS 15): the plugin writes an `auto` state after a turn with none, and `state` stays an optional verb that `awt help agents` still documents. The tree form (`awt` for `./awt`) opens with "Your node is `$AWT_DIR` if set, else this directory.", names `$AWT_DIR/BRIEF.md`, and sends a subagent's result to `$AWT_DIR/out.md`.
+About 300 characters of prompt plus the subagent line. The template is read with or without the Paseo plugin, so it does not claim that everything is recorded: with the plugin, handoffs (an `auto` state after a turn with none) and outbound sends are recorded; without it only the Claude Code hooks from `awt init` run, which record detected sends (PreToolUse, PostToolUse, PostToolUseFailure, PermissionDenied on `Bash` and `mcp__*`) and ingest the transcript at SessionEnd, and nothing writes a handoff, so the template asks the agent for a `state`. The Paseo plugin's own block (above) keeps "Everything else is recorded for you", which is true there. The tree form (`awt` for `./awt`) opens with "Your node is `$AWT_DIR` if set, else this directory.", names `$AWT_DIR/BRIEF.md`, and sends a subagent's result to `$AWT_DIR/out.md`.
 
 ### README.md (task dir)
 

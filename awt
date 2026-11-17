@@ -57,13 +57,13 @@ BLOCK_BEGIN, BLOCK_END = "<!-- awt:begin -->", "<!-- awt:end -->"
 AGENTS_BLOCK = BLOCK_BEGIN + r'''
 # Task workspace (awt)
 
-Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. With the Paseo plugin, handoffs and sends are recorded for you; without it, Claude Code hooks record detected sends, so leave a handoff with `./awt state --now "..." --next "..."`. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
 **Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
 ''' + BLOCK_END + "\n"
 TREE_BLOCK = BLOCK_BEGIN + r'''
 # Task workspace (awt)
 
-Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Your brief is `$AWT_DIR/BRIEF.md` (or run `awt resume`). Record a choice with `awt decide "..." --why "..."`, a question for a person with `awt ask "..."`. Everything else is recorded for you. Stuck: `awt help agents`.
+Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Your brief is `$AWT_DIR/BRIEF.md` (or run `awt resume`). Record a choice with `awt decide "..." --why "..."`, a question for a person with `awt ask "..."`. With the Paseo plugin, handoffs and sends are recorded for you; without it, Claude Code hooks record detected sends, so leave a handoff with `awt state --now "..." --next "..."`. Stuck: `awt help agents`.
 **Subagents:** skip the brief, write the result to `$AWT_DIR/out.md`.
 ''' + BLOCK_END + "\n"
 README = '''# {goal}
