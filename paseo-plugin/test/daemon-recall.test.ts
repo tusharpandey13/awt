@@ -63,7 +63,7 @@ async function timelineRaw(id: string): Promise<any> {
 async function receipts(id: string): Promise<any[]> {
   const out: any[] = [];
   collect(await timelineRaw(id), out);
-  return out.filter((i) => i.kind === "awt.receipt");
+  return out.filter((i) => i.kind === "awt-receipt");
 }
 /** H3: poll every 250 ms until n receipts (or at least n), 15 s cap. */
 async function waitReceipts(id: string, n: number): Promise<any[]> {
@@ -186,7 +186,7 @@ test("E-R10 a turn that records a decision gets one receipt with the right count
   assert.ok(it.data.ids.includes(dId) && it.data.ids.includes(nId) && it.data.ids.length <= 5, JSON.stringify(it.data.ids));
   // ordering: after the turn's last assistant message
   const all = JSON.stringify(await timelineRaw(rec1));
-  assert.ok(all.lastIndexOf('"awt.receipt"') > all.lastIndexOf('"assistant_message"'), "receipt after the last assistant_message");
+  assert.ok(all.lastIndexOf('"awt-receipt"') > all.lastIndexOf('"assistant_message"'), "receipt after the last assistant_message");
   // 2
   const dts = rows(rec1, "decisions")[0].ts;
   const grouped: Record<string, number> = {};
