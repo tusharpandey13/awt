@@ -1,5 +1,5 @@
 """awt ui (SPEC.md, "ui"): Datasette over store.db, read-only, on 127.0.0.1, with the docs/recipes queries canned. Fictional data."""
-import glob, http.client, json, os, shutil, signal, socket, subprocess, sys, time, unittest, urllib.error, urllib.request
+import glob, http.client, json, os, shutil, signal, socket, sqlite3, subprocess, sys, time, unittest, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_ingest import rec
@@ -46,8 +46,46 @@ class UI(Store):
         self.env["AWT_DATASETTE"] = os.path.join(self.tmp, "no-such-datasette")
         r = self.bad("ui", root="")
         self.assertIn("datasette", r.stderr)
-        self.assertRegex(r.stderr, r"pipx install datasette|uv tool install datasette")
+        self.assertRegex(r.stderr, r"pipx install 'datasette<1'|uv tool install 'datasette<1'")
         self.assertNotIn("Traceback", r.stderr)
+
+    def fake_datasette(self, version):
+        """A datasette that prints its version and records how it was started."""
+        p = os.path.join(self.tmp, "fake-datasette")
+        with open(p, "w") as g:
+            g.write("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'datasette, version %s'; exit 0; fi\necho \"$@\" > '%s'\n" % (version, os.path.join(self.tmp, "args.txt")))
+        os.chmod(p, 0o755)
+        self.env["AWT_DATASETTE"] = p
+
+    def test_datasette_1x_is_refused_because_it_would_drop_the_recipes_silently(self):
+        self.build()
+        self.fake_datasette("1.0a19")
+        r = self.bad("ui", root="")
+        self.assertIn("1.x", r.stderr)
+        self.assertRegex(r.stderr, r"fix: .*datasette<1")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "args.txt")))
+
+    def test_datasette_0x_is_started_on_the_live_store_without_a_copy(self):
+        self.build()
+        self.fake_datasette("0.65.1")
+        r = self.ok("ui", root="")
+        args = open(os.path.join(self.tmp, "args.txt")).read().split()
+        self.assertEqual(args[:2], ["serve", self.db])
+        self.assertNotIn("-i", args)
+        self.assertEqual(args[args.index("-h") + 1], "127.0.0.1")
+        self.assertIn("live", r.stdout)
+
+    def test_an_old_store_is_refused_with_the_rebuild_command(self):
+        self.build()
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE schema_meta SET value='5' WHERE key='schema_version'")
+        c.commit()
+        c.close()
+        self.fake_datasette("0.65.1")
+        r = self.bad("ui", root="")
+        self.assertIn("store schema 5 < 7", r.stderr)
+        self.assertRegex(r.stderr, r"fix: awt ingest --rebuild")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "args.txt")))
 
     def start(self, port):
         p = subprocess.Popen([sys.executable, "-I", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "awt"), "ui", "--port", str(port)],
@@ -90,14 +128,16 @@ class UI(Store):
         # writing is refused
         with self.assertRaises(urllib.error.HTTPError):
             urllib.request.urlopen(base + "/store.json?sql=delete+from+sessions&_shape=array", timeout=10)
-        # it listens on loopback only, and serves a snapshot in a temp dir, never the live file
+        # it listens on loopback only and serves the live file, read-only and not immutable: no copy of the store is made
         ps = subprocess.run(["ps", "-o", "args=", "-p", str(p.pid)], capture_output=True, text=True).stdout
         ch = subprocess.run(["pgrep", "-P", str(p.pid), "-fl", "datasette"], capture_output=True, text=True).stdout
         self.assertIn("127.0.0.1", ps + ch)
-        self.assertIn("awt-ui-", ch)
-        self.assertNotIn(self.db, ch)
-        tmpdir = [x for x in ch.split() if "awt-ui-" in x][0].rsplit("/store.db", 1)[0]
+        self.assertIn(self.db, ch)
+        self.assertNotIn(" -i ", ch)
+        self.assertNotIn("immutable", ch)
+        tmpdir = [x for x in ch.split() if "awt-ui-" in x][0].rsplit("/metadata.json", 1)[0]
         self.assertTrue(os.path.isdir(tmpdir))
+        self.assertFalse(os.path.exists(os.path.join(tmpdir, "store.db")))
         p.send_signal(signal.SIGTERM)
         p.wait(timeout=15)
         self.assertEqual(open(self.db, "rb").read(), before)
@@ -118,7 +158,7 @@ class UI(Store):
         self.assertIn(self.get(port, "/store.db", host="localhost"), (400, 403))
 
     @unittest.skipUnless(shutil.which("datasette"), "datasette is not installed")
-    def test_the_page_is_a_snapshot_so_a_later_ingest_cannot_tear_it(self):
+    def test_a_later_ingest_shows_on_the_next_query_and_the_page_never_tears(self):
         self.build()
         port = free_port()
         self.start(port)
@@ -127,7 +167,7 @@ class UI(Store):
         before = n()
         self.put(self.rows_() + [rec("user", 6, "one more"), rec("assistant", 7, "ok")])
         self.ok("ingest", "--source", "claude", root=self.root)
-        self.assertEqual(n(), before)  # the running page still shows the moment it started
+        self.assertGreater(n(), before)  # the live file, opened read-only: a committed ingest is visible without a restart
 
     @unittest.skipUnless(shutil.which("datasette"), "datasette is not installed")
     def test_a_taken_port_gets_a_free_one_and_the_printed_url_works(self):
@@ -146,13 +186,13 @@ class UI(Store):
         self.assertNotIn("metadata", "".join(lines))
 
     @unittest.skipUnless(shutil.which("datasette"), "datasette is not installed")
-    def test_sighup_stops_the_server_and_removes_the_copy(self):
+    def test_sighup_stops_the_server_and_removes_its_temp_dir(self):
         self.build()
         port = free_port()
         p, _ = self.start(port)
         self.wait_up(port)
         ch = subprocess.run(["pgrep", "-P", str(p.pid), "-fl", "datasette"], capture_output=True, text=True).stdout
-        tmpdir = [x for x in ch.split() if "awt-ui-" in x][0].rsplit("/store.db", 1)[0]
+        tmpdir = [x for x in ch.split() if "awt-ui-" in x][0].rsplit("/metadata.json", 1)[0]
         p.send_signal(signal.SIGHUP)
         p.wait(timeout=15)
         self.assertFalse(os.path.exists(tmpdir))

@@ -61,7 +61,7 @@ After `init`, the task's own `AGENTS.md` holds the working rules for agents in t
 | The answer to one | `awt answer q-1a2b3c4d "Yes, set by the gateway"` |
 | A link | `awt ref https://example.com/doc --title "Design doc"` (add `--no-access` if you can't open it) |
 | Text that can't be linked | `awt capture --from slack --title "Retry thread" notes.txt` |
-| A doc replaced by a better one | `mv docs/old.md docs/_superseded/`, then `awt note "docs/new.md replaces docs/old.md: r"` |
+| A doc replaced by a better one | `mkdir -p docs/_superseded && mv -n docs/old.md docs/_superseded/ && test ! -e docs/old.md` (a name already taken there stays put: rename first), then `awt note "docs/new.md replaces docs/old.md: r"` |
 
 Long text goes in a file under `docs/`, with its path in the field.
 

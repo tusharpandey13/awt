@@ -294,7 +294,7 @@ class TestIngest(Ing):
     def test_supersede_removed_with_a_hint(self):
         r = self.bad("supersede", "docs/a.md", "docs/b.md", code=2)
         self.assertEqual(len([x for x in r.stderr.splitlines() if x.strip()]), 2)  # the error line and the fix line
-        self.assertIn("mv docs/old.md docs/_superseded/", r.stderr)
+        self.assertIn("mkdir -p docs/_superseded && mv -n docs/old.md docs/_superseded/", r.stderr)
 
     def test_save_removed_and_verb_count(self):
         r = self.bad("save", "m", code=2)

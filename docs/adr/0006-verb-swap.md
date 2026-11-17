@@ -8,7 +8,7 @@ SPEC rule 8: at most 16 top-level verbs; a new verb means removing one. v2 adds 
 
 ## Decision
 
-- Remove `supersede`. Host-native replacement: `mv docs/old.md docs/_superseded/` plus `awt note "docs/new.md replaces docs/old.md: why"`. Listing still hides `docs/_superseded/`; old `doc` rows still read.
+- Remove `supersede`. Host-native replacement: `mkdir -p docs/_superseded && mv -n docs/old.md docs/_superseded/ && test ! -e docs/old.md` (creates the folder on first use and never replaces an earlier superseded doc: a name already taken stays put and the last test fails) plus `awt note "docs/new.md replaces docs/old.md: why"`. Listing still hides `docs/_superseded/`; old `doc` rows still read.
 - `save` stays removed: `git commit` under host permissions, with `awt doctor --staged` as the secret check.
 - `decide --supersedes ID` is a flag and stays.
 - Both removed verbs print a `fix:` line with the replacement and exit 2, so an agent that remembers them is told once.

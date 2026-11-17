@@ -201,7 +201,7 @@ class TestBasics(Base):
         self.assertIn("docs/_superseded", r.stderr)
         self.assertIn("awt note", r.stderr)
         self.assertTrue(os.path.exists(self.p("docs", "a.md")))
-        os.makedirs(self.p("docs", "_superseded"))
+        os.makedirs(self.p("docs", "_superseded"))  # (the hint creates it; tests/test_p23fix.py runs the hint itself)
         os.rename(self.p("docs", "a.md"), self.p("docs", "_superseded", "a.md"))  # the replacement
         self.assertNotIn("_superseded", self.ok("list", "docs").stdout)
         self.assertIn("_superseded", self.ok("list", "docs", "--all").stdout)

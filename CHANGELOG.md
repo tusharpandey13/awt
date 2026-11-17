@@ -3,9 +3,16 @@
 ## Unreleased
 
 ### Upgrade
+- **Run `awt ingest --rebuild` once by hand** after installing this version (schema 7: the new `usage` table). Until you do, hooks and the Paseo pipe leave `store.db` alone (silent), `find` keeps using the old one, `doctor` warns `store schema N < 7`, and `awt ui` refuses. The rebuild needs free disk of about 1.2 x the larger of your `store.db` and your canonical logs, plus 256 MB (about 3.9 GB for a 3 GB store with 2.4 GB of logs), and holds one log file's rows in memory at a time; awt refuses with a `fix:` line if the disk is too full.
+- `awt ui` now needs Datasette below 1.0 (`pipx install 'datasette<1'`).
 - The Paseo plugin no longer posts the awt brief after a compaction by default (`AWT_COMPACT_BRIEF`). On an existing install, ask the owner to run `awt init --hooks claude|opencode|pi|all` once per provider on the agent machine; `awt doctor` warns for a detected provider without it (and for a hook that pins an `awt` that is gone). Other providers (e.g. Codex) are not covered yet; `AWT_COMPACT_BRIEF=1` brings back the old visible brief for them.
 
 ### Fixed
+- A schema bump no longer rebuilds the store from a hook or the Paseo pipe, and a lock timeout never falls back to a rebuild. Only `awt ingest --rebuild` replaces an existing store; it checks free disk first and keeps one file's rows in memory at a time.
+- `awt ui` serves the live `store.db` read-only instead of copying it (a 3 GB copy on every start), refuses Datasette 1.x and an old schema with a fix line.
+- An out-of-range integer in a transcript or in ccusage output is stored as null; one file that cannot be derived is counted and skipped; neither stops the build.
+- The `supersede` replacement hint creates `docs/_superseded/` when missing and never overwrites an earlier file there.
+- A conversation newer than the last ccusage import keeps a cost floor (`cost_source = 'ccusage_stale'`) instead of dropping out of cost totals.
 - The Paseo plugin no longer posts the awt brief into the chat after a compaction by default (`AWT_COMPACT_BRIEF` is now opt-in with `1`). The message showed as a user message the owner never sent, and agents read it as an instruction to continue. The static prompt block survives compaction, and `awt_resume` brings the brief back on demand.
 - The `AGENTS.md` block no longer says "Everything else is recorded for you": it is false without the Paseo plugin. It now says what the plugin and the Claude Code hooks record, and asks for a `state` handoff.
 

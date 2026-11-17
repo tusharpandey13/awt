@@ -97,7 +97,7 @@ Primary key `usage_id`. Two grains share the table and **overlap, so never add t
 | `cost_usd`, `cost_source` | | `ccusage` (priced by ccusage), `computed` (the transcript carried a cost: pi, opencode; there is no price table, so Claude messages have none), or null |
 | `api_id` | | the provider's own message id (Claude `message.id`), used to count a message once when a resumed or forked transcript repeats it; null when the provider has none. Rows with the same (`provider_name`, `api_id`) are one message |
 | `as_of` | | ccusage rows only: ccusage's `lastActivity` for the session, the time its totals were last current. A row older than the newest message of its session is stale and `usage_cc` leaves it out |
-| `latency_ms` | | Claude: time since the parent record; pi: `durationMs`; opencode: completed minus created. Null on ccusage rows. Not time to first token |
+| `latency_ms` | | Claude: from the request (the parent of the message's first record) to the message's last record; pi: `durationMs`; opencode: completed minus created. Null on ccusage rows. Not time to first token |
 
 Messages join as `usage u JOIN messages m ON m.session_id = u.session_id AND m.message_id = u.message_id`, turns as `JOIN turns t ON t.turn_id = u.turn_id`. A Claude API message streamed as several records appears once, keyed by the last record's `uuid`.
 
@@ -107,8 +107,11 @@ The `message` rows with each API message counted once: of rows sharing (`provide
 ### usage_cc (view)
 The ccusage rows (`grain = 'session_model'`) that joined to a session here and are not stale: a row is dropped when any message of the same conversation is newer than its `as_of` (plus one second of slack). Columns as in `usage`.
 
+### usage_stale (view)
+The ccusage rows (`grain = 'session_model'`) that joined to a session here and are stale (the complement of `usage_cc`). Columns as in `usage`. `usage_best` keeps their cost as a floor, see below.
+
 ### usage_best (view)
-Per (`session_id`, `provider_name`, `response_model`): the `usage_cc` rows, plus the `usage_msg` rows summed (`cost_usd` summed, `cost_source` `computed` when any message had a cost) for every conversation that has no `usage_cc` row. A conversation shared by several sessions (a subagent file, a resumed transcript) is covered by its ccusage row as a whole, so nothing is counted twice. Columns as in `usage` without keys. Use it for cost and token totals; ccusage rows with no session here are not in it.
+Per (`session_id`, `provider_name`, `response_model`): the `usage_cc` rows, plus the `usage_msg` rows summed (`cost_usd` summed, `cost_source` `computed` when any message had a cost) for every conversation that has no `usage_cc` row. A conversation shared by several sessions (a subagent file, a resumed transcript) is covered by its ccusage row as a whole, so nothing is counted twice. Columns as in `usage` without keys. A stale ccusage row (`usage_stale`) adds one row with `cost_source = 'ccusage_stale'`, null tokens and the ccusage cost, unless the conversation's messages carry their own cost: the session keeps a cost floor (short by what it spent after the import) instead of dropping out of the totals; run `awt ingest --source ccusage` to refresh it. Use it for cost and token totals; ccusage rows with no session here are not in it.
 
 ## Queries
 
