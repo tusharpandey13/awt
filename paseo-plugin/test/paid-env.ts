@@ -37,13 +37,13 @@ export function paseo(st: Pick<Stack, "home" | "env">, ...a: string[]): string {
 /** The real stores whose size and mtime must not change (U3). */
 export function realStores(): Record<string, string> {
   const h = homedir(), out: Record<string, string> = {};
-  for (const p of [".paseo", ".claude/projects", ".local/share/opencode/opencode.db", ".pi/agent/sessions"]) {
+  for (const p of [".paseo", ".claude/projects", ".claude/settings.json", ".local/share/opencode/opencode.db", ".config/opencode/plugins", ".pi/agent/sessions", ".pi/agent/extensions"]) {
     try { execFileSync("test", ["-e", join(h, p)]); out[p] = execFileSync("sh", ["-c", `find '${join(h, p)}' -maxdepth 1 -exec stat -f '%N %z %m' {} + | sort | md5`], { encoding: "utf8" }).trim(); } catch { out[p] = "absent"; }
   }
   return out;
 }
 
-export async function startStack(opts: { claude: boolean; deepseek: boolean }): Promise<Stack> {
+export async function startStack(opts: { claude: boolean; deepseek: boolean; compactBrief?: boolean }): Promise<Stack> {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), "awtp-")));
   const home = join(tmp, "home"), root = join(tmp, "root"), repo = join(tmp, "parsekit");
   for (const d of [home, join(tmp, "bin"), join(tmp, "claude"), join(tmp, "xdg", "data"), join(tmp, "xdg", "config"), join(tmp, "pi"), repo]) mkdirSync(d, { recursive: true });
@@ -67,6 +67,7 @@ os.execv(${JSON.stringify(join(REPO, "awt"))},[${JSON.stringify(join(REPO, "awt"
     CLAUDE_CONFIG_DIR: join(tmp, "claude"), XDG_DATA_HOME: join(tmp, "xdg", "data"), XDG_CONFIG_HOME: join(tmp, "xdg", "config"), PI_CODING_AGENT_DIR: join(tmp, "pi"),
     AWT_BIN: join(REPO, "awt"), AWT_ROOT: root, AWT_TIMEOUT_MS: "20000", AWT_COMPACT_BRIEF: "1", AWT_HOOK_LOG: hookLog,
   };
+  if (opts.compactBrief === false) delete env.AWT_COMPACT_BRIEF;
   if (opts.claude) { const t = claudeToken(); if (!t) throw new Error("no usable Claude credential in the keychain"); secrets.push(t); env.CLAUDE_CODE_OAUTH_TOKEN = t; }
   if (opts.deepseek) { const k = deepseekKey(); if (!k) throw new Error("no deepseek credential"); secrets.push(k); env.DEEPSEEK_API_KEY = k; }
   const port = await free();

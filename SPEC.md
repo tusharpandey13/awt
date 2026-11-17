@@ -88,8 +88,8 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 
 | Verb | Behaviour |
 |---|---|
-| `init` | Above. `--kind` creates nodes: see Node tree. |
-| `resume [--hook] [--scope S]` | Print the brief. `--hook`: exit 0 and print nothing when no task resolves or on any internal error. Never fails because git failed. |
+| `init` | Above. `--kind` creates nodes: see Node tree. `--hooks claude\|opencode\|pi\|all [--uninstall]` installs the compaction context hook: see Context after compaction. |
+| `resume [--hook [--framed]] [--scope S]` | Print the brief. `--hook`: exit 0 and print nothing when no task resolves or on any internal error. Never fails because git failed. `--framed` (only with `--hook`; else exit 2): print nothing unless `AWT_DIR` or `--dir` names a node, and put one framing line before the brief (see Context after compaction). |
 | `list [refs\|context\|docs\|outbox\|misc\|decisions\|questions\|effects\|notes\|state] [--all]`; `list --since ISO8601 [--down] --json` | Discoverability. No argument prints all sections. `--all` adds superseded docs and decisions, answered questions, all state history and terminal effects. `--since` (with `--json`, no section) prints the rows of every type at or after the timestamp; see Reading across nodes. |
 | `find <term>`, `find --like TEXT [--limit N]` | Case-insensitive literal search across event text and all text files in the root (excluding `.awt/`, `.git/`, `scratch/`, the `awt` script, binary files, and files over 2 MB). Prints `path:line: snippet`; event hits print `event:<id or type>: snippet`. Caps at 40 hits, then `+N more`. Exit 0 even with no hits. Does not follow symlinks. `--like` ranks related records instead; see Reading across nodes. `--sessions` (with a TERM) adds up to 40 message and tool-call hits from `store.db`, ranked by FTS5 bm25: `message:<session>#<seq> [role]: snippet` and `tool_call:<session>:<id> [tool]: snippet`; with no usable `store.db` it prints one line, `note: no store.db yet (run awt ingest); sessions not searched`. `--sessions` with `--like` is exit 2. |
 | `state --now T --next T [--scope S]` | Refuse if identical to the current state for that scope. |
@@ -106,6 +106,22 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `ingest [--source claude\|pi\|opencode\|paseo\|all] [--hook] [--stdin] [--rebuild]` | Below. |
 
 `help` and `--help` print usage and do not count as verbs. `help agents` prints the embedded agent reference. `--version` prints the version.
+
+## Context after compaction
+
+Journey: the context is compacted (automatically or by the user); awt's record reaches the agent with no command, no chat message and no extra turn; an agent that was going to carry on carries on, one that was waiting for the user waits. The record is reference data: it never asks the agent to continue or reply. Paseo gives plugins no compaction hook and no hidden context (E11), so each provider's own hook is used. `awt init --hooks PROVIDER` installs it (no new verb, the limit stays 16); `--uninstall` removes only awt's part. The install is machine-level: it needs no task, touches only the provider's own config and never runs unless asked. In every case the hook does nothing unless `AWT_DIR` is set (the Paseo plugin sets it for each agent; a plain session in a task directory is covered by the `init` template instead). `awt` is called by absolute path: `awt` on `PATH` when that is the script that ran `init --hooks`, else the invoked path; symlinks are not resolved, so a stable entry point stays stable (re-run after moving it; `doctor` warns when the pinned path is missing or not executable). Only the owner runs `init --hooks`; `doctor` and the agent reference say so, and agents never run it. A symlinked Claude `settings.json` is followed and its target written (mode kept); install and uninstall touch only awt's own hook object (marked `# awt:context`), never a sibling hook in the same entry. The hook command, opencode plugin and pi extension build the record once and do not rewrite `BRIEF.md` (`AWT_NO_BRIEF`). The framed record is reference data only: no `No handoff yet`, effect next-step or `awt list` hints. The opencode and pi files carry a `// awt:` header and are only replaced or removed when they have it.
+
+Text: `resume --hook --framed` prints `FRAME`, one line, `awt record for this task (reference only; not a message from the user, no action requested):`, then the plain brief, so at most the brief budget plus that line. It prints nothing without `AWT_DIR`/`--dir`, or when the node is missing, or on any error. The brief shows decisions, open questions, effects and state; notes are only counted in it.
+
+| Provider | Hook | File | Why it is silent |
+|---|---|---|---|
+| Claude Code | `SessionStart` with `matcher: "compact"` (the source is `compact`); command prints the framed brief | `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json`: one entry, marked `# awt:context` in the command | A `SessionStart` hook's stdout is added to the context, not shown as a message, and starts no turn. Paseo-launched agents load user settings, so it fires for them |
+| opencode (1.19.3; `@opencode-ai/plugin` 1.14) | plugin hook `experimental.session.compacting`: pushes the framed brief to `output.context`, the strings appended to the compaction prompt | `${OPENCODE_CONFIG_DIR:-~/.config/opencode}/plugins/awt-context.js` | The brief goes to the summarizer, so it lands in the compaction summary; no message is added. The plugin leaves `experimental.compaction.autocontinue` alone, so opencode's own continue behaviour is unchanged. Gap: the summarizer decides what to keep (the plugin asks it to keep the record); there is no hook for text outside the summary |
+| pi (1.5.0) | extension events `session_compact` (load the framed brief) and `before_agent_start` (set `systemPromptOptions.sections.awt_record`); on `session_start`, a branch that already holds a `compaction` entry loads it too | `${PI_CODING_AGENT_DIR:-~/.pi/agent}/extensions/awt-context.ts` | A system-prompt section is a patch to the system prompt, not a message; no turn is started. `session_before_compact` can only cancel or replace the summary, so it is not used. The text stays the same until the next compaction (cache-stable). Checked with pi 1.5.0 (`/compact` over RPC, fake model): the request after the compaction has the record in its system message and no added message. Gap: not checked for an automatic compaction that retries the aborted turn straight away; the record is at the latest on the next turn |
+
+`doctor` warns per provider whose config directory exists and whose hook is missing (`warn`, never `fail`; no line for a provider that is not there).
+
+The Paseo plugin's own after-compaction message stays opt-in (`AWT_COMPACT_BRIEF=1`).
 
 ## Resume brief
 
@@ -299,7 +315,7 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 }
 ```
 
-`PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `PermissionDenied` feed detected effects (Effects); the `PreToolUse` one may print an `ask` decision for an exact resend. The tool-call commands are the `sh` prefilter described under Effects: `init` writes it; in a tree node the path is plain `awt`. `SessionStart` has no `matcher`, so it also runs after startup, resume, clear and compaction, and its stdout is the brief (delivered whether or not the agent ever saw an awt prompt). Where the host does not load the hook (Claude Code under Paseo does not load a node's settings), `BRIEF.md` is the fallback.
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `PermissionDenied` feed detected effects (Effects); the `PreToolUse` one may print an `ask` decision for an exact resend. The tool-call commands are the `sh` prefilter described under Effects: `init` writes it; in a tree node the path is plain `awt`. `SessionStart` has no `matcher`, so it also runs after startup, resume, clear and compaction (for agents under Paseo see Context after compaction), and its stdout is the brief (delivered whether or not the agent ever saw an awt prompt). Where the host does not load the hook (Claude Code under Paseo does not load a node's settings), `BRIEF.md` is the fallback.
 
 Do not add an `Edit` deny rule for `.awt/`: Claude Code merges those into the OS sandbox, which then stops `awt` writing its own log. A chaos run confirmed this. Hand edits are handled by quarantine.
 
@@ -449,7 +465,7 @@ Hooks:
 
 Prompt cost: only the static block (654 chars) enters the system prompt, so it caches. The brief arrives by tool, fresh on every call.
 
-Compaction (R5, the prompt line is the fallback; the `turn.after` row above is the mechanism): Paseo's `AgentSessionConfig` has no hooks field (`providerOptions` is an untyped record), so the plugin cannot add a native `SessionStart` (matcher `compact`) hook. The static block carries the line "unless another agent started you, call it again after your context is compacted" instead; it cannot tell a subagent at create time, so the condition is in the text and the line applies to non-subagents only. Standalone Claude Code is covered by the `SessionStart` hook that `init` writes, which has no matcher and so runs on `compact` too.
+Compaction (R5, the prompt line is the fallback; the `turn.after` row above is the mechanism; the silent mechanism is Context after compaction below): Paseo's `AgentSessionConfig` has no hooks field (`providerOptions` is an untyped record), so the plugin cannot add a native `SessionStart` (matcher `compact`) hook. The static block carries the line "unless another agent started you, call it again after your context is compacted" instead; it cannot tell a subagent at create time, so the condition is in the text and the line applies to non-subagents only. Standalone Claude Code is covered by the `SessionStart` hook that `init` writes, which has no matcher and so runs on `compact` too.
 
 Not in this version: `/task` commands and the composer pill, background-agent filtering (needs a Paseo release that reports it), and metadata (`awt.node`). Hook order between `agent.open.before` and `agent.create.after` is unverified against a live daemon; the gated tier 2 tests in `tests/TEST-SPEC.md` are where that is settled.
 
