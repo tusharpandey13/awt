@@ -2684,7 +2684,9 @@ def store_checks(line):
                 size /= 1024
             line("ok", "store size %s %s in %d files (awt never deletes; remove old months by hand)" % (("%d" % size) if unit == "B" else "%.1f" % size, unit, len(allf)))
             why = store_old(store_meta(store)) if os.path.isfile(os.path.join(store, "store.db")) else None
-            if why:
+            if why and store_newer(store_meta(store)):
+                line("warn", "%s" % why + " (this awt never rebuilds, writes or migrates it; fix: %s)" % NEWER_FIX)
+            elif why:
                 line("warn", "%s: run `%s` once (find and ingest keep using the old store.db until then; the build needs about %s of free disk)" % (why, REBUILD_FIX, human(rebuild_need(store))))
             if loose:
                 line("warn", "%d store files are readable by others, expected 600 (chmod 600 %s)" % (len(loose), loose[0]))
@@ -3547,6 +3549,9 @@ def cmd_ingest(a):
                 raise
             die("event failed: %s: %s" % (type(x).__name__, x), "pipe one hook event as JSON on stdin")
     res = []
+    if a.rebuild:  # a killed rebuild must not leave its temp store.db (GBs): SIGTERM and SIGHUP unwind like Ctrl-C, so build_store removes it
+        for sg in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sg, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         store = store_dir()
         private_dir(store)
@@ -3692,6 +3697,8 @@ def cmd_ui(a):
         die("datasette 1.x ignores the canned queries awt writes as metadata (the recipes would not show)", "pipx install --force 'datasette<1' (or: uv tool install --force 'datasette<1'), then: awt ui")
     meta = store_meta(store_dir())
     why = store_old(meta)
+    if store_newer(meta):
+        die(why, NEWER_FIX + ", then: awt ui")
     if why:
         die("%s: the recipes need the current schema" % why, "%s   (one time; about %s of free disk), then: awt ui" % (REBUILD_FIX, human(rebuild_need(store_dir()))))
     tmp = tempfile.mkdtemp(prefix="awt-ui-")
@@ -4381,6 +4388,8 @@ def sync_into(db, store, root, inputs, fresh):
                 if os.environ.get("AWT_TEST_DERIVE_RAISE") == sid:
                     raise ValueError("test hook")  # test hook: a file whose derivation fails
                 DERIVE[first_src[k]](db, sid, [(r[2], r[3]) for r in file_rows(path_of[k], keys[k])], place)
+                if os.environ.get("AWT_TEST_DERIVE_RAISE_AFTER") == sid:
+                    raise ValueError("test hook")  # test hook: a derivation that fails after it wrote its rows
                 db.execute("RELEASE derive")
             except Exception:  # one file that cannot be derived (a value SQLite refuses, an odd record) is a counted error and leaves its derived rows out; it never stops the build
                 db.execute("ROLLBACK TO derive")
@@ -4420,7 +4429,7 @@ def build_store(store, root, inputs):
     os.close(fd)
     db = sqlite3.connect(tmp, isolation_level=None)
     try:
-        db.executescript("PRAGMA page_size=4096; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; BEGIN;" + DDL)
+        db.executescript("PRAGMA page_size=4096; PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF; BEGIN;" + DDL)
         sync_into(db, store, root, inputs, True)
         for q in INDEXES.split(";"):
             if q.strip():
@@ -4465,6 +4474,15 @@ def store_meta(store):
         return {"busy": "1"} if "locked" in str(x) else {}  # a busy store is not an old one
 
 
+NEWER_FIX = "install the newer awt"
+
+
+def store_newer(meta):
+    """True when store.db was written by a newer awt (a schema version above this one's): this awt never rebuilds, writes or migrates it."""
+    sv = str((meta or {}).get("schema_version"))
+    return sv.isdigit() and int(sv) > SCHEMA_VERSION
+
+
 def store_old(meta, root=None):
     """Why an existing store.db cannot be updated in place (None when it can): another schema, adapter or tree. Only `awt ingest --rebuild` replaces such a store."""
     if meta.get("busy"):
@@ -4473,6 +4491,8 @@ def store_old(meta, root=None):
         return "store.db cannot be read"
     if meta.get("schema_version") != str(SCHEMA_VERSION):
         sv = str(meta.get("schema_version"))
+        if store_newer(meta):
+            return "store schema %s > %d: this awt is older than the store" % (sv, SCHEMA_VERSION)
         return "store schema %s %s %d" % (sv, "<" if sv.isdigit() and int(sv) < SCHEMA_VERSION else "!=", SCHEMA_VERSION)
     if meta.get("adapter") != str(ADAPTER):
         return "store adapter %s != %d" % (meta.get("adapter"), ADAPTER)
@@ -4504,7 +4524,11 @@ def human(n):
         if n < 1024:
             return "%d %s" % (n, unit)
         n /= 1024.0
-    return "%.1f GB" % (n / 1024.0)
+    return "%.1f GB" % n
+
+
+class StoreChanged(Exception):
+    """store.db changed under update_store (another schema): a skip with a warning, never a write."""
 
 
 def update_store(store, root, inputs):
@@ -4513,8 +4537,14 @@ def update_store(store, root, inputs):
     try:
         db.execute("BEGIN IMMEDIATE")
         try:
+            sv = dict(db.execute("SELECT key, value FROM schema_meta")).get("schema_version")  # re-read under the write lock: another awt may have rebuilt it since sync_store looked
+            if sv != str(SCHEMA_VERSION):
+                db.execute("ROLLBACK")
+                raise StoreChanged("store schema is now %s, this awt writes %d" % (sv, SCHEMA_VERSION))
             sync_into(db, store, root, inputs, False)
             db.execute("COMMIT")
+        except StoreChanged:
+            raise
         except BaseException:
             db.execute("ROLLBACK")
             raise
@@ -4551,6 +4581,10 @@ def sync_store(store, root, force, quiet=False):
                 except OSError:
                     pass
             meta = store_meta(store)
+            if store_newer(meta):  # never rebuild, write or migrate a store from a newer awt (--rebuild included)
+                if not quiet:
+                    warn("%s: %s; store.db was left as it is (canonical logs are still ingested)" % (store_old(meta), NEWER_FIX))
+                return None
             if not force and meta is not None and store_old(meta, root):
                 if not quiet:
                     warn("%s: run `%s` once (find keeps using the old store.db; the build needs about %s of free disk)" % (store_old(meta, root), REBUILD_FIX, human(rebuild_need(store))))
@@ -4560,6 +4594,10 @@ def sync_store(store, root, force, quiet=False):
                 if meta is not None and not force:
                     try:
                         return update_store(store, root, inputs)
+                    except StoreChanged as x:
+                        if not quiet:
+                            warn("store.db was not updated (%s); run awt ingest again" % x)
+                        return None
                     except sqlite3.Error as x:  # a lock that did not clear in 30 s, or a damaged file: never a reason for a full build
                         if not quiet:
                             warn("store.db was not updated (%s); run awt ingest again later%s" % (x, ", or `%s` if it stays" % REBUILD_FIX if "locked" not in str(x) else ""))

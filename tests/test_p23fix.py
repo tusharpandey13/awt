@@ -281,3 +281,130 @@ class TestStaleCcusageCost(Usage):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def load_awt():
+    import importlib.machinery, importlib.util
+    spec = importlib.util.spec_from_loader("awtmod_v", importlib.machinery.SourceFileLoader("awtmod_v", AWT))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestHuman(unittest.TestCase):
+    def test_sizes_over_a_gigabyte(self):
+        h = load_awt().human
+        self.assertEqual(h(4053296742), "3.8 GB")
+        self.assertEqual(h(3154051072), "2.9 GB")
+        self.assertEqual(h(5 * 2 ** 20), "5 MB")
+        self.assertEqual(h(900), "900 B")
+
+
+class TestNewerStoreIsNeverTouched(Old):
+    """N1: a store.db from a newer awt is never rebuilt, written or migrated by this one."""
+
+    def newer(self):
+        self.old_store(version="99")
+        self.put([rec("user", 0, "add a tokenizer"), asst(1, "done", "m1", 100, 40), rec("user", 2, "and tests"), asst(3, "ok", "m2", 5, 5)])
+
+    def test_every_ingest_mode_skips_the_store_step(self):
+        self.newer()
+        for args in (("--source", "claude", "--hook"), ("--source", "all", "--hook"), ("--source", "claude"), ("--rebuild",), ("--rebuild", "--hook"), ("--source", "claude", "--rebuild")):
+            r = self.ok("ingest", *args, root=self.root)
+            self.assertNotIn("rebuilt", r.stdout + r.stderr)
+            self.untouched()
+            if "--hook" in args:
+                self.assertEqual((r.stdout, r.stderr), ("", ""))
+        r = self.ok("ingest", "--source", "paseo", "--stdin", root=self.root, input="")
+        self.untouched()
+        self.assertEqual(r.stderr, "")
+
+    def test_plain_ingest_and_rebuild_say_why_with_a_fix(self):
+        self.newer()
+        for args in (("--source", "claude"), ("--rebuild",)):
+            r = self.ok("ingest", *args, root=self.root)
+            self.assertIn("store schema 99 > 7: this awt is older than the store", r.stderr)
+            self.assertIn("install the newer awt", r.stderr)
+
+    def test_canonical_ingest_continues(self):
+        self.newer()
+        n = len(glob.glob(os.path.join(self.store, "log", "claude", "*", "*.jsonl")))
+        self.ok("ingest", "--source", "claude", root=self.root)
+        rows = sum(len(open(f).readlines()) for f in glob.glob(os.path.join(self.store, "log", "claude", "*", "*.jsonl")))
+        self.assertGreaterEqual(rows, 4)
+        self.assertGreaterEqual(n, 1)
+
+    def test_doctor_warns(self):
+        self.newer()
+        d = self.awt("doctor", root=self.root)
+        self.assertRegex(d.stdout + d.stderr, r"warn.*store schema 99 > 7: this awt is older than the store.*install the newer awt")
+
+    def test_ui_refuses(self):
+        self.newer()
+        p = os.path.join(self.tmp, "fake-datasette")
+        with open(p, "w") as g:
+            g.write("#!/bin/sh\necho 'datasette, version 0.65.1'\n")
+        os.chmod(p, 0o755)
+        r = self.bad("ui", root=self.root, env=dict(self.env, AWT_DATASETTE=p))
+        self.assertIn("store schema 99 > 7", r.stderr)
+        self.assertIn("install the newer awt", r.stderr)
+
+
+class TestUpdateRechecksSchemaUnderTheLock(Old):
+    """N5"""
+
+    def test_a_schema_that_changed_since_the_check_is_a_skip_never_a_stamp(self):
+        self.old_store(version="6")
+        mod = load_awt()
+        store, root = self.store, self.root
+        with self.assertRaises(mod.StoreChanged):
+            mod.update_store(store, mod.find_root(root) or root, {})
+        self.untouched()
+        self.assertEqual(self.q("select value from schema_meta where key='schema_version'"), [("6",)])
+
+
+class TestFullBuildGuardRollsBack(Usage):
+    """N3: the per-file SAVEPOINT must undo what a failed derivation wrote, in a full build too."""
+
+    def test_zero_rows_from_the_failed_file_and_fts_matches(self):
+        self.put([rec("user", 0, "good tokenizer"), asst(1, "ok", "m1", 1, 1)])
+        self.put([dict(rec("user", 0, "bad parser"), sessionId=SID2), dict(asst(1, "bad done", "m9", 4, 4), sessionId=SID2)], path=self.src(SID2))
+        self.ok("ingest", "--source", "claude", root=self.root)
+        good = {t: self.q("select count(*) from %s" % t)[0][0] for t in ("messages", "turns")}
+        env = dict(self.env, AWT_TEST_DERIVE_RAISE_AFTER=SID2)
+        self.ok("ingest", "--rebuild", root=self.root, env=env)
+        for t in ("messages", "turns", "tool_calls", "usage"):
+            self.assertEqual(self.q("select count(*) from %s where session_id=?" % t, SID2), [(0,)], t)
+        self.assertEqual(self.q("select count(*) from sessions where session_id=?", SID2), [(0,)])
+        self.assertLess(self.q("select count(*) from messages")[0][0], good["messages"])
+        self.assertEqual(self.q("select count(*) from fts_text"), self.q("select count(*) from fts_ref"))
+        self.assertEqual(self.q("select count(*) from fts_ref where kind='message' and ref not in (select rowid from messages)"), [(0,)])
+        self.assertEqual(self.q("select errors from build_state where path like ?", "%" + SID2 + ".jsonl"), [(1,)])
+        self.assertEqual(self.q("pragma integrity_check"), [("ok",)])
+
+
+class TestRebuildSignals(Old):
+    """N4: SIGTERM and SIGHUP during --rebuild remove the temp store.db."""
+
+    def run_signal(self, sg):
+        import signal, time
+        self.old_store(version="5")
+        p = subprocess.Popen([sys.executable, "-I", AWT, "--dir", self.root, "ingest", "--rebuild"], env=dict(self.env, AWT_TEST_BUILD_SLEEP="30"),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=self.tmp)
+        tmps = lambda: [f for f in os.listdir(self.store) if f.startswith("store.db.") and f.endswith(".tmp")]
+        end = time.time() + 20
+        while time.time() < end and not tmps():
+            time.sleep(0.05)
+        self.assertTrue(tmps())
+        p.send_signal(sg)
+        p.wait(timeout=20)
+        self.assertEqual(tmps(), [])
+        self.untouched()
+
+    def test_sigterm(self):
+        import signal
+        self.run_signal(signal.SIGTERM)
+
+    def test_sighup(self):
+        import signal
+        self.run_signal(signal.SIGHUP)
