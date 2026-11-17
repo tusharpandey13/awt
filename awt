@@ -18,7 +18,10 @@ A = "./awt"
 ROWMAX = 4096
 TOTAL = 4400
 BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200, lineage=300, children=500,
-              task_goal=400, task_state=600, task_questions=300, task_effects=250, task_decisions=250)
+              notes=300, task_goal=400, task_state=600, task_questions=300, task_effects=250, task_decisions=250)
+
+FRAMED_BUDGET = dict(changes=200)  # framed mode makes room for the newest notes (notes=300) inside the same 4,400 total
+NOTES_SHOWN, NOTE_CUT = 5, 100
 
 K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, newer=8, walk=20000)
 CAPS = {
@@ -749,7 +752,7 @@ def cut(s, n=None):
 
 def fit(head, lines, key, sect, suffix=""):
     """head plus as many lines as fit the budget. The overflow line points at `awt list sect`; a first line that is too long is cut."""
-    budget, o, n = BUDGET[key], [head], len(head) + 1
+    budget, o, n = (FRAMED_BUDGET if FRAMED and key in FRAMED_BUDGET else BUDGET)[key], [head], len(head) + 1
     more = lambda k: c("+%d more: ./awt list %s" % (k, sect)) + suffix
     reserve = len(more(999)) + 1
     for i, ln in enumerate(lines):
@@ -911,6 +914,8 @@ def brief(scope=None, git_section=True):
         ds.sort(key=lambda d: "rule" not in (d.get("tags") or []))
         o.append(fit("## Decisions", ["%s %s%s" % (d["id"], "[rule] " if "rule" in (d.get("tags") or []) else "", cut(d["choice"], 120)) for d in ds] + inherited,
                      "decisions", "decisions", "; inherited: awt find --up rule" if inherited and not FRAMED else ""))
+    if FRAMED and D["notes"]:
+        o.append(fit("## Recent notes", [cut(" ".join(n["text"].split()), NOTE_CUT) for n in D["notes"][-NOTES_SHOWN:][::-1]], "notes", "notes"))
     refs = [ref_view(r) for r in D["refs"].values()]
     inv = "Inventory: %d refs (%d no-access), " % (len(refs), sum(r["access"] == "none" for r in refs)) + ", ".join(
         "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))

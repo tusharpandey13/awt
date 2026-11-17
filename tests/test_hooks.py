@@ -154,6 +154,31 @@ class Hooks(test_awt.Base):
         self.assertLessEqual(len(r.stdout), 4400 + len(FRAME) + 1)
 
     def test_g4_silent_when_the_node_is_gone_or_awt_is_missing(self):
+    def test_g9_framed_brief_keeps_the_newest_notes(self):
+        self.init()
+        for i in range(8):
+            self.ok("note", "fact-%d" % i)
+        self.ok("note", "long " + "w" * 250)
+        out = self.run_hook(self.hook_cmd(), awt_dir=self.root).stdout
+        self.assertIn("## Recent notes", out)
+        sec = out.split("## Recent notes\n", 1)[1].split("\n## ", 1)[0].splitlines()
+        self.assertEqual(len(sec), 5, sec)
+        self.assertTrue(sec[0].startswith("long ") and len(sec[0]) <= 100, sec[0])
+        self.assertEqual(sec[1:], ["fact-7", "fact-6", "fact-5", "fact-4"])
+        self.assertNotIn("fact-3", out)
+        self.assertNotIn("Recent notes", self.ok("resume").stdout, "the plain brief is unchanged")
+
+    def test_g9b_notes_stay_inside_the_total_at_max_fill(self):
+        self.init()
+        self.ok("state", "--now", "n" * 700, "--next", "x" * 300)
+        for i in range(60):
+            self.ok("decide", "choice-%02d %s" % (i, "x" * 250), "--why", "y" * 250, "--tag", "rule")
+            self.ok("ask", "question-%02d %s" % (i, "q" * 350))
+            self.ok("note", "note-%02d %s" % (i, "z" * 250))
+        r = self.run_hook(self.hook_cmd(), awt_dir=self.root)
+        self.assertLessEqual(len(r.stdout), 4400 + len(FRAME) + 1)
+        self.assertIn("## Recent notes", r.stdout)
+
         self.init()
         self.ok("decide", "token-zq41", "--why", "test")
         cmd = self.hook_cmd()
