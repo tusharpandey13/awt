@@ -10,6 +10,10 @@
 - The Paseo plugin no longer posts the awt brief after a compaction by default (`AWT_COMPACT_BRIEF`). On an existing install, ask the owner to run `awt init --hooks claude|opencode|pi|all` once per provider on the agent machine; `awt doctor` warns for a detected provider without it (and for a hook that pins an `awt` that is gone). Other providers (e.g. Codex) are not covered yet; `AWT_COMPACT_BRIEF=1` brings back the old visible brief for them.
 
 ### Fixed
+- An awt that finds a `store.db` of a newer schema than it supports never rebuilds, writes or migrates it, not even for `--rebuild`: ingest skips the store step (canonical ingest goes on; `--hook` and `--stdin` are silent), a plain ingest and `awt ui` print `store schema N > M: this awt is older than the store` with `fix: install the newer awt`, and `doctor` warns. An in-place update re-reads the schema version after taking the write lock and skips with a warning on a mismatch, never stamping it.
+- A full build now uses `journal_mode=MEMORY` so a file whose derivation fails midway is rolled back completely (rows and FTS), not left half-written.
+- SIGTERM and SIGHUP during `--rebuild` remove the temp `store.db.PID.tmp` like Ctrl-C does.
+- Sizes over 1 GB print correctly (`3.8 GB`, not `0.0 GB`) in the disk and rebuild messages.
 - A schema bump no longer rebuilds the store from a hook or the Paseo pipe, and a lock timeout never falls back to a rebuild. Only `awt ingest --rebuild` replaces an existing store; it checks free disk first and keeps one file's rows in memory at a time.
 - `awt ui` serves the live `store.db` read-only instead of copying it (a 3 GB copy on every start), refuses Datasette 1.x and an old schema with a fix line.
 - An out-of-range integer in a transcript or in ccusage output is stored as null; one file that cannot be derived is counted and skipped; neither stops the build.

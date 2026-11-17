@@ -255,6 +255,12 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 - S20 (L1) `fixtures/ccusage-v0/real-20.0.51/`: real `ccusage session --json --offline` output (20.0.51) on synthetic parsekit transcripts (a parent, a subagent, a resumed copy). awt's tokens (1107) and cost (0.003321) equal ccusage's totals; no transcript data is real. Regenerate by running that ccusage on `projects/` with `HOME` and `CLAUDE_CONFIG_DIR` pointed at a temp dir.
 - S21 (L3) A conversation past the last ccusage import keeps its message tokens and its ccusage cost as one `ccusage_stale` row; the l1 cost recipe still counts it; a computed cost (pi, opencode) is not added to it.
 - S22 (M1, L2, L4) `awt ui` starts Datasette on the live `store.db` (no `-i`, no copy; a later ingest is visible), refuses Datasette 1.x with `datasette<1`, and refuses an older store with `awt ingest --rebuild` (a fake `datasette` records its arguments).
+- S23 (N1) A store of schema 99 is byte-identical after every ingest mode (`--hook`, `--source all --hook`, plain, `--rebuild`, `--rebuild --hook`, `--stdin`); plain and `--rebuild` print `store schema 99 > 7: this awt is older than the store` and `install the newer awt`; hooks are silent; canonical rows are still copied; `doctor` warns; `awt ui` refuses.
+- S24 (N2) `human(4053296742)` is `3.8 GB`.
+- S25 (N3) In a full `--rebuild`, a file whose derivation raises after writing rows (`AWT_TEST_DERIVE_RAISE_AFTER`) leaves zero rows in messages, turns, tool_calls, usage and sessions; `fts_text` count equals `fts_ref`, no dangling message refs, `integrity_check` ok.
+- S26 (N4) SIGTERM and SIGHUP to a `--rebuild` (`AWT_TEST_BUILD_SLEEP`) remove the temp file and leave the old store byte-identical.
+- S27 (N5) `update_store` on a store whose schema is not this awt's raises `StoreChanged` (a skip with a warning), leaves the file byte-identical and never stamps the version.
+- N6 is documentation only (SPEC, CHANGELOG): restart `awt ui` after a rebuild.
 
 ## BRIEF.md and the short prompt (`test_brief.py`; plugin P2, P2b)
 
