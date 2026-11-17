@@ -7,6 +7,7 @@
 
 ### Fixed
 - `awt doctor` outside a task root now reports the machine-wide checks and exits 0 (`ok no task root here: per-node checks skipped`) instead of `fail no task root`; `--dir` naming a non-task still fails.
+- `init --hooks` takes an exclusive `flock` on the settings directory around its read-modify-write, so concurrent awt installs take turns (review finding L2). Claude Code takes no lock; a write of its own in the last microseconds before the rename can still be lost, and the backup holds the old file.
 - The Paseo plugin no longer posts the awt brief into the chat after a compaction by default (`AWT_COMPACT_BRIEF` is now opt-in with `1`). The message showed as a user message the owner never sent, and agents read it as an instruction to continue. The static prompt block survives compaction, and `awt_resume` brings the brief back on demand.
 - The `AGENTS.md` block no longer says "Everything else is recorded for you": it is false without the Paseo plugin. It now says what the plugin and the Claude Code hooks record, and asks for a `state` handoff.
 

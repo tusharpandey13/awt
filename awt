@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
+import argparse, contextlib, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
 import itertools, math
 try:
     import sqlite3
@@ -1258,7 +1258,30 @@ def merge_claude_settings(path, uninstall):
             with open(path, encoding="utf-8") as g:
                 raw = g.read()
             sig = os.stat(path)
+@contextlib.contextmanager
+def dir_lock(d):
+    """Exclusive flock on the directory itself, so awt writers (several `init --hooks` at once) take turns and no lock file is left behind.
+    Advisory: Claude Code takes no lock, so a write of its own can still land in the window between our last check and the rename."""
+    os.makedirs(d, exist_ok=True)
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
             sig = (sig.st_mtime_ns, sig.st_size)
+    path = os.path.realpath(path)
+    with dir_lock(os.path.dirname(path)):
+        return merge_claude_settings_locked(path, uninstall)
+
+
+def merge_claude_settings_locked(path, uninstall):
             st = json.loads(raw) if raw.strip() else {}
         except FileNotFoundError:
             raw, sig, st = None, None, {}
