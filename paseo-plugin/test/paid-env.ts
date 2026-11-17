@@ -37,7 +37,7 @@ export function paseo(st: Pick<Stack, "home" | "env">, ...a: string[]): string {
 /** The real stores whose size and mtime must not change (U3). */
 export function realStores(): Record<string, string> {
   const h = homedir(), out: Record<string, string> = {};
-  for (const p of [".paseo", ".claude/projects", ".local/share/opencode/opencode.db", ".pi/agent/sessions"]) {
+  for (const p of [".paseo", ".claude/projects", ".claude/settings.json", ".local/share/opencode/opencode.db", ".config/opencode/plugins", ".pi/agent/sessions", ".pi/agent/extensions"]) {
     try { execFileSync("test", ["-e", join(h, p)]); out[p] = execFileSync("sh", ["-c", `find '${join(h, p)}' -maxdepth 1 -exec stat -f '%N %z %m' {} + | sort | md5`], { encoding: "utf8" }).trim(); } catch { out[p] = "absent"; }
   }
   return out;

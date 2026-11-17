@@ -80,6 +80,17 @@ function clean() { for (const f of ["a.txt", "b.txt", "c.txt", "notes.txt"]) rmS
 interface Rec { cell: string; run: number; pass: boolean; checks: { name: string; ok: boolean; detail?: string }[]; usd: number; seq: string }
 function record(r: Rec) { appendFileSync(OUT, JSON.stringify({ journey: "silent-compaction", model: MODEL, ...r, at: new Date().toISOString() }) + "\n"); spent += r.usd; }
 
+/** Hooked cells: the record alone must answer (the codeword, zero tool calls, so no awt_resume and no BRIEF.md read). Control cells (no hook): behaviour is unchanged, so
+ *  the agent must not know the codeword for free: either it does not know it, or it had to spend a tool call to fetch it. */
+function probeChecks(ck: (name: string, ok: boolean, detail?: string) => void, cell: string, token: string, probe: string, tools: number) {
+  const detail = `${probe.slice(0, 80)} tools=${tools}`;
+  if (cell.endsWith("c")) ck("control probe: no free knowledge of the codeword (absent, or fetched with a tool call)", !probe.includes(token) || tools > 0, detail);
+  else {
+    ck("probe: the codeword is known after compaction", probe.includes(token), detail);
+    ck("probe: answered with zero tool calls (no awt_resume, no BRIEF.md read)", tools === 0, detail);
+  }
+}
+
 async function scenarioW(cell: string, n: number): Promise<Rec> {
   clean();
   const u0 = usd(), checks: Rec["checks"] = [], ck = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, detail: detail ? scrub(detail).slice(0, 300) : undefined });
@@ -99,8 +110,8 @@ async function scenarioW(cell: string, n: number): Promise<Rec> {
   await send(id, "What is the build codeword? Reply with the codeword only.");
   const a = items(await timeline(id));
   const probe = lastAssistant(a), probeTools = a.slice(a.map((i) => i.type).lastIndexOf("user_message")).filter((i) => i.type === "tool_call").length;
-  ck(`probe: the codeword is known after compaction (${cell.endsWith("c") ? "control: expected no" : "expected yes"})`, probe.includes(token), `${probe.slice(0, 80)} tools=${probeTools}`);
-  return { cell, run: n, pass: checks.every((c) => c.ok || (cell.endsWith("c") && c.name.startsWith("probe"))), checks, usd: usd() - u0, seq: `${seq} | probe tools=${probeTools}` };
+  probeChecks(ck, cell, token, probe, probeTools);
+  return { cell, run: n, pass: checks.every((c) => c.ok), checks, usd: usd() - u0, seq: `${seq} | probe tools=${probeTools}` };
 }
 
 async function scenarioC(cell: string, n: number): Promise<Rec> {
@@ -122,8 +133,8 @@ async function scenarioC(cell: string, n: number): Promise<Rec> {
   await send(id, "What is the build codeword? Reply with the codeword only.");
   const b = items(await timeline(id));
   const probe = lastAssistant(b), probeTools = b.slice(b.map((i) => i.type).lastIndexOf("user_message")).filter((i) => i.type === "tool_call").length;
-  ck(`probe: the codeword is known after compaction (${cell.endsWith("c") ? "control: expected no" : "expected yes"})`, probe.includes(token), `${probe.slice(0, 80)} tools=${probeTools}`);
-  return { cell, run: n, pass: checks.every((c) => c.ok || (cell.endsWith("c") && c.name.startsWith("probe"))), checks, usd: usd() - u0, seq: `reply=${reply.slice(0, 60)} | probe tools=${probeTools}` };
+  probeChecks(ck, cell, token, probe, probeTools);
+  return { cell, run: n, pass: checks.every((c) => c.ok), checks, usd: usd() - u0, seq: `reply=${reply.slice(0, 60)} | probe tools=${probeTools}` };
 }
 
 before(async () => {
