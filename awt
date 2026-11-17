@@ -57,13 +57,13 @@ BLOCK_BEGIN, BLOCK_END = "<!-- awt:begin -->", "<!-- awt:end -->"
 AGENTS_BLOCK = BLOCK_BEGIN + r'''
 # Task workspace (awt)
 
-Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. With the Paseo plugin, handoffs and sends are recorded for you; without it, Claude Code hooks record detected sends, so leave a handoff with `./awt state --now "..." --next "..."`. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
 **Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
 ''' + BLOCK_END + "\n"
 TREE_BLOCK = BLOCK_BEGIN + r'''
 # Task workspace (awt)
 
-Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Your brief is `$AWT_DIR/BRIEF.md` (or run `awt resume`). Record a choice with `awt decide "..." --why "..."`, a question for a person with `awt ask "..."`. Everything else is recorded for you. Stuck: `awt help agents`.
+Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Your brief is `$AWT_DIR/BRIEF.md` (or run `awt resume`). Record a choice with `awt decide "..." --why "..."`, a question for a person with `awt ask "..."`. With the Paseo plugin, handoffs and sends are recorded for you; without it, Claude Code hooks record detected sends, so leave a handoff with `awt state --now "..." --next "..."`. Stuck: `awt help agents`.
 **Subagents:** skip the brief, write the result to `$AWT_DIR/out.md`.
 ''' + BLOCK_END + "\n"
 README = '''# {goal}
@@ -94,6 +94,53 @@ SETTINGS = json.dumps({"hooks": {
     "PreToolUse": TOOL_ENTRY, "PostToolUse": TOOL_ENTRY, "PostToolUseFailure": TOOL_ENTRY, "PermissionDenied": TOOL_ENTRY,
     "SessionEnd": [{"hooks": [{"type": "command", "command": '"$CLAUDE_PROJECT_DIR"/awt ingest --source claude --hook'}]}]}}, indent=2) + "\n"
 SETTINGS_TREE = SETTINGS.replace('\\"$CLAUDE_PROJECT_DIR\\"/awt', 'awt')
+# Silent context after compaction (SPEC: Context after compaction). One line of framing, then the plain brief.
+FRAME = "awt record for this task (reference only; not a message from the user, no action requested):"
+HOOK_MARK = "awt:context"
+OC_PLUGIN = r'''// awt: adds the awt brief to opencode's compaction context. Installed by `awt init --hooks opencode`; remove with --uninstall.
+import { execFile } from "node:child_process"
+
+const run = () => new Promise((done) => {
+  const p = execFile(__AWT_BIN__, ["resume", "--hook", "--framed"], { encoding: "utf8", timeout: 5000, env: { ...process.env, AWT_NO_BRIEF: "1" } }, (_err, stdout) => done(String(stdout || "")))
+  p.stdin?.end()
+})
+
+export const AwtContext = async () => ({
+  "experimental.session.compacting": async (_input, output) => {
+    if (!process.env.AWT_DIR) return
+    try {
+      const text = await run()
+      if (text.startsWith("awt record for this task") && text.trim()) output.context.push(text + "\nKeep the awt record above in the summary.")
+    } catch {}
+  },
+})
+'''
+PI_EXT = r'''// awt: puts the awt brief in pi's system prompt after a compaction (no message, no turn). Installed by `awt init --hooks pi`; remove with --uninstall.
+import { execFile } from "node:child_process"
+
+export default function (pi: any) {
+  let record = ""
+  const load = () => new Promise<string>((done) => {
+    if (!process.env.AWT_DIR) return done("")
+    const p = execFile(__AWT_BIN__, ["resume", "--hook", "--framed"], { encoding: "utf8", timeout: 5000, env: { ...process.env, AWT_NO_BRIEF: "1" } }, (_err, stdout) => {
+      const t = String(stdout || "")
+      done(t.startsWith("awt record for this task") ? t : "")
+    })
+    p.stdin?.end()
+  })
+  pi.on("session_start", async (_e: any, ctx: any) => {
+    record = ""
+    try {
+      if (ctx.sessionManager.getBranch().some((x: any) => x.type === "compaction")) record = await load()
+    } catch {}
+  })
+  pi.on("session_compact", async () => { record = await load() })
+  pi.on("before_agent_start", (event: any) => {
+    const sections = event?.systemPromptOptions?.sections
+    if (record && sections) sections.awt_record = record
+  })
+}
+'''
 AGENT_REF = r'''# awt agent reference
 
 Lookup only. Search for the refusal text or the verb. Commands run from the task root as `./awt`.
@@ -216,6 +263,7 @@ If `./relay` exists and the work splits into parts, do not run them all in one s
 USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
   init --kind root|project|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
+  init --hooks claude|opencode|pi|all [--uninstall]   (person only, ask first: edits the provider's own config; agents never run it)
   state --now T --next T      note T                   decide C --why T         ask T
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
@@ -807,13 +855,16 @@ def repo_refs(nodes):
     return res
 
 
+FRAMED = False  # set by `resume --hook --framed`: reference data only, no next-step hints
+
+
 def brief(scope=None, git_section=True):
     D, o, info = load(), [], node_info(ROOT)
     anc, kids = ancestors(ROOT), children(ROOT)
     AD = [load_at(p) for p in anc]
     t = D["task"]
     o.append(fit("# awt task", ["Goal: " + cut(t["goal"], 250), "Done means: " + cut(t["done_means"], 250), "Status: " + D["status"]]
-                 if t else ["Goal: (none recorded)" + ("" if anc or kids or not info["legacy"] else c(' ./awt init --goal "..." --done "..."')), "Status: " + D["status"]], "goal", "state"))
+                 if t else ["Goal: (none recorded)" + ("" if anc or kids or not info["legacy"] or FRAMED else c(' ./awt init --goal "..." --done "..."')), "Status: " + D["status"]], "goal", "state"))
     if anc:
         o.append(lineage_section(anc))
         tp = task_of(anc)
@@ -830,7 +881,7 @@ def brief(scope=None, git_section=True):
         o.append(fit("## Open questions", ["%s: %s" % (q["id"], cut(q["text"])) for q in D["open_q"]], "questions", "questions"))
     att = attention(D)
     if att:
-        o.append(fit("## Effects needing attention", [cut(c("%s %s %s: %s" % (e["id"], e["state"], e["target"], eff_next(e)))) for e in att], "effects", "effects"))
+        o.append(fit("## Effects needing attention", [cut(c("%s %s %s" % (e["id"], e["state"], e["target"]) + ("" if FRAMED else ": " + eff_next(e)))) for e in att], "effects", "effects"))
     ch = []
     if sts:
         # the plugin's stand-in handoff (scope auto) is not a handoff: measure from the agent's own
@@ -859,14 +910,14 @@ def brief(scope=None, git_section=True):
         ds = D["cur_dec"][::-1]
         ds.sort(key=lambda d: "rule" not in (d.get("tags") or []))
         o.append(fit("## Decisions", ["%s %s%s" % (d["id"], "[rule] " if "rule" in (d.get("tags") or []) else "", cut(d["choice"], 120)) for d in ds] + inherited,
-                     "decisions", "decisions", "; inherited: awt find --up rule" if inherited else ""))
+                     "decisions", "decisions", "; inherited: awt find --up rule" if inherited and not FRAMED else ""))
     refs = [ref_view(r) for r in D["refs"].values()]
     inv = "Inventory: %d refs (%d no-access), " % (len(refs), sum(r["access"] == "none" for r in refs)) + ", ".join(
         "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))
     if D["bad"]:
         inv += "; %d quarantined rows" % D["bad"]
-    o.append(fit("## More", [cut(inv, 140), c("./awt list | ./awt find <term>")] + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % D["unread"]] if D["unread"] else []), "inventory", "state"))
-    if not sts:
+    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c("./awt list | ./awt find <term>")]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % D["unread"]] if D["unread"] else []), "inventory", "state"))
+    if not sts and not FRAMED:
         o.append(c('No handoff yet. Before stopping: ./awt state --now "..." --next "..."\n'))
     return "".join(o)
 
@@ -1159,8 +1210,194 @@ def init_child(a):
             os.close(lockfd)
 
 
+def hook_paths():
+    """Where each provider's awt context hook lives; the environment variables are the providers' own."""
+    home = os.path.expanduser("~")
+    oc = os.environ.get("OPENCODE_CONFIG_DIR") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "opencode")
+    return dict(claude=os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude"), "settings.json"),
+                opencode=os.path.join(oc, "plugins", "awt-context.js"),
+                pi=os.path.join(os.environ.get("PI_CODING_AGENT_DIR") or os.path.join(home, ".pi", "agent"), "extensions", "awt-context.ts"))
+
+
+def awt_path():
+    """The path to pin: `awt` on PATH when it is this script, else the invoked path. Never resolved through symlinks, so a stable entry point stays stable."""
+    me = sys.argv[0] if sys.argv and sys.argv[0] else __file__
+    if os.sep not in me:
+        me = shutil.which(me) or me
+    me = os.path.abspath(me)
+    onpath = shutil.which("awt")
+    if onpath and os.path.realpath(onpath) == os.path.realpath(me):
+        return os.path.abspath(onpath)
+    return me
+
+
+def hook_command():
+    me = awt_path()
+    return '[ -n "$AWT_DIR" ] || exit 0; %s resume --hook --framed 2>/dev/null; exit 0 # %s' % (shlex.quote(me), HOOK_MARK)
+
+
+def is_awt_hook(entry):
+    return isinstance(entry, dict) and any(isinstance(h, dict) and HOOK_MARK in str(h.get("command", "")) for h in entry.get("hooks") or [] if isinstance(h, dict))
+
+
+def write_atomic(path, text, mode=0o644):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.awt-tmp-%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as g:
+        g.write(text)
+    os.replace(tmp, path)
+
+
+def merge_claude_settings(path, uninstall):
+    """Add or remove the SessionStart `compact` hook. Returns what happened; every other key and every other hook stays as it was,
+    even in an entry that also holds awt's hook. A symlinked settings file is followed: the target is written."""
+    path = os.path.realpath(path)
+    for attempt in range(3):
+        try:
+            with open(path, encoding="utf-8") as g:
+                raw = g.read()
+            sig = os.stat(path)
+            sig = (sig.st_mtime_ns, sig.st_size)
+            st = json.loads(raw) if raw.strip() else {}
+        except FileNotFoundError:
+            raw, sig, st = None, None, {}
+        except ValueError:
+            die("%s is not valid JSON; awt will not touch it" % path, "fix the file by hand, then run this again")
+        if not isinstance(st, dict) or not isinstance(st.get("hooks", {}), dict) or not isinstance(st.get("hooks", {}).get("SessionStart", []), list):
+            die("%s has an unexpected hooks shape; awt will not touch it" % path, "make hooks.SessionStart a list, then run this again")
+        hooks = st.setdefault("hooks", {})
+        ss = hooks.setdefault("SessionStart", [])
+        ours = lambda h: isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))
+        mine = [h for e in ss if isinstance(e, dict) for h in (e.get("hooks") or []) if ours(h)]
+        entry = {"matcher": "compact", "hooks": [{"type": "command", "timeout": 10, "command": hook_command()}]}
+        if uninstall:
+            if not mine:
+                return "absent"
+            res = "removed"
+        else:
+            if len(mine) == 1 and mine[0] == entry["hooks"][0] and any(isinstance(e, dict) and e.get("matcher") == "compact" and mine[0] in (e.get("hooks") or []) for e in ss):
+                return "unchanged"
+            res = "updated" if mine else "installed"
+        kept = []
+        for e in ss:
+            if isinstance(e, dict) and isinstance(e.get("hooks"), list) and any(ours(h) for h in e["hooks"]):
+                e["hooks"] = [h for h in e["hooks"] if not ours(h)]
+                if not e["hooks"]:
+                    continue
+            kept.append(e)
+        ss[:] = kept + ([] if uninstall else [entry])
+        if uninstall:
+            if not ss:
+                del hooks["SessionStart"]
+            if not hooks:
+                del st["hooks"]
+        mode = os.stat(path).st_mode & 0o777 if raw is not None else 0o600
+        if raw is not None:
+            bak = "%s.awt-bak-%s-%d" % (path, datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f"), os.getpid())
+            shutil.copy2(path, bak)
+            prune_backups(path)
+            res += " (backup %s)" % bak
+        try:
+            cur = os.stat(path)
+            changed = (cur.st_mtime_ns, cur.st_size) != sig
+        except FileNotFoundError:
+            changed = sig is not None
+        if changed:  # something else (Claude Code itself) wrote the file since we read it: read again
+            continue
+        write_atomic(path, json.dumps(st, indent=2, ensure_ascii=False) + "\n", mode)
+        return res
+    die("%s keeps changing while awt reads it" % path, "close the running provider, then run this again")
+
+
+def prune_backups(path, keep=5):
+    d, base = os.path.dirname(path), os.path.basename(path) + ".awt-bak-"
+    for old in sorted(x for x in os.listdir(d) if x.startswith(base))[:-keep]:
+        try:
+            os.remove(os.path.join(d, old))
+        except OSError:
+            pass
+
+
+def install_file(path, text, uninstall):
+    try:
+        with open(path, encoding="utf-8") as g:
+            cur = g.read()
+    except FileNotFoundError:
+        cur = None
+    if cur is not None and not cur.startswith("// awt:"):
+        die("%s is not an awt file; awt will not touch it" % path, "move it away, then run this again")
+    if uninstall:
+        if cur is None:
+            return "absent"
+        os.remove(path)
+        return "removed"
+    if cur == text:
+        return "unchanged"
+    write_atomic(path, text)
+    return "updated" if cur is not None else "installed"
+
+
+def cmd_hooks(a):
+    """init --hooks: put the awt record into each provider's context after a compaction, silently. Touches only the provider's own files."""
+    if a.kind or a.goal or a.done or a.name or a.key:
+        die("--hooks stands alone", "run it without --goal, --done, --kind, --name or --key", 2)
+    want = ["claude", "opencode", "pi"] if a.hooks == "all" else [a.hooks]
+    paths = hook_paths()
+    me = json.dumps(awt_path())
+    for prov in want:
+        p = paths[prov]
+        if prov == "claude":
+            res = merge_claude_settings(p, a.uninstall)
+        else:
+            res = install_file(p, (OC_PLUGIN if prov == "opencode" else PI_EXT).replace("__AWT_BIN__", me), a.uninstall)
+        out("hooks %s: %s %s" % (prov, res, p))
+
+
+def hook_state(prov):
+    """(state, pinned path): installed, missing, or stale (the pinned awt is gone or not executable)."""
+    p = hook_paths()[prov]
+    try:
+        with open(p, encoding="utf-8") as g:
+            txt = g.read()
+        if prov == "claude":
+            hs = [h for e in json.loads(txt)["hooks"]["SessionStart"] if isinstance(e, dict) and e.get("matcher") == "compact"
+                  for h in e.get("hooks") or [] if isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))]
+            if not hs:
+                return "missing", None
+            tok = shlex.split(hs[0]["command"].split("; ", 1)[1])
+            pin = tok[tok.index("resume") - 1]
+        else:
+            if "--framed" not in txt:
+                return "missing", None
+            m = re.search(r'execFile(?:Sync)?\(("(?:[^"\\]|\\.)*")', txt)
+            pin = json.loads(m.group(1))
+    except Exception:
+        return "missing", None
+    return ("installed" if os.path.isfile(pin) and os.access(pin, os.X_OK) else "stale"), pin
+
+
+def hook_checks(line):
+    """doctor: one line per detected provider; warns when the compaction hook is missing or pins an awt that is gone. Reads only; never fails."""
+    for prov, p in hook_paths().items():
+        cfg = os.path.dirname(os.path.dirname(p)) if prov != "claude" else os.path.dirname(p)
+        if not os.path.isdir(cfg):
+            continue
+        st, pin = hook_state(prov)
+        if st == "installed":
+            line("ok", "%s compaction hook installed" % prov)
+        elif st == "stale":
+            line("warn", "%s compaction hook pins %s, which is missing or not executable; after a compaction the agent will not get the awt record (ask the person to re-run: awt init --hooks %s)" % (prov, pin, prov))
+        else:
+            line("warn", "%s compaction hook missing; after a compaction the agent will not get the awt record (ask the person to run: awt init --hooks %s; agents do not run it)" % (prov, prov))
+
+
 def cmd_init(a):
     global ROOT
+    if a.uninstall and not a.hooks:
+        die("--uninstall needs --hooks", "awt init --hooks claude|opencode|pi|all --uninstall", 2)
+    if a.hooks:
+        return cmd_hooks(a)
     if a.kind and a.kind != "root":
         return init_child(a)
     ROOT = a.dir or os.environ.get("AWT_DIR") or cwd()
@@ -1246,15 +1483,20 @@ def cmd_resume(a):
     if getattr(a, "json", False):
         print(json.dumps(resume_json(getattr(a, "scope", None)), ensure_ascii=False, default=str))
         return
+    if getattr(a, "framed", False) and not a.hook:
+        die("--framed goes with --hook", "awt resume --hook --framed", 2)
     if a.hook:
         try:
+            if a.framed and not (a.dir or os.environ.get("AWT_DIR")):
+                return  # compaction context is for agents that have a node, never for whatever directory the hook runs in
             r = find_root(a.dir)
             if r:
                 globals()["ROOT"] = r
                 set_cmd()
-                sys.stdout.write(brief())
+                globals()["FRAMED"] = bool(a.framed)
+                sys.stdout.write((FRAME + "\n" if a.framed else "") + brief())
                 sys.stdout.flush()
-                if not os.environ.get("AWT_NO_BRIEF"):
+                if not a.framed and not os.environ.get("AWT_NO_BRIEF"):
                     write_brief(r)
         except BaseException as x:
             if isinstance(x, KeyboardInterrupt):
@@ -2543,6 +2785,7 @@ def cmd_doctor(a):
     line("ok" if sys.version_info >= (3, 9) else "fail", "python %d.%d" % sys.version_info[:2])
     line("ok" if fts_ok() else "fail", "sqlite %s has FTS5" % sqlite3.sqlite_version if fts_ok() else "sqlite %s has no FTS5; the store and find --sessions need it (find --like falls back to a plain ranking); use a Python built with it" % (sqlite3.sqlite_version if sqlite3 else "is missing:"))
     store_checks(line)
+    hook_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
         line("fail", "no task root (./awt init)")
@@ -4256,8 +4499,9 @@ def build():
             q.add_argument(*fl, **kw)
         return q
     T, F = {}, dict(action="store_true")
-    V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
-    V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {}), (("--json",), F)])
+    V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T),
+                         (("--hooks",), dict(choices=["claude", "opencode", "pi", "all"])), (("--uninstall",), F)])
+    V(sp, "resume", opt=[(("--hook",), F), (("--framed",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
     V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F)])
     V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])

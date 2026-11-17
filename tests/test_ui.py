@@ -30,8 +30,8 @@ class UI(Store):
         self.assertTrue(q["title"].startswith("Which sessions are not joined"))
         self.assertNotIn("parquet", " ".join(qs))
         stub = qs["l7_redecisions"]
-        self.assertIn("needs data", stub["title"].lower())
-        self.assertIn("needs data", stub["description"].lower())
+        self.assertIn("partial", stub["title"].lower())  # no recipe is a stub any more
+        self.assertIn("needs", stub["description"].lower())
         part = qs["l8_latency_percentiles"]
         self.assertIn("partial", part["title"].lower())
         self.assertNotIn("permissions", m)  # no write permission is granted

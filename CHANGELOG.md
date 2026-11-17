@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+### Upgrade
+- The Paseo plugin no longer posts the awt brief after a compaction by default (`AWT_COMPACT_BRIEF`). On an existing install, ask the owner to run `awt init --hooks claude|opencode|pi|all` once per provider on the agent machine; `awt doctor` warns for a detected provider without it (and for a hook that pins an `awt` that is gone). Other providers (e.g. Codex) are not covered yet; `AWT_COMPACT_BRIEF=1` brings back the old visible brief for them.
+
+### Fixed
+- The Paseo plugin no longer posts the awt brief into the chat after a compaction by default (`AWT_COMPACT_BRIEF` is now opt-in with `1`). The message showed as a user message the owner never sent, and agents read it as an instruction to continue. The static prompt block survives compaction, and `awt_resume` brings the brief back on demand.
+- The `AGENTS.md` block no longer says "Everything else is recorded for you": it is false without the Paseo plugin. It now says what the plugin and the Claude Code hooks record, and asks for a `state` handoff.
+
 ### Added
+- Silent awt context after a compaction, for Claude Code, opencode and pi: `awt init --hooks claude|opencode|pi|all [--uninstall]` installs a `SessionStart` `compact` hook (merged into the Claude settings, with backup), an opencode plugin (`experimental.session.compacting`) or a pi extension (`before_agent_start` system section after `session_compact`). Nothing appears in the chat and no turn is added. The hook does nothing unless `AWT_DIR` is set. `resume --hook --framed` prints one reference-only framing line before the brief. `doctor` warns for a detected provider without the hook. SPEC, Context after compaction.
 - `store.db` is updated in place: only changed canonical files and (when a node log changed) the small node tables are derived again; `--rebuild` stays the full, byte-stable path. One store indexes one tree (`AWT_ROOT`, `--dir`, else the tree recorded at the last ingest), so ingest from a bare directory or another tree no longer empties it. Leftover `store.db.*.tmp` from killed builds are swept under the lock and `doctor` warns about them. FTS5 is contentless (schema 3: `fts_ref` maps rowids to rows) and the join columns are indexed. `find --like` ranks without FTS5 instead of failing. A re-opened agent node gets its `BRIEF.md`, other nodes' briefs skip git, and pre-phase-2 nodes get the `BRIEF.md` `.gitignore` line on their next write.
 - `store.db` (SQLite, stdlib only) at `$AWT_STORE/store.db`: derived tables `projects`, `nodes`, `sessions`, `turns`, `messages`, `tool_calls`, `records`, `effects`, `ingest_sources`, `schema_meta`, `canonical` (the raw JSON) and the FTS5 table `fts_text`, built from the canonical JSONL and the node logs. `awt ingest` rebuilds it when its inputs changed; `awt ingest --rebuild` deletes it and rebuilds it from local files only (byte-identical for identical inputs). `docs/schema.md`, `docs/adr/0004-fts5-over-custom-scoring.md`.
 - `find --sessions TERM`: adds message and tool-call hits from `store.db` ranked by FTS5 bm25; with no store, records only plus a one-line note.
@@ -18,7 +26,7 @@
 - `find --like TEXT [--limit N]`: ranked related decisions, answers, notes, refs and states from every workspace in the tree.
 - `decide` and `ask` print up to 3 `related:` records after the id line. `--related N` or `AWT_RELATED` sets the number; 0 turns it off. The lookup never fails the write and stops after 2 s.
 - `list --since ISO8601 [--down] --json`: rows written since a time, for the Paseo plugin.
-- Paseo plugin: a per-turn `awt.receipt` timeline line showing what was stored (`AWT_RECEIPT=0|changes`), `AWT_RELATED` forwarded to agents, and prompt lines for `find --like` and for calling `awt_resume` after compaction (Paseo has no session-hook field).
+- Paseo plugin: a per-turn `awt-receipt` timeline line (renamed from `awt.receipt`: Paseo rejects dots in renderer kinds, so the client never loaded and every row showed "Plugin timeline item unavailable") showing what was stored (`AWT_RECEIPT=0|changes`), `AWT_RELATED` forwarded to agents, and prompt lines for `find --like` and for calling `awt_resume` after compaction (Paseo has no session-hook field).
 - The task `AGENTS.md` template points at `find --like`.
 
 ### Removed
