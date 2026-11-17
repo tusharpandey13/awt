@@ -360,6 +360,14 @@ class PluginFiles(test_awt.Base):
             const ev = () => ({ systemPromptOptions: { sections: {} } })
             const before = ev(); await on.before_agent_start(before)
             await on.session_start({}, { sessionManager: { getBranch: () => %s } })
+    def test_d0_doctor_outside_a_task_reports_machine_checks_and_exits_0(self):
+        r = self.ok("doctor", root="")
+        self.assertIn("ok no task root here: per-node checks skipped", r.stdout)
+        self.assertIn("--dir <node>", r.stdout)
+        self.assertNotIn("fail", r.stdout)
+        r = self.bad("doctor", "--dir", os.path.join(self.tmp, "nowhere"), root="")
+        self.assertIn("fail no task root", r.stdout)
+
             const resumed = ev(); await on.before_agent_start(resumed)
             await on.session_compact({})
             const after = ev(); await on.before_agent_start(after)

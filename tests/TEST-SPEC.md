@@ -197,6 +197,7 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 | M1, M2, M3 | A symlinked `settings.json` stays a link, its target is written with its mode; a mixed entry keeps the sibling hook and uninstall restores it; the pinned path is the invoked path (not a resolved symlink) and `doctor` warns when it is gone |
 | L1b, L7, L8 | Two runs in one second keep two backups, only 5 are kept; `doctor` survives odd or non-UTF-8 settings; a foreign `awt-context.js` is never overwritten or removed |
 | G5, G6 | `--framed` without `--hook` is exit 2; plain `resume --hook` is unchanged |
+| D0 | `doctor` outside a task root exits 0 with the skipped-checks line; `--dir` at a non-task exits 1 |
 | D1, D2 | `doctor` warns for each detected provider without the hook (none for absent providers, never `fail`), and says `ok` after install |
 | P1, P2 | The opencode plugin exposes only `experimental.session.compacting`, pushes the framed brief (with a decision's text), and pushes nothing without `AWT_DIR` |
 | P3, P4, P5 | The pi extension adds `awt_record` only after `session_compact` (or a resumed branch with a `compaction` entry), keeps the text stable across turns, and does nothing without `AWT_DIR` |

@@ -2811,8 +2811,11 @@ def cmd_doctor(a):
     hook_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
-        line("fail", "no task root (./awt init)")
-        sys.exit(1)
+        if a.dir:
+            line("fail", "no task root at --dir %s (./awt init)" % a.dir)
+        else:
+            line("ok", "no task root here: per-node checks skipped (run in a task directory, or: awt doctor --dir <node>)")
+        sys.exit(1 if "fail" in res else 0)
     line("ok", "task root " + ROOT)
     pr = P(".awt", ".probe-%d" % os.getpid())
     try:
