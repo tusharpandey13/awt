@@ -2,12 +2,18 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, datetime, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, socket, stat, subprocess, time
+import argparse, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, socket, stat, subprocess, time, urllib.parse
+import math
+try:
+    import sqlite3
+except ImportError:  # no _sqlite3: every verb but find --like, ingest and doctor's store line still works
+    sqlite3 = None
 
 VERSION = "0.2.0"
 HOST = socket.gethostname()
 ROOT = None
 BY = "agent"
+MODEL = "unknown:unset"
 A = "./awt"
 ROWMAX = 4096
 TOTAL = 4400
@@ -38,9 +44,9 @@ ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.
 LIMIT = "tree exceeds depth %d / %d nodes; deeper nodes are not covered" % (K["depth"], K["nodes"])
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
 LISTS = SECTIONS + ["nodes", "tree"]
-SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore",
+SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore", "BRIEF.md",
            "legacy", "context", "docs", "outbox", "misc"}
-IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/"]  # runs/: relay worker logs
+IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/", "BRIEF.md"]  # runs/: relay worker logs; BRIEF.md: derived, regenerated
 SECRETS = [(n, re.compile(p)) for n, p in [
     ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
     ("github-pat", r"github_pat_[A-Za-z0-9_]{20,}"), ("slack-token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
@@ -51,25 +57,14 @@ BLOCK_BEGIN, BLOCK_END = "<!-- awt:begin -->", "<!-- awt:end -->"
 AGENTS_BLOCK = BLOCK_BEGIN + r'''
 # Task workspace (awt)
 
-Everything about this task lives here. Keep records with `./awt`. Never hand-edit `.awt/`.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+**Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
+''' + BLOCK_END + "\n"
+TREE_BLOCK = BLOCK_BEGIN + r'''
+# Task workspace (awt)
 
-**Start:** run `./awt resume` and follow it, unless you are a subagent with a brief.
-**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel work: add `--scope <name>`.
-
-| You have | Do |
-|---|---|
-| A link (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Don't copy it. |
-| An unopenable link | Record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
-| No usable link (pasted chat, notes, research) | `./awt capture --from slack --title "..." [file]` |
-| A plan, ADR, result or working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
-| A decision | `./awt decide "the choice" --why "the reason"`. Reversing: add `--supersedes <id>` |
-| A small fact | `./awt note "..."` |
-| A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
-| Anything else | `misc/`. Throwaway: `scratch/`. |
-
-**Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace. Check before deciding or asking; `decide` and `ask` list related records too, so read them.
-**Stuck or refused:** read `fix:`, then `./awt help agents`.
-**Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
+Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Your brief is `$AWT_DIR/BRIEF.md` (or run `awt resume`). Record a choice with `awt decide "..." --why "..."`, a question for a person with `awt ask "..."`. Everything else is recorded for you. Stuck: `awt help agents`.
+**Subagents:** skip the brief, write the result to `$AWT_DIR/out.md`.
 ''' + BLOCK_END + "\n"
 README = '''# {goal}
 
@@ -79,9 +74,6 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 - `./awt list`, `./awt find <term>`: everything known about this task
 - `context/` inbound material, `docs/` working docs, `outbox/` drafts going out, `misc/` the rest, `scratch/` throwaway
 '''
-TREE_BLOCK = (AGENTS_BLOCK.replace("./awt", "awt")
-              .replace("Everything about this task lives here. Keep records with `awt`. Never hand-edit `.awt/`.", "Your node is `$AWT_DIR` if set, else this directory. Never hand-edit `.awt/`. Keep records with `awt`, from any directory.")
-              .replace("write output to `docs/<brief>.out.md`", "write the result to `$AWT_DIR/out.md`"))
 TREE_README = '''# {goal}
 
 Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `projects/<name>/workspaces/<name>/tasks/<name>/agents/<name>/` (a workspace may also sit directly under the root, in `workspaces/`).
@@ -113,6 +105,7 @@ Lookup only. Search for the refusal text or the verb. Commands run from the task
 |---|---|
 | Starting, not a subagent | `./awt resume` |
 | Need to know if it is already recorded | `./awt find "term"` |
+| Related decisions, answers and notes from every workspace | `./awt find --like "a sentence"` (`decide` and `ask` list them too) |
 | List one kind of thing | `./awt list refs` (also context docs outbox misc decisions questions effects notes state) |
 | See old/superseded/answered/terminal items | `./awt list decisions --all` |
 | Small fact for later, not a decision | `./awt note "text"` |
@@ -466,7 +459,9 @@ def check(typ, f):
 def emit(typ, **f):
     f = {k: v for k, v in f.items() if v is not None}
     check(typ, dict(f, by=BY))
-    row = dict(v=1, ts=now(), type=typ, host=HOST, by=BY)
+    row = dict(v=1, ts=now(), type=typ, host=HOST, by=BY, model=MODEL)
+    if os.environ.get("AWT_SESSION", "").strip():
+        row["session"] = os.environ["AWT_SESSION"].strip()
     row.update(f)
     data = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     if len(data) > ROWMAX:
@@ -681,6 +676,8 @@ def newer_files(since):
     for dp, dns, fns in os.walk(ROOT):
         dns[:] = [d for d in dns if d != ".git" and not (dp == ROOT and d in (".awt", "scratch")) and not is_node_dir(os.path.join(dp, d))]
         for n in fns:
+            if n == "BRIEF.md" and dp == ROOT:
+                continue
             seen += 1
             try:
                 m = os.lstat(os.path.join(dp, n)).st_mtime
@@ -811,7 +808,7 @@ def repo_refs(nodes):
     return res
 
 
-def brief(scope=None):
+def brief(scope=None, git_section=True):
     D, o, info = load(), [], node_info(ROOT)
     anc, kids = ancestors(ROOT), children(ROOT)
     AD = [load_at(p) for p in anc]
@@ -842,7 +839,7 @@ def brief(scope=None):
         nf = newer_files(since)
         if nf:
             ch += ["%d files newer than state:" % len(nf)] + ["  " + cut(x) for x in nf[:K["newer"]]]
-        for r in repo_refs([D] + AD):
+        for r in (repo_refs([D] + AD) if git_section else []):
             try:
                 lg = git(r["path"], "log", "--since=%d" % int(since), "--format=%s", "-n", "5")
                 dirty = git(r["path"], "status", "--porcelain")
@@ -909,13 +906,13 @@ def ref_view(r):
 
 
 JSON_KEYS = dict(
-    refs="ts by target title kind why access path branch key", decisions="ts by id choice why tags supersedes superseded_by",
-    questions="ts by id text answer", effects="ts by id target why body how state attempt", notes="ts by id text", state="ts by scope now next")
+    refs="ts by model target title kind why access path branch key", decisions="ts by model id choice why tags supersedes superseded_by",
+    questions="ts by model id text answer", effects="ts by model id target why body how state attempt", notes="ts by model id text", state="ts by model scope now next")
 
 
 def shaped(name, rows):
     """Rows with one fixed key set per section: absent optional fields are null, tags is a list, scope defaults to main."""
-    dflt = dict(tags=[], scope="main")
+    dflt = dict(tags=[], scope="main", model="unknown:legacy")
     return [{k: r.get(k, dflt.get(k)) for k in JSON_KEYS[name].split()} for r in rows]
 
 
@@ -966,6 +963,50 @@ def listing(name, D, all_):
     return ["[%s] %s now: %s | next: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"]) for s in rows]
 
 
+# ---------- BRIEF.md: a derived file, never read back as state ----------
+FANOUT = 20  # most agents below a task whose briefs a task write refreshes
+WRITES = {"state", "note", "decide", "ask", "answer", "ref", "capture", "supersede", "status"}
+
+
+def write_brief(path, git_section=True):
+    """Regenerate path/BRIEF.md from the log: temp file in .awt/, then rename. Nothing reads it back; any failure is silent."""
+    global ROOT, A
+    old, tmp = (ROOT, A), os.path.join(path, ".awt", "BRIEF.%d.tmp" % os.getpid())
+    try:
+        if not os.path.isdir(os.path.join(path, ".awt")):
+            return
+        ROOT = path
+        A = "awt" if (not node_info(path)["legacy"] or parent(path)) else "./awt"
+        ensure_gitignore(True)
+        text = brief(git_section=git_section) + "Generated %s; ages above are as of then.\n" % now()[:19]
+        with open(tmp, "w", encoding="utf-8") as g:
+            g.write(text)
+        os.replace(tmp, os.path.join(path, "BRIEF.md"))
+    except (Exception, SystemExit):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    finally:
+        ROOT, A = old
+
+
+def refresh_briefs(path):
+    """After a write at path: its own brief, its parent's (children section) and, for a task, every agent below (task section)."""
+    write_brief(path)  # only this one runs git; the others' repo lines wait for their own write or hook
+    p = parent(path)
+    if p:
+        write_brief(p, False)
+    try:
+        if node_info(path)["kind"] == "task":
+            agents = [q for q, _ in descendants(path)[0] if node_info(q)["kind"] == "agent"]
+            if len(agents) <= FANOUT:  # a big fan-out would make every task write cost one file per agent; their next write or hook refreshes them
+                for q in agents:
+                    write_brief(q, False)
+    except (Exception, SystemExit):
+        pass
+
+
 # ---------- verbs ----------
 def create(path, text):
     try:
@@ -991,8 +1032,11 @@ def slugify(name):
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50].strip("-") or "node"
 
 
-def ensure_gitignore():
+def ensure_gitignore(existing_only=False):
+    """Append the missing IGNORE lines; existing_only: only to a .gitignore that is already there (a pre-phase-2 node)."""
     gi = P(".gitignore")
+    if existing_only and not os.path.exists(gi):
+        return
     have = open(gi, encoding="utf-8", errors="replace").read() if os.path.exists(gi) else ""
     miss = [x for x in IGNORE if x not in have.splitlines()]
     if miss:
@@ -1088,6 +1132,8 @@ def init_child(a):
         if a.key:
             p = find_key(top, a.key)
             if p:
+                if not os.environ.get("AWT_NO_BRIEF"):
+                    write_brief(p)  # a re-opened or pre-phase-2 agent gets a current brief
                 return out("init %s %s" % (os.path.relpath(p, ROOT), node_info(p)["kind"]))
         tmp = os.path.join(base, ".new-" + os.urandom(4).hex())
         os.mkdir(tmp)
@@ -1107,6 +1153,7 @@ def init_child(a):
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
+        refresh_briefs(final)
         out("init %s %s" % (rel(final), kind))
     finally:
         if lockfd is not None:
@@ -1174,6 +1221,7 @@ def cmd_init(a):
     if a.goal and (not t or (t["goal"], t["done_means"]) != (a.goal, a.done)):
         emit("task", goal=a.goal, done_means=a.done)
         made.append("task")
+    refresh_briefs(ROOT)
     out("init %s: %s" % (ROOT, " ".join(made) or "nothing to change"))
 
 
@@ -1206,6 +1254,9 @@ def cmd_resume(a):
                 globals()["ROOT"] = r
                 set_cmd()
                 sys.stdout.write(brief())
+                sys.stdout.flush()
+                if not os.environ.get("AWT_NO_BRIEF"):
+                    write_brief(r)
         except BaseException as x:
             if isinstance(x, KeyboardInterrupt):
                 raise
@@ -1296,6 +1347,8 @@ def scope_nodes(tree, up, down, deadline=None):
 
 def cmd_find(a):
     if a.like is not None:
+        if a.sessions:
+            die("--sessions cannot be combined with --like", 'awt find --sessions "term"', 2)
         return find_like(a)
     if a.term is None:
         die("find needs a TERM or --like TEXT", 'awt find "term"', 2)
@@ -1313,6 +1366,12 @@ def cmd_find(a):
         out("+%d more" % (len(hits) - K["hits"]))
     if over:
         out("+ " + LIMIT)
+    if a.sessions:
+        found = session_hits(a.term, K["hits"])
+        for h in found or []:
+            out(h)
+        if found is None:
+            out("note: no store.db yet (run awt ingest); sessions not searched")
 
 
 STOPWORDS = set("""a about after all also an and any are as at be been but by can could did do does for from had has have he her his how i if in into
@@ -1330,13 +1389,39 @@ def words(text):
     return seen
 
 
+def fts_ok():
+    """Whether the running sqlite3 has FTS5 (AWT_TEST_NO_FTS5 is a test hook)."""
+    if sqlite3 is None or os.environ.get("AWT_TEST_NO_FTS5"):
+        return False
+    try:
+        sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def bm25_scores(docs, ws):
+    """{index into docs: score, higher is better} for docs matching any word of ws. An in-memory FTS5 index over docs only, so the result depends on nothing but its inputs."""
+    if not ws or not docs:
+        return {}
+    if not fts_ok():  # no FTS5: the same words, scored by inverse document frequency (rarer words count more)
+        toks = [set(words(d)) for d in docs]
+        df = {w: sum(w in t for t in toks) for w in ws}
+        return {i: sum(math.log(1 + len(docs) / df[w]) for w in ws if w in t) for i, t in enumerate(toks) if any(w in t for w in ws)}
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE VIRTUAL TABLE d USING fts5(t)")
+    db.executemany("INSERT INTO d(rowid, t) VALUES (?, ?)", enumerate(docs, 1))
+    q = " OR ".join('"%s"' % w for w in ws[:64])
+    return {i - 1: -s for i, s in db.execute("SELECT rowid, bm25(d) FROM d WHERE d MATCH ?", (q,))}
+
+
 def recall_rows(D, prefix, skip=None):
-    """Candidate records of one node for recall: (sort ts, words, line, rule?). Current decisions, questions, notes, refs, the main state."""
+    """Candidate records of one node for recall: (sort ts, words, line, rule?, indexed text). Current decisions, questions, notes, refs, the main state."""
     at = " @" + prefix if prefix else ""
     res = []
 
     def add(r, ident, text, line, rule=False):
-        res.append((r["ts"], set(words(ident + " " + text)), line, rule))
+        res.append((r["ts"], set(words(ident + " " + text)), line, rule, ident + " " + text))
     for d in D["cur_dec"]:
         if d["id"] != skip:
             tag = " [%s]" % ",".join(d["tags"]) if d.get("tags") else ""
@@ -1357,7 +1442,7 @@ def recall_rows(D, prefix, skip=None):
 
 
 def recall(text, limit, nodes, skip=None, deadline=None, width=200):
-    """(lines, stopped): the best-matching records across the --tree node set, ranked by rarity of the shared words. Unreadable nodes are skipped; show_related swallows anything else."""
+    """(lines, stopped): the best-matching records across the --tree node set, ranked by FTS5 bm25 (a rule decision counts 1.5x; ties go to the newest). Unreadable nodes are skipped; show_related swallows anything else."""
     q = words(text)
     if not q:
         return [], False
@@ -1373,17 +1458,11 @@ def recall(text, limit, nodes, skip=None, deadline=None, width=200):
             continue
     if os.environ.get("AWT_TEST_RECALL_FAULT"):  # a test hook: proves a failure here cannot undo a write
         raise RuntimeError("injected recall fault")
-    df = {}
-    for _, ws, _, _ in cands:
-        for w in ws:
-            df[w] = df.get(w, 0) + 1
+    sc = bm25_scores([c[4] for c in cands], q)
     need = 1 if len(q) <= 2 else 2
-    scored = []
-    for ts, ws, line, rule in cands:
-        shared = [w for w in q if w in ws]
-        if len(shared) >= need:
-            scored.append((sum(math.log(1 + len(cands) / df[w]) for w in shared) * (1.5 if rule else 1), ts, line))
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    scored = [(sc[i] * (1.5 if c[3] else 1), c[0], c[2]) for i, c in enumerate(cands) if i in sc and sum(w in c[1] for w in q) >= need]
+    scored.sort(key=lambda x: x[1], reverse=True)  # ties go to the newest
+    scored.sort(key=lambda x: x[0], reverse=True)
     return [cut(" ".join(l.split()), width) for _, _, l in scored[:limit]], stopped
 
 
@@ -1418,7 +1497,7 @@ def _find_here(term, prefix):
         return text[max(0, i - 40):i + 80].replace("\n", " ")
 
     for r in load()["rows"]:
-        text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by"))
+        text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by", "model", "session"))
         i = text.lower().find(term)
         if i >= 0:
             hits.append("event:%s%s: %s" % (r.get("id") or r["type"], " @" + prefix if prefix else "", snip(text, i)))
@@ -1428,7 +1507,7 @@ def _find_here(term, prefix):
                         and not is_node_dir(os.path.join(dp, d)))
         for n in sorted(fns):
             p = os.path.join(dp, n)
-            if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n == "awt"):
+            if os.path.islink(p) or os.path.realpath(p) == me or (dp == ROOT and n in ("awt", "BRIEF.md")):
                 continue
             try:
                 if not os.path.isfile(p) or os.path.getsize(p) > K["big"]:
@@ -1727,7 +1806,8 @@ def eff_begin(a):
 
 
 def eff_show(a):
-    e = get_eff(load(), a.id)
+    e = dict(get_eff(load(), a.id))
+    e.setdefault("model", "unknown:legacy")
     old = ("class", "snapshot", "verify")
     for k, v in e.items():
         if k not in ("hist", "run", "how", "claims") + old:
@@ -1876,6 +1956,9 @@ def store_checks(line):
             if loose:
                 line("warn", "%d store files are readable by others, expected 600 (chmod 600 %s)" % (len(loose), loose[0]))
             top = os.path.realpath(store)
+            left = stale_tmp(store)
+            if left:
+                line("warn", "%d leftover temp file(s) from a killed build, e.g. %s (the next awt ingest that builds deletes them)" % (len(left), os.path.join(store, left[0])))
         else:
             line("ok", "store %s not created yet" % store)
             top = os.path.realpath(os.path.dirname(store))
@@ -1966,6 +2049,7 @@ def cmd_doctor(a):
         out("%s %s" % (level, msg))
 
     line("ok" if sys.version_info >= (3, 9) else "fail", "python %d.%d" % sys.version_info[:2])
+    line("ok" if fts_ok() else "fail", "sqlite %s has FTS5" % sqlite3.sqlite_version if fts_ok() else "sqlite %s has no FTS5; the store and find --sessions need it (find --like falls back to a plain ranking); use a Python built with it" % (sqlite3.sqlite_version if sqlite3 else "is missing:"))
     store_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
@@ -1998,13 +2082,24 @@ def cmd_doctor(a):
     has = has_block(ROOT) or (intree and any(has_block(p) for p in ancestors(ROOT)))
     line("ok" if has else "fail", "AGENTS.md has the awt block" if has else "AGENTS.md lacks the awt block (./awt init)")
     try:
-        r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30,
+                           env=dict(os.environ, AWT_NO_BRIEF="1"))  # a check must not write
         line("ok" if r.returncode == 0 and r.stdout.strip() else "fail", "resume --hook prints a brief")
     except Exception as x:
         line("fail", "resume --hook did not run: %s" % x)
     D = load()
     line("fail" if D["unread"] else "ok", "events.jsonl unreadable: %s (fix .awt/events.jsonl)" % D["unread"] if D["unread"] else "events.jsonl is readable")
     line("warn" if D["bad"] else "ok", "%d quarantined rows%s" % (D["bad"], " (.awt/events.jsonl lines: %s)" % ", ".join(map(str, D["bad_lines"][:20])) if D["bad_lines"] else ""))
+    unk = {}
+    for p in (node_paths(ROOT) or [ROOT]):
+        try:
+            n = sum(1 for r in load_at(p)["rows"] if r.get("model", "unknown:legacy").startswith("unknown:"))
+        except Exception:
+            n = 0
+        if n:
+            unk[os.path.relpath(p, ROOT) if os.path.realpath(p) != os.path.realpath(ROOT) else "."] = n
+    line("warn" if unk else "ok", "%d rows have an unknown model (unknown:*): %s" % (sum(unk.values()), ", ".join("%s %d" % kv for kv in sorted(unk.items())[:10])) if unk
+         else "every row names a model")
     odd = any(m in ROOT for m in ("iCloud", "Dropbox", "OneDrive", "Google Drive")) or netmount(ROOT)
     line("warn" if odd else "ok", "path is a sync folder or network mount" if odd else "path is local")
     cm = find_claude_md(ROOT)
@@ -2307,7 +2402,9 @@ def cmd_ingest(a):
     try:
         store = store_dir()
         private_dir(store)
-        n, f, bad = ingest_claude(store)
+        n, f, bad = (None, None, 0) if a.rebuild else ingest_claude(store)
+        private_dir(os.path.join(store, "ingest"))
+        built = sync_store(store, ingest_tree(store, a.dir), a.rebuild)
     except BaseException as x:
         if isinstance(x, KeyboardInterrupt):
             raise
@@ -2317,7 +2414,454 @@ def cmd_ingest(a):
             raise
         die("ingest failed: %s: %s" % (type(x).__name__, x), "check that %s is writable (AWT_STORE overrides it) and run: awt ingest --source claude" % store_dir())
     if not a.hook:
-        out("ingested %d rows from %d claude files into %s%s" % (n, f, store, "; %d files failed (awt doctor shows which)" % bad if bad else ""))
+        if n is not None:
+            out("ingested %d rows from %d claude files into %s%s" % (n, f, store, "; %d files failed (awt doctor shows which)" % bad if bad else ""))
+        if built:
+            out("%s store.db: %d sessions, %d messages, %d records" % ("rebuilt" if a.rebuild else "updated", built["sessions"], built["messages"], built["records"]))
+
+
+# ---------- store.db ----------
+# Derived only (docs/schema.md, docs/adr/0004-fts5-over-custom-scoring.md): rebuilt from canonical JSONL and the node logs, never from providers.
+SCHEMA_VERSION, SEMCONV, FTS_CAP, EXCERPT = 3, "1.37.0", 262144, 4096
+DDL = """
+CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE projects(project_id TEXT PRIMARY KEY, node_id TEXT, name TEXT, project_key TEXT, root_path TEXT, kind TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT);
+CREATE TABLE nodes(node_id TEXT PRIMARY KEY, kind TEXT, name TEXT, path TEXT, parent_id TEXT, project_id TEXT, status TEXT, goal TEXT);
+CREATE TABLE sessions(session_id TEXT PRIMARY KEY, provider_name TEXT, conversation_id TEXT, node_id TEXT, join_confidence TEXT, cwd TEXT, request_model TEXT, started_at TEXT, ended_at TEXT, source TEXT, adapter INTEGER);
+CREATE TABLE turns(turn_id TEXT PRIMARY KEY, session_id TEXT, seq INTEGER, started_at TEXT, ended_at TEXT, outcome TEXT, paseo_turn INTEGER, request_model TEXT, response_model TEXT);
+CREATE TABLE messages(message_id TEXT, turn_id TEXT, session_id TEXT, seq INTEGER, role TEXT, ts TEXT, text TEXT, parent_id TEXT, response_finish_reasons TEXT, response_model TEXT, PRIMARY KEY(session_id, message_id));
+CREATE TABLE tool_calls(tool_call_id TEXT, message_id TEXT, session_id TEXT, tool_name TEXT, args TEXT, result_excerpt TEXT, result_sha256 TEXT, is_error INTEGER, started_at TEXT, ended_at TEXT, PRIMARY KEY(session_id, tool_call_id));
+CREATE TABLE records(record_id TEXT PRIMARY KEY, node_id TEXT, type TEXT, ts TEXT, by TEXT, fields TEXT, session_id TEXT, origin TEXT, model TEXT NOT NULL, turn_id TEXT);
+CREATE TABLE effects(effect_id TEXT PRIMARY KEY, node_id TEXT, target TEXT, key TEXT, state TEXT, attempt INTEGER, origin TEXT, rule TEXT, begun_by TEXT, begun_at TEXT, sent_ref TEXT, tool_call_id TEXT);
+CREATE TABLE ingest_sources(source TEXT, path TEXT, inode INTEGER, offset INTEGER, adapter INTEGER, last_run TEXT, errors INTEGER, PRIMARY KEY(source, path));
+CREATE TABLE canonical(src TEXT, session TEXT, seq INTEGER, file TEXT, raw TEXT, PRIMARY KEY(src, file, seq));
+CREATE TABLE build_state(kind TEXT, path TEXT, size INTEGER, errors INTEGER, PRIMARY KEY(kind, path));
+CREATE TABLE fts_ref(id INTEGER PRIMARY KEY, kind TEXT, ref INTEGER);
+CREATE VIRTUAL TABLE fts_text USING fts5(text, content='', tokenize='unicode61');
+"""
+INDEXES = """
+CREATE INDEX ix_sessions_node ON sessions(node_id);
+CREATE INDEX ix_turns_session ON turns(session_id, seq);
+CREATE INDEX ix_messages_turn ON messages(turn_id);
+CREATE INDEX ix_tool_calls_message ON tool_calls(message_id);
+CREATE INDEX ix_records_node ON records(node_id, type);
+CREATE INDEX ix_records_session ON records(session_id);
+CREATE INDEX ix_effects_node ON effects(node_id);
+CREATE INDEX ix_canonical_file ON canonical(file);
+CREATE INDEX ix_fts_ref ON fts_ref(kind, ref);
+"""
+
+
+def store_inputs(store, root):
+    """[(kind, path, size)] sorted: the canonical files and node logs a build reads. Sizes only, so the list is a function of the inputs' content (the logs are append-only)."""
+    res = []
+    for dp, dns, fns in os.walk(os.path.join(store, "log")):
+        dns.sort()
+        res += [("canonical", os.path.join(dp, f), os.path.getsize(os.path.join(dp, f))) for f in sorted(fns) if f.endswith(".jsonl")]
+    for p in node_paths(root):
+        try:
+            res.append(("node", os.path.join(p, ".awt", "events.jsonl"), os.path.getsize(os.path.join(p, ".awt", "events.jsonl"))))
+        except OSError:
+            pass
+    return res
+
+
+def node_paths(root):
+    if not root:
+        return []
+    top = tree_top(root)
+    return [top] + [p for p, _ in descendants(top)[0]]
+
+
+def top_of(root):
+    return os.path.realpath(tree_top(root)) if root else ""
+
+
+def input_keys(store, root, inputs):
+    """{(kind, path relative to the store or the tree top): size}: what a build records and what freshness compares."""
+    top = top_of(root)
+    return {(k, os.path.relpath(p, store if k == "canonical" else top)): n for k, p, n in inputs}
+
+
+def fingerprint(store, root, inputs=None):
+    keys = input_keys(store, root, store_inputs(store, root) if inputs is None else inputs)
+    return sha(json.dumps([top_of(root)] + [(k, p, n) for (k, p), n in sorted(keys.items())]).encode())
+
+
+def ingest_tree(store, explicit):
+    """The node whose tree store.db indexes. AWT_ROOT, then --dir, then the tree recorded by the last ingest (so cron, a bare directory or a second tree do not change
+    what store.db holds), then the caller's own tree. A tree named by AWT_ROOT or --dir, or the first one found, is recorded in ingest/tree."""
+    mark = os.path.join(store, "ingest", "tree")
+    want = os.environ.get("AWT_ROOT") or explicit
+    root = find_root(want) if want else None
+    try:
+        with open(mark, encoding="utf-8") as g:
+            cur = g.read().strip()
+    except OSError:
+        cur = None
+    if not root and cur:
+        root = find_root(cur)
+    root = root or find_root(None)
+    if root:
+        top = top_of(root)
+        if cur != top and (want or not cur or not os.path.isdir(os.path.join(cur, ".awt"))):
+            private_dir(os.path.join(store, "ingest"), store)
+            tmp = "%s.%d.tmp" % (mark, os.getpid())
+            with open(tmp, "w", encoding="utf-8") as g:
+                g.write(top + "\n")
+            os.replace(tmp, mark)
+    return root
+
+
+def store_fresh(store, root):
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.join(store, "store.db")), uri=True)
+        try:
+            m = dict(db.execute("SELECT key, value FROM schema_meta"))
+        finally:
+            db.close()
+        return m.get("schema_version") == str(SCHEMA_VERSION) and m.get("inputs") == fingerprint(store, root)
+    except sqlite3.Error:
+        return False
+
+
+def record_text(fields):
+    """The FTS text of a record, from its stored fields JSON (so a delete can recompute exactly what an insert indexed)."""
+    r = json.loads(fields)
+    text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in sorted(r.items()) if k not in ("v", "ts", "type", "host", "by", "model", "session"))
+    return u(text[:FTS_CAP])
+
+
+def fts_add(db, kind, ref, text):
+    """One contentless FTS row; fts_ref maps its rowid back to the row it indexes."""
+    db.execute("INSERT INTO fts_text(rowid, text) VALUES (?, ?)", (db.execute("INSERT INTO fts_ref(kind, ref) VALUES (?, ?)", (kind, ref)).lastrowid, text))
+
+
+def fts_drop(db, rows):
+    """Remove FTS rows given [(fts rowid, the exact text indexed)]; a contentless table needs the text back."""
+    for i, text in rows:
+        db.execute("INSERT INTO fts_text(fts_text, rowid, text) VALUES ('delete', ?, ?)", (i, text))
+        db.execute("DELETE FROM fts_ref WHERE id=?", (i,))
+
+
+def u(s):
+    """s as text SQLite can hold: lone surrogates (valid in JSON, not in UTF-8) become ?."""
+    return s.encode("utf-8", "replace").decode("utf-8") if isinstance(s, str) else s
+
+
+def blocks_of(content):
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def block_text(c):
+    if isinstance(c, str):
+        return c
+    return "\n".join(b["text"] for b in c if isinstance(b, dict) and isinstance(b.get("text"), str)) if isinstance(c, list) else ""
+
+
+def derive_claude(db, sid, rows, join):
+    """messages, turns, tool_calls and the session row of one canonical claude file. A turn starts at each user message that carries text (not only tool results)."""
+    def fts(text, kind, cur):
+        if text and cur.rowcount == 1:
+            fts_add(db, kind, cur.lastrowid, text[:FTS_CAP])
+    conv = cwd_ = model = first = last = None
+    real = lambda x: x if isinstance(x, str) and x.strip() and x != "<synthetic>" else None
+    turns, calls, turn = [], {}, -1
+    for seq, r in rows:
+        if not isinstance(r, dict):
+            continue
+        ts = r.get("timestamp") if isinstance(r.get("timestamp"), str) else None
+        conv, cwd_ = conv or r.get("sessionId"), cwd_ or r.get("cwd")
+        first = first or ts
+        last = max(last, ts) if last and ts else last or ts
+        m = r.get("message")
+        if r.get("type") not in ("user", "assistant") or not isinstance(m, dict):
+            continue
+        bl = blocks_of(m.get("content"))
+        text = u("\n".join(b["text"] for b in bl if b.get("type") == "text" and isinstance(b.get("text"), str)))
+        if r["type"] == "user" and not r.get("isMeta") and any(b.get("type") == "text" for b in bl):
+            turn += 1
+            turns.append([sid + ":%d" % turn, turn, ts, ts, None, None])
+        if turns and ts:
+            turns[-1][3] = max(turns[-1][3] or ts, ts)
+        rm = m.get("model") if r["type"] == "assistant" and isinstance(m.get("model"), str) and m.get("model") else None
+        if real(rm):
+            model = model or rm
+            if turns:
+                turns[-1][4] = turns[-1][4] or rm
+                turns[-1][5] = rm
+        mid = r.get("uuid") or "%s#%d" % (sid, seq)
+        stop = m.get("stop_reason")
+        cur = db.execute("INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?,?,?,?)", (mid, turns[-1][0] if turns else None, sid, seq, m.get("role") or r["type"], ts,
+                         text, r.get("parentUuid"), json.dumps([stop]) if isinstance(stop, str) else None, rm))
+        fts(text, "message", cur)
+        for b in bl:
+            if b.get("type") == "tool_use" and isinstance(b.get("id"), str):
+                args = u(json.dumps(b.get("input"), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                cur = db.execute("INSERT OR IGNORE INTO tool_calls VALUES (?,?,?,?,?,NULL,NULL,NULL,?,NULL)", (b["id"], mid, sid, b.get("name"), args, ts))
+                calls[b["id"]] = cur.lastrowid if cur.rowcount == 1 else None
+                fts(args, "tool_call", cur)
+            elif b.get("type") == "tool_result" and calls.get(b.get("tool_use_id")):
+                t = u(block_text(b.get("content")))
+                db.execute("UPDATE tool_calls SET result_excerpt=?, result_sha256=?, is_error=?, ended_at=? WHERE rowid=?",
+                           (t[:EXCERPT], sha(t.encode("utf-8")), 1 if b.get("is_error") else 0, ts, calls[b["tool_use_id"]]))
+    db.executemany("INSERT INTO turns VALUES (?,?,?,?,?,NULL,0,?,?)", [(t[0], sid, t[1], t[2], t[3], t[4], t[5]) for t in turns])
+    node = join.get(cwd_) if cwd_ else None
+    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", (sid, "claude_code", conv or sid, node, "cwd" if node else None, cwd_, model, first, last, "claude", ADAPTER))
+
+
+def derive_nodes(db, root):
+    """nodes, projects, records and effects from the node logs of the whole tree; returns {realpath: node_id} for the session join (unique paths only)."""
+    seen, join, rids = set(), {}, set()
+    top = os.path.realpath(tree_top(root)) if root else None
+    paths = [os.path.realpath(p) for p in node_paths(root)]
+    ids = {}
+    for p in paths:
+        key = node_info(p)["key"]
+        i = key if key and key not in seen else "path:" + os.path.relpath(p, top)
+        seen.add(i)
+        ids[p] = i
+    pid = {}
+    db.execute("INSERT INTO projects(project_id, name) VALUES ('unassigned', 'unassigned')")
+    for p in paths:
+        info, D = node_info(p), load_at(p)
+        par = parent(p)
+        par = ids.get(os.path.realpath(par)) if par and p != top else None
+        proj = pid.get(par, "unassigned") if par else "unassigned"
+        i = ids[p]
+        if info["kind"] == "project":
+            proj = i
+            db.execute("INSERT INTO projects VALUES (?,?,?,?,NULL,'project',?,?,NULL)", (i, i, info["name"], info["key"], D["rows"][0]["ts"] if D["rows"] else None, D["rows"][-1]["ts"] if D["rows"] else None))
+        pid[i] = proj
+        db.execute("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)", (i, info["kind"], info["name"], os.path.relpath(p, top), par, proj, D["status"], (D["task"] or {}).get("goal")))
+        join[p] = i
+        for n, r in enumerate(D["rows"]):
+            rid = r.get("id") if r["type"] != "effect" else None
+            rid = rid if rid and rid not in rids else "%s#%d" % (i, n)
+            rids.add(rid)
+            origin = r["by"] if r.get("by") in ("person", "plugin") else "agent"
+            fj = json.dumps(r, sort_keys=True)
+            cur = db.execute("INSERT INTO records(record_id, node_id, type, ts, by, fields, origin, model) VALUES (?,?,?,?,?,?,?,?)", (rid, i, r["type"], r["ts"], r.get("by"), fj, origin, r.get("model") or "unknown:legacy"))
+            fts_add(db, "record", cur.lastrowid, record_text(fj))
+        for e in D["eff"].values():
+            hist = e["hist"]
+            begun = next((h for h in hist if h["step"] in ("begun", "claimed")), None)
+            sent = next((h for h in reversed(hist) if h["step"] == "sent" and h.get("ref")), None)
+            db.execute("INSERT OR IGNORE INTO effects VALUES (?,?,?,?,?,?,'declared',NULL,?,?,?,NULL)", (e["id"], i, e["target"], e["key"], e["state"], e["attempt"],
+                       begun and begun.get("by"), begun and begun["ts"], sent and sent["ref"]))
+    return {p: i for p, i in join.items() if list(join.values()).count(i) == 1}
+
+
+def join_records(db):
+    """records.session_id and turn_id: a record joins the session its `session` (AWT_SESSION) or `by` names, by session id or conversation id; it joins the turn that was open at its `ts`, only inside the session's span. Otherwise both stay null."""
+    sess = {}
+    for sid, conv, a, b in db.execute("SELECT session_id, conversation_id, started_at, ended_at FROM sessions ORDER BY session_id"):
+        sess.setdefault(conv, (sid, a, b))
+        sess[sid] = (sid, a, b)
+    turns = {}
+    for sid, tid, a in db.execute("SELECT session_id, turn_id, started_at FROM turns ORDER BY session_id, seq"):
+        turns.setdefault(sid, []).append((a or "", tid))
+    ups = []
+    db.execute("UPDATE records SET session_id=NULL, turn_id=NULL WHERE session_id IS NOT NULL OR turn_id IS NOT NULL")
+    for rid, ts, by, fields in db.execute("SELECT record_id, ts, by, fields FROM records ORDER BY rowid").fetchall():
+        try:
+            key = json.loads(fields).get("session") or by
+        except ValueError:
+            continue
+        hit = sess.get(key)
+        if not hit:
+            continue
+        tid = None
+        if hit[1] and hit[2] and hit[1] <= ts <= hit[2]:
+            tid = next((t for a, t in reversed(turns.get(hit[0], [])) if a <= ts), None)
+        ups.append((hit[0], tid, rid))
+    db.executemany("UPDATE records SET session_id=?, turn_id=? WHERE record_id=?", ups)
+
+
+def read_upto(path, size):
+    """The first size bytes of a canonical file as lines (it only grows; bytes past size belong to the next build)."""
+    with open(path, "rb") as g:
+        return g.read(size).splitlines(True)
+
+
+def drop_file(db, rel):
+    """Remove everything derived from one canonical file (its session id is the file's name)."""
+    sid = os.path.splitext(os.path.basename(rel))[0]
+    fts_drop(db, db.execute("SELECT r.id, substr(m.text, 1, ?) FROM messages m JOIN fts_ref r ON r.kind='message' AND r.ref=m.rowid WHERE m.session_id=? AND m.text != ''", (FTS_CAP, sid)).fetchall())
+    fts_drop(db, db.execute("SELECT r.id, substr(t.args, 1, ?) FROM tool_calls t JOIN fts_ref r ON r.kind='tool_call' AND r.ref=t.rowid WHERE t.session_id=? AND t.args != ''", (FTS_CAP, sid)).fetchall())
+    for t in ("messages", "tool_calls", "turns", "sessions"):
+        db.execute("DELETE FROM %s WHERE session_id=?" % t, (sid,))
+    db.execute("DELETE FROM canonical WHERE file=?", (rel,))
+
+
+def drop_nodes(db):
+    fts_drop(db, [(i, record_text(f)) for i, f in db.execute("SELECT r.id, x.fields FROM records x JOIN fts_ref r ON r.kind='record' AND r.ref=x.rowid").fetchall()])
+    for t in ("records", "effects", "nodes", "projects"):
+        db.execute("DELETE FROM " + t)
+
+
+def sync_into(db, store, root, inputs, fresh):
+    """Bring db in line with inputs (taken before anything was read). Canonical-derived tables are re-derived per changed file; records, nodes, projects and effects
+    (the small node-log tables) when any node log changed. fresh: db is empty, so everything is new."""
+    keys = input_keys(store, root, inputs)
+    top = top_of(root)
+    prev = {} if fresh else {(k, p): (n, e) for k, p, n, e in db.execute("SELECT kind, path, size, errors FROM build_state")}
+    path_of = {(k, os.path.relpath(p, store if k == "canonical" else top)): p for k, p, _ in inputs}
+    nodes_changed = fresh or any(prev.get(k, (None,))[0] != n for k, n in keys.items() if k[0] == "node") or any(k[0] == "node" and k not in keys for k in prev)
+    changed = [k for k, n in keys.items() if k[0] == "canonical" and prev.get(k, (None,))[0] != n]
+    for k in sorted(prev):
+        if k[0] == "canonical" and (k not in keys or k in changed):
+            drop_file(db, k[1])
+    if nodes_changed:
+        drop_nodes(db)
+        join = derive_nodes(db, root)
+    else:
+        join = {os.path.join(top, p) if p != "." else top: i for i, p in db.execute("SELECT node_id, path FROM nodes")}
+    if os.environ.get("AWT_TEST_BUILD_SLEEP"):
+        time.sleep(float(os.environ["AWT_TEST_BUILD_SLEEP"]))  # test hook: a build that takes a while
+    errors = {k: prev[k][1] for k in keys if k in prev and k not in changed and k[0] == "canonical"}
+    for k in sorted(changed):
+        rows = []
+        for ln in read_upto(path_of[k], keys[k]):
+            try:
+                r = json.loads(ln)
+                rows.append((r["src"], r["session"], int(r["seq"]), r["raw"]))
+            except (ValueError, KeyError, TypeError):
+                pass
+        db.executemany("INSERT OR IGNORE INTO canonical VALUES (?,?,?,?,?)", [(a, b, c, k[1], json.dumps(d, separators=(",", ":"))) for a, b, c, d in rows])
+        errors[k] = sum(1 for r in rows if isinstance(r[3], dict) and "_unparsed" in r[3])
+        if rows and rows[0][0] == "claude":
+            derive_claude(db, os.path.splitext(os.path.basename(k[1]))[0], [(r[2], r[3]) for r in rows], join)
+    if nodes_changed and not fresh:
+        db.executemany("UPDATE sessions SET node_id=?, join_confidence=? WHERE session_id=?",
+                       [(join.get(cwd_), "cwd" if join.get(cwd_) else None, sid) for sid, cwd_ in db.execute("SELECT session_id, cwd FROM sessions").fetchall()])
+    if nodes_changed or changed or any(k[0] == "canonical" and k not in keys for k in prev):
+        join_records(db)
+    db.execute("DELETE FROM ingest_sources")
+    try:
+        with open(os.path.join(store, "ingest", "claude.offsets.json"), encoding="utf-8") as g:
+            st = json.load(g)
+        for rp, e in sorted(st["files"].items()):
+            who = os.path.splitext(os.path.basename(e.get("out") or ""))[0]
+            db.execute("INSERT INTO ingest_sources VALUES ('claude',?,?,?,?,?,?)", (rp, e.get("inode"), e.get("offset"), st.get("adapter"), st.get("last_run"),
+                       sum(v or 0 for k, v in errors.items() if os.path.splitext(os.path.basename(k[1]))[0] == who)))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    db.execute("DELETE FROM build_state")
+    db.executemany("INSERT INTO build_state VALUES (?,?,?,?)", [(k, p, n, errors.get((k, p), 0)) for (k, p), n in sorted(keys.items())])
+    db.executemany("INSERT OR REPLACE INTO schema_meta VALUES (?,?)", [("schema_version", str(SCHEMA_VERSION)), ("semconv_version", SEMCONV), ("adapter", str(ADAPTER)),
+                                                                          ("tree", top), ("inputs", fingerprint(store, root, inputs))])
+
+
+def build_store(store, root, inputs):
+    """Rebuild store.db from canonical JSONL and the node logs. Same inputs give the same file: rows are inserted in sorted path and line order, nothing in it is a clock or an id generated at build time."""
+    final = os.path.join(store, "store.db")
+    tmp = "%s.%d.tmp" % (final, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+    db = sqlite3.connect(tmp, isolation_level=None)
+    try:
+        db.executescript("PRAGMA page_size=4096; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; BEGIN;" + DDL)
+        sync_into(db, store, root, inputs, True)
+        for q in INDEXES.split(";"):
+            if q.strip():
+                db.execute(q)
+        db.execute("COMMIT")
+        return counts(db)
+    except BaseException:
+        db.close()
+        os.unlink(tmp)
+        raise
+    finally:
+        try:
+            db.close()
+        except sqlite3.Error:
+            pass
+        if os.path.exists(tmp):
+            os.chmod(tmp, 0o600)
+            os.rename(tmp, final)
+
+
+def counts(db):
+    return {t: db.execute("SELECT count(*) FROM " + t).fetchone()[0] for t in ("sessions", "messages", "records")}
+
+
+def update_store(store, root, inputs):
+    """Update store.db in place, or None when it cannot be (missing, unreadable, another schema or tree): then the caller rebuilds."""
+    top = top_of(root)
+    try:
+        db = sqlite3.connect(os.path.join(store, "store.db"), isolation_level=None, timeout=30)
+    except sqlite3.Error:
+        return None
+    try:
+        m = dict(db.execute("SELECT key, value FROM schema_meta"))
+        if m.get("schema_version") != str(SCHEMA_VERSION) or m.get("tree") != top or m.get("adapter") != str(ADAPTER):
+            return None
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            sync_into(db, store, root, inputs, False)
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        return counts(db)
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+
+
+def stale_tmp(store):
+    return sorted(f for f in os.listdir(store) if f.startswith("store.db.") and f.endswith(".tmp")) if os.path.isdir(store) else []
+
+
+def sync_store(store, root, force):
+    """Normal ingest brings store.db up to date when it is missing, unreadable, of another schema or tree, or its inputs changed (their sizes: a stat per file); else it leaves
+    it alone. Only changed files are re-derived. --rebuild (force) is a full build into a temp file, the same code on an empty db."""
+    if not fts_ok():
+        die("this Python's sqlite3 has no FTS5 (sqlite %s)" % (sqlite3.sqlite_version if sqlite3 else "missing"), "use a Python whose sqlite3 has FTS5 (python.org builds and Homebrew have it); awt doctor checks this")
+    if force or not store_fresh(store, root):
+        lock = os.open(os.path.join(store, "ingest", "store.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            for f in stale_tmp(store):  # a killed build leaves its temp file; the lock is held, so none is live
+                try:
+                    os.unlink(os.path.join(store, f))
+                except OSError:
+                    pass
+            if force or not store_fresh(store, root):
+                inputs = store_inputs(store, root)  # before anything is read: a write that lands mid-build leaves the fingerprint stale, never fresh
+                return (None if force else update_store(store, root, inputs)) or build_store(store, root, inputs)
+        finally:
+            os.close(lock)
+
+
+def session_hits(term, limit):
+    """None when there is no usable store.db, else message and tool-call lines ranked by FTS5 bm25."""
+    path = os.path.join(store_dir(), "store.db")
+    if sqlite3 is None or not os.path.isfile(path):
+        return None
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True)
+        try:
+            res = []
+            phrase = '"%s"' % term.replace('"', '""')
+            for kind, ref in db.execute("SELECT r.kind, r.ref FROM fts_text JOIN fts_ref r ON r.id = fts_text.rowid WHERE fts_text MATCH ? AND r.kind IN ('message', 'tool_call') ORDER BY bm25(fts_text), fts_text.rowid LIMIT ?", (phrase, limit)):
+                if kind == "message":
+                    sid, mid, seq, role, text = db.execute("SELECT session_id, message_id, seq, role, text FROM messages WHERE rowid=?", (ref,)).fetchone()
+                    head = "message:%s#%d [%s]" % (sid, seq, role)
+                else:
+                    sid, tid, name, text = db.execute("SELECT session_id, tool_call_id, tool_name, args FROM tool_calls WHERE rowid=?", (ref,)).fetchone()
+                    head = "tool_call:%s:%s [%s]" % (sid, tid, name)
+                i = max(text.lower().find(term.lower()), 0)
+                res.append("%s: %s" % (head, text[max(0, i - 40):i + 80].replace("\n", " ")))
+            return res
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
 
 
 # ---------- main ----------
@@ -2341,7 +2885,7 @@ def build():
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T)])
     V(sp, "resume", opt=[(("--hook",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
-    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int))])
+    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F)])
     V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])
     V(sp, "note", [("text", T)])
     V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append")), (("--related",), dict(type=int))])
@@ -2352,7 +2896,7 @@ def build():
     V(sp, "supersede", [("old", T), ("new", T)], [(("--why",), T)])
     V(sp, "status", [("value", dict(choices=ENUM["status.status"]))])
     V(sp, "doctor", opt=[(("--staged",), F)])
-    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F)])
+    V(sp, "ingest", opt=[(("--source",), dict(choices=["claude", "all"], default="claude")), (("--hook",), F), (("--rebuild",), F)])
     V(sp, "help")
     es = V(sp, "effect").add_subparsers(dest="eop")
     V(es, "apply", [("rest", dict(nargs=argparse.REMAINDER))])  # removed; refused after parsing
@@ -2367,28 +2911,35 @@ def build():
 
 
 def main(argv):
-    global ROOT, BY
+    global ROOT, BY, MODEL
     BY = os.environ.get("AWT_BY") or "agent"
+    flag = None
     for f in (sys.stdout, sys.stderr):
         f.reconfigure(encoding="utf-8", errors="backslashreplace")
     rest, d, i = [], None, 0
     while i < len(argv):
         x = argv[i]
-        if x in ("--dir", "--by") and i + 1 < len(argv):
+        if x in ("--dir", "--by", "--model") and i + 1 < len(argv):
             if x == "--dir":
                 d = argv[i + 1]
-            else:
+            elif x == "--by":
                 BY = argv[i + 1]
+            else:
+                flag = argv[i + 1]
             i += 2
             continue
-        if x.startswith("--dir=") or x.startswith("--by="):
+        if x.startswith(("--dir=", "--by=", "--model=")):
             if x.startswith("--dir="):
                 d = x[6:]
-            else:
+            elif x.startswith("--by="):
                 BY = x[5:]
+            else:
+                flag = x[8:]
         else:
             rest.append(x)
         i += 1
+    # model: --model, then AWT_MODEL (an agent's env, so not for a person), else unknown:unset (SPEC, Model tracking)
+    MODEL = (flag or "").strip() or ("" if BY == "person" else os.environ.get("AWT_MODEL", "").strip()) or "unknown:unset"
     if rest[:1] == ["--version"]:
         return out("awt " + VERSION)
     if rest[:2] == ["help", "agents"]:
@@ -2422,6 +2973,8 @@ def main(argv):
             return cmd_doctor(a)
         die("no task found", "./awt init", 4)
     globals()[("eff_" + a.eop) if a.verb == "effect" else ("cmd_" + a.verb)](a)
+    if a.verb in WRITES or (a.verb == "effect" and a.eop != "show"):
+        refresh_briefs(ROOT)
 
 
 if __name__ == "__main__":

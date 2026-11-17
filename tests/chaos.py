@@ -1328,7 +1328,8 @@ def a_secrets(c):
     d2.run("init", "--goal", "g", "--done", "d")
 
     def tree():
-        return {os.path.relpath(os.path.join(a, f), d2.dir): open(os.path.join(a, f), "rb").read() for a, _, fs in os.walk(d2.dir) for f in fs if f != "awt"}
+        # BRIEF.md ends with a "Generated <second>" line, which differs when the two runs straddle a second
+        return {os.path.relpath(os.path.join(a, f), d2.dir): re.sub(rb"Generated [^;]*;", b"Generated;", open(os.path.join(a, f), "rb").read()) for a, _, fs in os.walk(d2.dir) for f in fs if f != "awt"}
     s1 = tree()
     d2.run("init", "--goal", "g", "--done", "d")
     d2.run("init")
@@ -1664,7 +1665,7 @@ def a_tree_hostile_names(c):
             c.fail("bad directory name %r" % os.path.basename(n))
     if left:
         c.fail("leftover .new dirs after clean runs: %d" % len(left))
-    extra = set(os.listdir(w)) - {"tasks", "context", "docs", "misc", ".awt", ".gitignore"}
+    extra = set(os.listdir(w)) - {"tasks", "context", "docs", "misc", ".awt", ".gitignore", "BRIEF.md"}
     if extra:
         c.fail("something escaped into the workspace dir: %s" % sorted(extra)[:5])
     tree_audit(c, top)
@@ -1959,6 +1960,8 @@ def mig_hash(root):
             p = os.path.join(dp, n)
             if os.path.relpath(p, root) == os.path.join("legacy", "paseo-migration.md"):
                 continue  # created vs already-present counts differ between a clean run and a resumed one
+            if n == "BRIEF.md":
+                continue  # derived, and carries its own generation time
             data = open(p, "rb").read()
             if n == "events.jsonl":
                 data = re.sub(rb'"ts":"[^"]*"', b'"ts":""', data)

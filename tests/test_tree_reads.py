@@ -342,12 +342,12 @@ class Review(test_tree.TreeBase):
             self.assertGreaterEqual(len(rows), 2, sect)
             self.assertEqual(len({tuple(sorted(r)) for r in rows}), 1, (sect, [sorted(r) for r in rows]))
             keys[sect] = set(rows[0])
-        self.assertEqual(keys["decisions"], {"ts", "by", "id", "choice", "why", "tags", "supersedes", "superseded_by"})
-        self.assertEqual(keys["questions"], {"ts", "by", "id", "text", "answer"})
-        self.assertEqual(keys["notes"], {"ts", "by", "id", "text"})
-        self.assertEqual(keys["state"], {"ts", "by", "scope", "now", "next"})
-        self.assertEqual(keys["refs"], {"ts", "by", "target", "title", "kind", "why", "access", "path", "branch", "key"})
-        self.assertEqual(keys["effects"], {"ts", "by", "id", "target", "why", "body", "how", "state", "attempt"})
+        self.assertEqual(keys["decisions"], {"ts", "by", "model", "id", "choice", "why", "tags", "supersedes", "superseded_by"})
+        self.assertEqual(keys["questions"], {"ts", "by", "model", "id", "text", "answer"})
+        self.assertEqual(keys["notes"], {"ts", "by", "model", "id", "text"})
+        self.assertEqual(keys["state"], {"ts", "by", "model", "scope", "now", "next"})
+        self.assertEqual(keys["refs"], {"ts", "by", "model", "target", "title", "kind", "why", "access", "path", "branch", "key"})
+        self.assertEqual(keys["effects"], {"ts", "by", "model", "id", "target", "why", "body", "how", "state", "attempt"})
         for sect in ("context", "docs", "outbox", "misc"):
             for r in json.loads(self.ok("list", sect, "--json", root=n).stdout):
                 self.assertEqual(set(r), {"path", "title"})

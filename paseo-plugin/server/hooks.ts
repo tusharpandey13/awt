@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import type { PluginHookAgent, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { awt, parseJson, withSignal } from "./awt.js";
+import { awt, parseJson, withModel, withSignal } from "./awt.js";
 import type { AwtConfig } from "./config.js";
 import { readConfig } from "./config.js";
 import { NUDGE, withBlock } from "./prompt.js";
@@ -118,8 +118,51 @@ async function within<T>(cfg: AwtConfig, signal: AbortSignal | undefined, log: L
   }
 }
 
+const REFRESH_MS = 1500;
+
+/**
+ * Model tracking. Paseo hands plugins no model on the agent (`PluginHookAgent`, `PluginSessionOpenRequest`) and none when an agent is
+ * created except the configured `config.model` in `agent.create.before`, which has no agent id yet. The resolved model is
+ * `runtimeInfo.model` of the agent snapshot (`agents.ref(id).refresh()`), which exists only once the session is open. So, in order:
+ * the resolved model, the configured one (held from create.before by provider, cwd and title), the last one seen, `<provider>:default`.
+ */
+function modelTracker() {
+  const seen = new Map<string, string>();
+  const hints = new Map<string, string>();
+  const key = (provider: string, cwd: string, title: string | null | undefined) => `${provider}\0${cwd}\0${title ?? ""}`;
+  return {
+    hint: (config: { provider: string; cwd: string; title?: string | null; model?: string }) => {
+      const m = config.model?.trim();
+      if (m) hints.set(key(config.provider, config.cwd, config.title), m);
+    },
+    /** `refresh` false: skip the daemon round trip (a session that is still opening has no snapshot). */
+    async of(agent: { id: string; provider: string; cwd: string; title?: string | null }, ctx: PluginHookContext, refresh = true): Promise<string> {
+      const k = key(agent.provider, agent.cwd, agent.title);
+      let resolved: string | undefined;
+      if (refresh) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const handle = ctx.paseo.agents.ref(agent.id);
+          await Promise.race([handle.refresh(), new Promise((r) => (timer = setTimeout(r, REFRESH_MS)))]);
+          resolved = handle.runtimeInfo?.model?.trim() || undefined;
+        } catch {
+          // no snapshot: fall through to the configured model
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      const hint = hints.get(k);
+      hints.delete(k);
+      const model = resolved || hint || seen.get(agent.id) || `${agent.provider}:default`;
+      seen.set(agent.id, model);
+      return model;
+    },
+  };
+}
+
 export function registerHooks(server: Pick<PluginServerContext, "addHook">, env: NodeJS.ProcessEnv = process.env, log: Log = (m) => console.error(m)): () => void {
   const cfg = readConfig(env);
+  const models = modelTracker();
   const tree = new Tree(cfg, log);
   if (cfg.receiptBad) log(`awt plugin: AWT_RECEIPT=${env.AWT_RECEIPT} is not 0, off, changes or on; showing receipts`);
   const turnStart = new Map<string, number>();
@@ -263,7 +306,9 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     // The block tells the agent to use awt, so it goes in only when awt works.
     return within(cfg, ctx.signal, log, "agent.create.before", request, async () => {
       await tree.root();
-      return { ...request, config: { ...request.config, systemPrompt: withBlock(request.config.systemPrompt) } };
+      models.hint(request.config);
+      const model = request.config.model?.trim();
+      return { ...request, ...(model ? { env: { ...request.env, AWT_MODEL: model } } : {}), config: { ...request.config, systemPrompt: withBlock(request.config.systemPrompt) } };
     });
   }));
 
@@ -273,15 +318,18 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     const labelled = parentFromLabels(request.labels);
     if (labelled) parents.set(request.agentId, labelled);
     return within(cfg, ctx.signal, log, "agent.open.before", request, async () => {
-      const node = await agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider, labels: request.labels }, ctx);
+      // A session that is still being created has no snapshot to read; reopening one does.
+      const model = await models.of({ id: request.agentId, provider: request.provider, cwd: request.cwd, title: request.title }, ctx, request.reason !== "create");
+      const node = await withModel(model, () => agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider, labels: request.labels }, ctx));
       withDir.add(request.agentId);
-      const env = { ...request.env, AWT_DIR: node, AWT_BY: request.agentId, ...(cfg.related ? { AWT_RELATED: cfg.related } : {}) };
+      const env = { ...request.env, AWT_DIR: node, AWT_BY: request.agentId, AWT_MODEL: model, ...(cfg.related ? { AWT_RELATED: cfg.related } : {}) };
       return { ...request, env, tools: [...request.tools.filter((t) => t.name !== "awt_resume"), awtResume] };
     });
   }));
 
   add(server.addHook("agent.create.after", async ({ agent }, ctx) => {
-    await safe(log, "agent.create.after", undefined, async () => {
+    const model = await models.of(agent, ctx);
+    await safe(log, "agent.create.after", undefined, () => withModel(model, async () => {
       const node = await agentNode(agent, ctx);
       const parentId = parentOf(agent);
       if (parentId) {
@@ -293,7 +341,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
           await awt(cfg, node, ["ref", parent, "--title", "parent agent", "--kind", "node"], "paseo-plugin");
         }
       }
-    });
+    }));
   }));
 
   add(server.addHook("agent.turn.before", async ({ agent }) => {
@@ -303,7 +351,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   add(server.addHook("agent.turn.after", async ({ agent, outcome, turnId }, ctx) => {
     const started = turnStart.get(agent.id);
     turnStart.delete(agent.id);
-    await safe(log, "agent.turn.after", undefined, async () => {
+    const model = await models.of(agent, ctx); // re-read every turn: a model switch shows in the writes that follow
+    await safe(log, "agent.turn.after", undefined, () => withModel(model, async () => {
       if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !(await tracked(agent.id))) return;
       if (!cfg.nudge && !cfg.autoHandoff) return;
       const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
@@ -334,21 +383,22 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
         else nudgedAt.set(agent.id, before);
         throw error;
       }
-    });
+    }));
     // After the stand-in handoff, so the receipt counts it. Any outcome, subagents included; a failure here never touches the turn.
-    await safe(log, "agent.turn.after receipt", undefined, async () => {
+    await safe(log, "agent.turn.after receipt", undefined, () => withModel(model, async () => {
       if (cfg.receipt === "off" || started === undefined || !(await tracked(agent.id))) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);
       const data = node ? await readReceipt(cfg, node, new Date(started), agent.id) : null;
       if (!data || (cfg.receipt === "changes" && (data.empty || (data.auto && data.counts.state === 1 && Object.keys(data.counts).length === 1)))) return;
       await ctx.paseo.agents.ref(agent.id).timeline.append({ type: "plugin", id: `${RECEIPT_KIND}.${turnId ?? started}`, kind: RECEIPT_KIND, version: RECEIPT_VERSION, data });
-    });
+    }));
   }));
 
-  add(server.addHook("agent.archive.after", async ({ agent }) => {
-    await safe(log, "agent.archive.after", undefined, async () => {
+  add(server.addHook("agent.archive.after", async ({ agent }, ctx) => {
+    const model = await models.of(agent, ctx);
+    await safe(log, "agent.archive.after", undefined, () => withModel(model, async () => {
       await tree.onNode(`paseo:agent/${agent.id}`, (node) => tree.setStatusDoneOrPaused(node));
-    });
+    }));
   }));
 
   add(server.addHook("workspace.archive.after", async ({ workspace }) => {

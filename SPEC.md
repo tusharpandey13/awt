@@ -11,7 +11,7 @@ One directory per task. It holds context from unconnected informal sources (Slac
 1. Agents are hurried, not hostile. Protect against accidents and shortcuts.
 2. One write path, validated before commit. A bad write is refused with a `fix:` line.
 3. Record only what no machine can know. Activity comes from the filesystem and git.
-4. Views are computed at read time, never written.
+4. Views are computed at read time, never written. One exception: `BRIEF.md`, a derived copy of the `resume` brief that is regenerated after every awt write and never read back as state (see "BRIEF.md"). Delete it and nothing is lost.
 5. Only kernel-managed primitives: `O_APPEND`, `O_EXCL`, `rename`, and `flock` where a plan must check then write, since the kernel releases it when a process dies. No lock files, no allocators, no caches.
 6. Forgetting must be harmless: a missing record degrades visibly.
 7. No hook, settings file or git repo is required. They are conveniences.
@@ -29,7 +29,8 @@ One directory per task. It holds context from unconnected informal sources (Slac
 ```
 AGENTS.md              contract (template below); existing file gets the marked block appended
 README.md              only if absent; short human guide (template below)
-.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/runs/
+.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/runs/ BRIEF.md
+BRIEF.md               derived brief, written after every awt write (see "BRIEF.md")
 .claude/settings.json  only if absent (template below); if present, print the snippet instead
 context/ docs/ outbox/ misc/ scratch/
 .awt/events.jsonl      the only state
@@ -55,7 +56,11 @@ context/ docs/ outbox/ misc/ scratch/
 
 `.awt/events.jsonl`: one JSON object per line, UTF-8, `ensure_ascii=False`, at most 4096 bytes encoded. Written only via one `emit()`: validate, scan, then a single `os.write` on an `O_APPEND` fd. If the file's last byte is not a newline, prepend one to the row (heals a torn tail). A short write is an error.
 
-Envelope stamped by `emit`: `v` (1), `ts` (UTC ISO8601 with microseconds), `type`, `host`, `by` (`--by` value, else `AWT_BY`, else `agent`).
+Envelope stamped by `emit`: `v` (1), `ts` (UTC ISO8601 with microseconds), `type`, `host`, `by` (`--by` value, else `AWT_BY`, else `agent`), `model` (below), and `session` when `AWT_SESSION` is set (a Claude session id; it joins the row to `sessions` in `store.db`).
+
+### Model tracking
+
+Every row names the model that produced it; the owner made this mandatory. Resolution, by `emit`: the global `--model ID` flag (accepted before or after the verb, like `--by`, so every write verb takes it); else `AWT_MODEL`; else the literal `unknown:unset`. A write never fails for lack of a model. A person (`--by person`) ignores `AWT_MODEL`, which belongs to an agent env, and gets `unknown:unset` unless `--model` is given. The value is the raw model id the provider reports; when a provider runs its own default and the id cannot be learnt it is `<provider>:default`. `load()` reads a row without `model` as `unknown:legacy`; the log is append-only, so such rows are never rewritten. `list SECTION --json` rows carry `model`, and `effect show` prints it. `awt show` does not exist (the verb limit): `effect show` and `list --json` are where a record's model is read.
 
 Ids: prefix plus 8 random hex characters (`d-7f3a9c21`). Prefixes: `d` decision, `q` question, `e` effect, `n` note.
 
@@ -86,7 +91,7 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `init` | Above. `--kind` creates nodes: see Node tree. |
 | `resume [--hook] [--scope S]` | Print the brief. `--hook`: exit 0 and print nothing when no task resolves or on any internal error. Never fails because git failed. |
 | `list [refs\|context\|docs\|outbox\|misc\|decisions\|questions\|effects\|notes\|state] [--all]`; `list --since ISO8601 [--down] --json` | Discoverability. No argument prints all sections. `--all` adds superseded docs and decisions, answered questions, all state history and terminal effects. `--since` (with `--json`, no section) prints the rows of every type at or after the timestamp; see Reading across nodes. |
-| `find <term>`, `find --like TEXT [--limit N]` | Case-insensitive literal search across event text and all text files in the root (excluding `.awt/`, `.git/`, `scratch/`, the `awt` script, binary files, and files over 2 MB). Prints `path:line: snippet`; event hits print `event:<id or type>: snippet`. Caps at 40 hits, then `+N more`. Exit 0 even with no hits. Does not follow symlinks. `--like` ranks related records instead; see Reading across nodes. |
+| `find <term>`, `find --like TEXT [--limit N]` | Case-insensitive literal search across event text and all text files in the root (excluding `.awt/`, `.git/`, `scratch/`, the `awt` script, binary files, and files over 2 MB). Prints `path:line: snippet`; event hits print `event:<id or type>: snippet`. Caps at 40 hits, then `+N more`. Exit 0 even with no hits. Does not follow symlinks. `--like` ranks related records instead; see Reading across nodes. `--sessions` (with a TERM) adds up to 40 message and tool-call hits from `store.db`, ranked by FTS5 bm25: `message:<session>#<seq> [role]: snippet` and `tool_call:<session>:<id> [tool]: snippet`; with no usable `store.db` it prints one line, `note: no store.db yet (run awt ingest); sessions not searched`. `--sessions` with `--like` is exit 2. |
 | `state --now T --next T [--scope S]` | Refuse if identical to the current state for that scope. |
 | `note T` | |
 | `decide CHOICE --why T [--supersedes ID] [--tag T]... [--related N]` | `--why` required. Refuse unknown `--supersedes` id, or one already superseded (fix names the current superseder). After the id line, prints up to N `related:` lines (default 3; see Reading across nodes). |
@@ -98,7 +103,7 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `status active\|paused\|done` | `done` is refused while any question is unanswered or any effect is `planned`, `begun` or `unknown`; the refusal lists them. |
 | `effect plan\|begin\|mark\|show` | Below. |
 | `doctor [--staged]` | Below. |
-| `ingest [--source claude\|all] [--hook]` | Below. |
+| `ingest [--source claude\|all] [--hook] [--rebuild]` | Below. |
 
 `help` and `--help` print usage and do not count as verbs. `help agents` prints the embedded agent reference. `--version` prints the version.
 
@@ -117,6 +122,16 @@ Sections in this order, each with a budget in one constants table. Total at most
 | 7 | One inventory line (counts of refs, no-access refs, context, docs, outbox, misc), quarantine count if nonzero, the pointer `./awt list`, `./awt find <term>` | 200 |
 
 Add one last line when the newest state is missing: `No handoff yet. Before stopping: ./awt state --now "..." --next "..."`.
+
+## BRIEF.md
+
+Every node has `BRIEF.md`: the `resume` brief for that node, plus one last line `Generated <time>; ages above are as of then.` (relative ages go stale in a file). It exists so an agent needs only `cat`, whatever the host: it is a plain file, so it works when the Paseo `awt_resume` tool is not delivered or the Claude Code hook does not load.
+
+- **Written:** after `init` (any kind), and after every verb that writes to a node: `state note decide ask answer ref capture supersede status` and `effect plan|begin|mark`. It is written for the node written to, for its parent (the Children section shows the child's state), and, when that node is a task, for every agent below it, when there are at most 20 (their Task section shows the task's state; with more, they refresh at their own next write or session start). `resume --hook` also refreshes the node's own file (not when `AWT_NO_BRIEF` is set, which `doctor` sets for its hook check: a check writes nothing). Other changes (a file dropped in `docs/`, a git commit, an ancestor above the parent) show up at the next write to that node or the next session start.
+- **Atomic:** the text goes to `.awt/BRIEF.<pid>.tmp`, then `rename` onto `BRIEF.md`. A reader sees the old or the new file, never half.
+- **Derived, never state (rule 4):** nothing reads it back, `resume` and every listing ignore it, and it does not count as a change since the newest state. A failure to write it (read-only directory, a directory named `BRIEF.md`) is silent and never fails the verb. Reading verbs other than the hook do not write it.
+- **Git:** `BRIEF.md` is in the `.gitignore` lines `init` writes. It changes on every write, differs per checkout and is rebuilt from `.awt/events.jsonl`, which is what gets committed.
+- **Not covered here:** ingest and plugin-side effects are phase 2 store work and phase 3; a brief regenerated on ingest comes with them.
 
 ## Listing
 
@@ -168,7 +183,7 @@ Removed: `effect apply`, and the flags `--run`, `--snapshot`, `--verify`, `--cla
 Prints one `ok`, `warn` or `fail` line per check, and exits 1 on any `fail`. It tests behaviour rather than inspecting files.
 
 - `fail`: Python below 3.9; no task root; a real `O_APPEND` and `O_EXCL` probe in `.awt/` fails; `AGENTS.md` lacks the awt block; `./awt resume --hook` run as a subprocess prints no brief.
-- `warn`: quarantined rows, with their line numbers; the path contains `iCloud`, `Dropbox`, `OneDrive` or `Google Drive`, or is a network mount; `CLAUDE.md` in the directory or an ancestor; `.claude/settings.json` lacks the awt hook; `.claude/settings.json` still has the obsolete `ask` rule for `effect apply` (one warning per line, naming the line number and text to remove; awt never edits the file); `awt` is not executable; a git remote exists (task data would be pushed if committed, so check it is private); open `begun` or `unknown` effects.
+- `warn`: quarantined rows, with their line numbers; rows whose `model` is `unknown:*` (a count per node: `unknown:unset` and `unknown:legacy`; `ok` when every row names a model); the path contains `iCloud`, `Dropbox`, `OneDrive` or `Google Drive`, or is a network mount; `CLAUDE.md` in the directory or an ancestor; `.claude/settings.json` lacks the awt hook; `.claude/settings.json` still has the obsolete `ask` rule for `effect apply` (one warning per line, naming the line number and text to remove; awt never edits the file); `awt` is not executable; a git remote exists (task data would be pushed if committed, so check it is private); open `begun` or `unknown` effects.
 - Store checks (run even without a task root, never create anything): `ok` line with the store size and file count (ARCHITECTURE-v2 3.6); `warn` when the store directory is not mode 700 (awt only warns; it never changes the mode of a directory that already exists) or holds files that others can read, when it sits in a sync folder, network mount or git work tree that does not ignore it (`git check-ignore`), for each file whose last ingest failed (`ingest error for PATH: ...`, from `errors` in the offsets file), when `ingest` never ran or last ran over 7 days ago, and when the oldest Claude transcript is within 7 days of `cleanupPeriodDays` (from `${AWT_CLAUDE_SETTINGS:-~/.claude/settings.json}`, default 30) and ingest is more than a day old.
 - `doctor --staged`: needs only a git work tree (`--dir`, default the current directory), not a task. Scans the staged blobs (`git cat-file blob :path`, so no textconv filter applies; not the working copy) of added, copied, modified, renamed and type-changed text files under 2 MB for the secret scan; prints each match as `error:` with the file and pattern, never the secret, and exits 1. Meant for `.git/hooks/pre-commit`. `save` was removed: it exits 2 with a `fix:` naming `git commit` and `doctor --staged`.
 
@@ -185,8 +200,25 @@ Prints one `ok`, `warn` or `fail` line per check, and exits 1 on any `fail`. It 
 - **Idempotent and crash safe.** One `O_APPEND` write per row. A torn tail on a canonical file is closed with a newline before appending. If a run died after appending but before saving its offset, the next run skips rows whose `seq` is already present. A source whose inode changed, that is shorter than the saved offset, or whose bytes before the offset no longer match the saved hash (rewritten in place), is rescanned from the start and only rows not already stored are appended. Rerunning with nothing new writes no rows.
 - **One bad file does not stop the run.** Any error while ingesting a file is recorded as `errors[<path>]` in the offsets file (cleared when the file next succeeds), the other files are still ingested and `last_run` is saved. `doctor` warns for each recorded error; without `--hook` the summary line adds `; N files failed`.
 - **`--hook`:** prints nothing and exits 0 on any error. `init` puts it in the `SessionEnd` hook of `.claude/settings.json`.
-- Without `--hook`: prints `ingested N rows from M claude files into STORE`; a store that cannot be written exits 1 with a `fix:`.
+- Without `--hook`: prints `ingested N rows from M claude files into STORE`; a store that cannot be written exits 1 with a `fix:`. Then, when `store.db` was (re)built, `updated store.db: S sessions, M messages, R records`.
+- **Then `store.db`** (next section). Ingest rebuilds it when it is missing, unreadable, of another schema version or tree, and updates it in place (next section) when the size of any input changed; otherwise it leaves the file alone. `--rebuild` skips the providers entirely, deletes and rebuilds `store.db` from the canonical files and node logs, and prints `rebuilt store.db: ...`. If the Python's sqlite3 has no FTS5, a build exits 1 with a `fix:` (the canonical rows are already written).
 - awt never deletes store data and has no verb that does.
+
+## store.db
+
+`$AWT_STORE/store.db` (mode 600): SQLite, derived only, never a source of truth. Tables and columns are in `docs/schema.md`; the reasons in `docs/adr/0004-fts5-over-custom-scoring.md`.
+
+- **Inputs:** every canonical file under `log/` and the `.awt/events.jsonl` of every node from the tree top down to depth 8 and 2,000 nodes. Providers are never read.
+- **The tree:** one store indexes one tree, whoever calls. The top is, in order: `AWT_ROOT`, `--dir`, the tree recorded in `ingest/tree` by the last ingest, then the caller's own tree (`AWT_DIR`, the script's directory, the cwd). A tree named by `AWT_ROOT` or `--dir`, or the first one found, is recorded; a caller in another tree or in a bare directory (cron, a hook) does not change it. Changing the tree rebuilds. With no tree ever known, sessions and messages still build and there are no records or nodes.
+- **Build:** `--rebuild`, or a missing, unreadable, other-schema or other-tree store, builds a new file as `store.db.<pid>.tmp`, renamed over `store.db` at the end, so a reader never sees a half-built file. Otherwise `awt ingest` updates `store.db` in one transaction: a canonical file whose size changed (or that is gone) has its sessions, turns, messages, tool calls and search rows dropped and derived again; when any node log changed, `records`, `nodes`, `projects` and `effects` (small) are derived again and the session and record joins recomputed; nothing changed, nothing is touched. `build_state` holds the sizes and per-file error counts the last build saw. The update is the same code as the rebuild run on the changed parts, so its rows equal a rebuild's (rowids and the order of ties in a search may differ). Everything runs under `flock` on `ingest/store.lock`; the input sizes are taken before anything is read, so a write that lands during a build leaves the store stale (rebuilt next time), never fresh. Under the lock a build first deletes every `store.db.*.tmp` a killed build left; `doctor` warns while any exist.
+- **Byte-stable:** `--rebuild` and any other full build: the same canonical files, node logs, offsets file and tree location give an identical `store.db` file (same SHA-256), and so the same `.dump`. Rows go in in sorted path and line order; nothing in the file is a build-time clock or random id. The guarantee holds for one SQLite version; a different SQLite may lay pages out differently, and the `.dump` is then the comparison. The `ingest_sources` table is a snapshot of the offsets file taken at each build, so its `last_run` can lag until the next rebuild.
+- **Claude derivation:** a session is one canonical file. A turn starts at each `user` record that has a text block and is not `isMeta`; a record made only of `tool_result` blocks continues the turn. Records before the first prompt have no turn. `paseo_turn` is 0 and `outcome` is null (they are not inferable). A `tool_use` block is a `tool_calls` row; its `tool_result` fills `result_excerpt` (first 4,096 characters), `result_sha256` (of the whole result), `is_error` and `ended_at`. Messages and tool results are kept whole in `messages.text` and in `canonical.raw`; only the FTS index takes the first 262,144 characters of each string.
+- **Models (rules in Model tracking):** `records.model` (NOT NULL, `unknown:legacy` for old rows); `messages.response_model` is each assistant message's `message.model` (null for user messages), so a mid-session switch shows as two distinct values; `turns.request_model` and `turns.response_model` are the first and last assistant model inside the turn; `sessions.request_model` is the first assistant model. The placeholder `<synthetic>` that Claude Code writes for injected messages is kept in `messages` but never counts as a session or turn model.
+- **Record to session and turn:** `records.session_id` is set when the row's `session` (`AWT_SESSION`) or else its `by` equals a session id or conversation id; `records.turn_id` is then the turn open at the row's `ts`, only when `ts` lies inside the session's first-to-last timestamp span. Otherwise both are null.
+- **Session to node:** `node_id` is set, with `join_confidence = 'cwd'`, only when the session's `cwd` equals the real path of exactly one node of the tree; otherwise both are null. No other join is guessed.
+- **Search:** `fts_text` is a contentless FTS5 table over message text, tool-call arguments and every text field of a record (the text lives once, in its own table); `fts_ref` maps its rowid to `kind` (`message`, `tool_call`, `record`) and `ref` (the `rowid` in the table of that kind). Join columns have indexes (`ix_*`).
+- **`doctor`** fails when the running sqlite3 has no FTS5.
+- `find --like` and the related lines of `decide` and `ask` never read `store.db`. Without FTS5 they rank by word rarity instead of bm25 and still work; `find --sessions` and the store need FTS5.
 
 ## Templates
 
@@ -197,26 +229,11 @@ The block is wrapped in `<!-- awt:begin -->` and `<!-- awt:end -->`. On re-init,
 ```markdown
 # Task workspace (awt)
 
-Everything about this task lives here. Keep records with `./awt`. Never hand-edit `.awt/`.
-
-**Start:** unless you are a subagent with its own brief, run `./awt resume` and follow it.
-**Before stopping** with changes made: `./awt state --now "where things stand" --next "the next concrete step"`. Parallel workstreams: add `--scope <name>`.
-
-| You have | Do |
-|---|---|
-| A link to something readable later (Slack, Jira, Confluence, PR, repo path) | `./awt ref <url-or-path> --title "..."`. Prefer this to copying. |
-| A link you cannot open | Still record it: `./awt ref <url> --title "..." --no-access`, then `./awt ask` for a paste |
-| Text with no usable link (pasted chat, meeting notes, research) | `./awt capture --from slack --title "..." [file]` |
-| A plan, ADR, result or other working doc | Write it in `docs/`. Replaced: `./awt supersede docs/old.md docs/new.md` |
-| A decision | `./awt decide "the choice" --why "the reason"`. Reversing one: add `--supersedes <id>` |
-| A small fact worth keeping | `./awt note "..."` |
-| A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
-| Anything else | `misc/`. Throwaway work: `scratch/`. |
-
-**Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace in the tree. Check before deciding or asking; `decide` and `ask` also list related records, so read them.
-**Stuck or refused:** read the `fix:` line, then `./awt help agents`.
-**Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
+Your brief is `BRIEF.md` here (or run `./awt resume`). Record a choice with `./awt decide "..." --why "..."`, a question for a person with `./awt ask "..."`. Everything else is recorded for you. Never hand-edit `.awt/`. Stuck: `./awt help agents`.
+**Subagents:** skip the brief, write output to `docs/<brief>.out.md`.
 ```
+
+About 250 characters of prompt plus the subagent line. There is no handoff line (ARCHITECTURE-v2-DECISIONS 15): the plugin writes an `auto` state after a turn with none, and `state` stays an optional verb that `awt help agents` still documents. The tree form (`awt` for `./awt`) opens with "Your node is `$AWT_DIR` if set, else this directory.", names `$AWT_DIR/BRIEF.md`, and sends a subagent's result to `$AWT_DIR/out.md`.
 
 ### README.md (task dir)
 
@@ -244,6 +261,8 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
   }
 }
 ```
+
+`SessionStart` has no `matcher`, so it also runs after startup, resume, clear and compaction, and its stdout is the brief (delivered whether or not the agent ever saw an awt prompt). Where the host does not load the hook (Claude Code under Paseo does not load a node's settings), `BRIEF.md` is the fallback.
 
 Do not add an `Edit` deny rule for `.awt/`: Claude Code merges those into the OS sandbox, which then stops `awt` writing its own log. A chaos run confirmed this. Hand edits are handled by quarantine.
 
@@ -302,7 +321,7 @@ Layout by kind:
 | `task` | The `init` layout above, with `AGENTS.md` in tree form, the `.claude/settings.json` hook running `awt resume --hook`, and no `README.md` |
 | `agent` | `.awt/`, `scratch/`, `out.md` created on first write |
 
-`.gitignore` lines for `scratch/` and `.awt/claims|runs/` are written at every node.
+`.gitignore` lines for `scratch/`, `.awt/claims|runs/` and `BRIEF.md` are written at every node, and every node gets a `BRIEF.md` when created.
 
 ### Resolution
 
@@ -332,7 +351,7 @@ Every walk of a node's own files (listing, `find`, resume section 5) skips any s
   - `list context|docs|outbox|misc --json`: array of `path`, `title`.
   - `resume --json`: `node` (`kind`, `name`, `key`, `legacy`), `status`, `goal`, `done_means`, `state` (the newest, or the newest of `--scope`), `open_questions`, `attention_effects`, `decisions`, `lineage` and `children` (arrays of `list nodes` objects), `task` (agent nodes: a `list nodes` object for the task with its `done_means`, `state`, `open_questions`, `attention_effects` and `decisions` added; else `null`), `brief` (the text).
 - `find --up|--down|--tree TERM`: `--up` searches ancestors, `--down` descendants. `--tree` searches the whole tree under the nearest `root` ancestor: the root node and every descendant of it, including sibling tasks and their agents (a node with no root above it searches its ancestors and descendants instead). The same caps apply (40 hits in total; depth 8 and 2,000 nodes counted from the searched top). Each hit is prefixed with its node path as seen from the current directory, so it can be passed to `--dir` or opened as is: nothing for the current directory itself; a relative path when the node is inside the current directory or the current directory is inside the tree; an absolute path otherwise (for example an agent whose cwd is its repo while `AWT_DIR` points into the tree). Without a flag, only the resolved node is searched.
-- `find --like TEXT [--limit N]`: ranked related records. Words are the lowercase tokens of TEXT matching `[a-z0-9][a-z0-9_./-]+`, with leading and trailing `.`, `/`, `-` and `_` stripped (so `gateway.` is `gateway`), minus the stopwords in the `STOPWORDS` constant of `awt` (about 80 English words) and tokens under 3 characters, duplicates dropped (ids and paths stay). Candidates are event rows only: current decisions, questions (with their answer), notes, refs (title and why) and `main`-scope states; `auto` states, effects and node rows never match, and a record never matches itself. Nodes that are `done` or `paused` are candidates: history is the point. Each distinct shared word adds `log(1 + N/df)` (N candidates, df candidates containing the word). A candidate qualifies with at least 2 shared words, or 1 when TEXT has at most 2 words. `rule` decisions score x1.5; ties go to the newest row. Scope is the `--tree` set; `--up` or `--down` narrows it; same caps. Output: one line per hit, best first, `<id or row type> <@node> [rule]: text`, for example `d-7f3a9c21 @workspaces/parsekit [rule]: choice (why: ...)` or `q-1a2b3c4d @...: question -> answer`; a ref or state has no id and uses its row type (`ref`, `state`); the `@node` prefix is omitted for the resolved node (the one `awt` runs in, wherever the cwd is); for any other node it follows the `--tree` path rule, except that an absolute path is replaced by the path relative to the tree top (for example `@workspaces/w/tasks/t`), so an agent whose cwd is outside the tree does not spend its 200 characters on a long absolute path. Each line is cut to 200 characters; for `related:` lines the 200 includes the `related: ` prefix. Default limit 10, `--limit` 1 to 40. No hits prints `no related records`, exit 0. `--like` with a TERM, or `--limit` without `--like`, is exit 2.
+- `find --like TEXT [--limit N]`: ranked related records. Words are the lowercase tokens of TEXT matching `[a-z0-9][a-z0-9_./-]+`, with leading and trailing `.`, `/`, `-` and `_` stripped (so `gateway.` is `gateway`), minus the stopwords in the `STOPWORDS` constant of `awt` (about 80 English words) and tokens under 3 characters, duplicates dropped (ids and paths stay). Candidates are event rows only: current decisions, questions (with their answer), notes, refs (title and why) and `main`-scope states; `auto` states, effects and node rows never match, and a record never matches itself. Nodes that are `done` or `paused` are candidates: history is the point. A candidate qualifies with at least 2 shared words, or 1 when TEXT has at most 2 words (this gate is the only use of the words list above). Qualifying candidates are ranked by SQLite FTS5 `bm25` over an in-memory index of the candidates' text (record id and fields), queried with the OR of the words; the index is built per call from the walked records, so it needs no store and gives the same order for the same records. `rule` decisions score x1.5; ties go to the newest row. Scope is the `--tree` set; `--up` or `--down` narrows it; same caps. Output: one line per hit, best first, `<id or row type> <@node> [rule]: text`, for example `d-7f3a9c21 @workspaces/parsekit [rule]: choice (why: ...)` or `q-1a2b3c4d @...: question -> answer`; a ref or state has no id and uses its row type (`ref`, `state`); the `@node` prefix is omitted for the resolved node (the one `awt` runs in, wherever the cwd is); for any other node it follows the `--tree` path rule, except that an absolute path is replaced by the path relative to the tree top (for example `@workspaces/w/tasks/t`), so an agent whose cwd is outside the tree does not spend its 200 characters on a long absolute path. Each line is cut to 200 characters; for `related:` lines the 200 includes the `related: ` prefix. Default limit 10, `--limit` 1 to 40. No hits prints `no related records`, exit 0. `--like` with a TERM, or `--limit` without `--like`, is exit 2.
 - `decide` and `ask` related lines: after the id line they print up to N lines `related: ID @NODE ...`, ranked as `find --like` over the choice and why (`decide`) or the question text (`ask`), the new row excluded. N is `--related N`, else `AWT_RELATED`, else 3; range 0 to 20, 0 is off. A bad `--related` is exit 2; a bad `AWT_RELATED` warns on stderr and uses 3; an empty `AWT_RELATED` is the same as unset (3, no warning). The write comes first and is never undone: any error in the lookup is swallowed (exit 0), and the lookup stops after 2 s, counted from before the tree walk and checked between nodes during the walk and the reads (a single huge node file can still overrun it, since one read is not interrupted): the hits found so far print, then `related: (lookup stopped at 2 s; run awt find --like ...)`, all on stdout. Unreadable or corrupt nodes are skipped silently. `AWT_RELATED_MS` overrides the 2,000 ms budget (a test hook); a value that is not a finite number of at least 0 means 2,000.
 - `list --since ISO8601 [--down] --json`: an array of rows of every type at or after the timestamp in the node (and, with `--down`, its descendants), sorted by `ts` ascending, each with `type`, `ts`, `by`, `id`, `scope` (`null` unless a state) and, with `--down`, `node`: the node path relative to the queried node, `null` for the queried node's own rows. The timestamp is ISO 8601 with `Z` (either case) or an offset (`+HH:MM`, `+HHMM`, `-HH:MM`, `-HHMM`); a naive time (no `Z` or offset) or a bare date is exit 2 with a `fix:` line, as is an empty value. Requires `--json` (else exit 2), takes no section; a bad timestamp is exit 2. The Paseo plugin reads turn receipts through it.
 - `ref TARGET`: a target that is a directory containing `.awt/` and no `.git` infers `kind=node` (a node that is its own git repository still infers `repo`; pass `--kind node` to override) and stores the target's `key`, if it has one, and its path relative to the referencing node. Reading resolves by key under the tree root first, then by path, so a keyed target survives any move within the tree and an unkeyed one survives a move that contains both ends. A `paseo:` target infers `kind=paseo`. A node ref that resolves nowhere on this host is shown with `access: none`.
@@ -348,6 +367,8 @@ Every walk of a node's own files (listing, `find`, resume section 5) skips any s
 - A subagent's node is created under its parent agent's node. If the parent is unknown, it is created under the task and a `note` records the missing parent.
 
 ### Paseo plugin
+
+**Model tracking (plugin).** Paseo gives plugins no model on the agent: `PluginHookAgent` and `PluginSessionOpenRequest` carry none, and `agent.create.before` carries only the configured `config.model`, before the agent has an id. The resolved model is `runtimeInfo.model` of the agent snapshot (`agents.ref(id).refresh()`), which exists once the session is open. The plugin sets `AWT_MODEL` in the agent env in `agent.create.before` (the configured model) and `agent.open.before` (resolved, else configured, else last seen, else `<provider>:default`). A provider-default agent therefore has `<provider>:default` in its env until a reopen; its plugin writes use the resolved model from the first `agent.turn.after` on, and the ingest holds the truth per message. Every awt call the plugin makes for an agent passes `--model` with the agent's current model, re-read each turn, so a mid-agent switch shows in later plugin writes (the env cannot change without `reload()`, which interrupts a turn). The configured model is paired with the agent at open by provider, cwd and title, since create has no id: two simultaneous creates with the same three can swap hints.
 
 `paseo-plugin/` is a second target in this repository: a trusted local Paseo plugin (`paseo-plugin.json`, `index.server.ts`, `server/`). It keeps no tree of its own: every read and write goes through `awt` as a subprocess (with `--json` for reads), so the CLI and Paseo see the same tree. It does own the glue: key-to-path lookup, the current-task pointer, hashing for unassigned workspaces, parent note/ref repair, and the done-then-paused status rule. Core `awt` stays one stdlib Python file; the plugin is TypeScript.
 
@@ -374,7 +395,7 @@ Hooks:
 | Hook | Action |
 |---|---|
 | `workspace.create.after` | Ensure the project node from `workspace.projectId` (name and root path from `projects.json` when it has the row, else from `projects.list`), the workspace node under it (refs: working directory, project, workspace) and its `main` task. If the project node cannot be made, the workspace goes directly under the root and the hook logs it |
-| `agent.create.before` | Append the static awt block (one paragraph, at most 700 chars; it names `awt find --like` and says to call `awt_resume` again after compaction) to `systemPrompt`, once, and only when `awt` is working (the root node could be ensured). Otherwise the request is unchanged. Nothing else changes |
+| `agent.create.before` | Append the static awt block (about 250 chars, at most 260: the brief is `$AWT_DIR/BRIEF.md` or the `awt_resume` tool, `awt decide` and `awt ask`, "Everything else is recorded for you"; no handoff line, no other verb) to `systemPrompt`, once, and only when `awt` is working (the root node could be ensured). Otherwise the request is unchanged. Nothing else changes |
 | `agent.open.before` | Only for `purpose: interactive`. Ensure the agent's node. Add `AWT_DIR` (the node), `AWT_BY` (the agent id) and, when the daemon has it set, `AWT_RELATED` to `env`, and the `awt_resume` tool. Runs on every open, so resumed agents get the same node |
 | `agent.create.after` | Ensure the node (covers an order where it runs before open). When the parent is known (see above) and the node is not under the parent's, record the parent as above |
 | `agent.turn.before` / `agent.turn.after` | By default the plugin sends no prompt into a conversation; the handoff is asked for by the static prompt block and the `awt_resume` brief. After a completed turn of a non-subagent with an `AWT_DIR` (from `agent.open.before` in this process, or, after a plugin reload, an agent whose `paseo:agent/<id>` node already exists, which is then remembered; an agent with no node is skipped) and no `main` `state` row newer than the turn's start, it records the agent's last assistant message (from the timeline, cut to 240 chars, prefixed `[auto] `) as `state --scope auto`. A scope of its own means it never replaces a handoff the agent wrote, `resume` shows it beside one, and awt's refusal of an unchanged state keeps repeated replies from adding rows; `AWT_AUTO_HANDOFF=0` turns this off. With `AWT_NUDGE=1` the plugin instead sends the follow-up below. Nudge rule: at most one follow-up asking for `awt state` per agent per stretch, where a stretch ends when the agent records a `state` row. After a completed turn of a non-subagent that got an `AWT_DIR` from `agent.open.before` in this process, with no `state` row newer than the turn's start, send the follow-up unless one was sent since the agent last recorded state. Agents without `AWT_DIR` are never nudged |

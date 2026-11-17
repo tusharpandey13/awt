@@ -129,7 +129,7 @@ Names are scenario ids.
 
 Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across nodes, Paseo plugin).
 
-- T-R1a `find --like` ranks a rare shared word above a common one; ties go to the newest row.
+- T-R1a `find --like` ranks a rare shared word above a common one (FTS5 bm25, in memory, no store needed); ties go to the newest row.
 - T-R1b Superseded decisions and `auto` states never match.
 - T-R1c Hits from a sibling workspace carry the right node prefix from an agent node and from a cwd outside the tree.
 - T-R1d `rule` decisions get the x1.5 boost.
@@ -146,8 +146,8 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R2e A corrupt events file in another node does not fail the write.
 - T-R2f A simulated exceeded budget (`AWT_RELATED_MS`): the write stands, the stop line prints.
 - T-R2g The 200-character cut of a `related:` line includes its prefix.
-- T-R3a The task `AGENTS.md` template has the `find --like` line.
-- T-R3b The plugin block is at most 700 characters and names `find --like`.
+- T-R3a `awt help agents` has the `find --like` line; the task `AGENTS.md` template no longer does (it shrank to about 250 chars; `decide` and `ask` print related records anyway).
+- T-R3b The plugin block is at most 260 characters and names `BRIEF.md` and `awt_resume`; `find --like` moved to `help agents`.
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
 
@@ -171,6 +171,45 @@ Fictional `parsekit` transcripts written by hand into a temp `AWT_CLAUDE_PROJECT
 - N15 `src_ref` is the physical line (blank lines counted) while `seq` stays dense. A same-inode in-place rewrite longer than the offset is rescanned (head hash).
 - N16 `CLAUDE_CONFIG_DIR` is the default source and settings dir. Missing parents of the store keep the default mode, the store and its subdirectories are 700, an existing loose store dir is not chmodded. `doctor` reports store size and files; a git-ignored store in a work tree does not warn.
 - N13 `doctor --staged`: clean index ok; a staged secret exits 1 naming file and pattern but not the secret; a type change is scanned and a textconv filter does not hide a secret; the staged blob counts, not the working copy; runs from a hook with no `--dir`; outside a repo exits 1 with a `fix:`.
+
+## Store (`test_store.py`)
+
+Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing reads real data.
+
+- S1 `ingest` builds `store.db` (mode 600) with every table and `schema_meta`; sessions, turns (a `tool_result` record is not a boundary), messages, tool calls (args, result excerpt and sha256, error flag, times) are exactly the fixture's.
+- S2 `canonical.raw` equals each source record; a token-shaped string is not redacted; a 300,000-character message is whole in `messages.text` and `canonical.raw`, while FTS finds its start and not its tail (the cap is only in the index).
+- S3 `fts_text` finds message text and tool-call arguments with the right `kind`.
+- S4 Records, effects (one row per effect folded from its steps), nodes and projects come from the node logs; record ids are unique.
+- S5 A session joins a node only on an exact `cwd`, with `join_confidence = 'cwd'`; otherwise null.
+- S6 Unparsed canonical rows count in `ingest_sources.errors`; no canonical files still builds an empty db.
+- S7 an in-place update equals a rebuild (same rows and search hits; rowids may differ), and `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone. Review fixes (tests/test_p2fix.py): H1 a bare-directory or other-tree ingest keeps the records; H2 a node-log change leaves canonical tables alone and a canonical change re-derives only that file; H3 a SIGKILLed build's temp file is swept and `doctor` warns; M1 a write during a build is not marked fresh; M2 a write runs git once; M3 a re-opened agent gets a brief; M5 contentless FTS and indexes; M6 `find --like` and `decide` work without FTS5; M7 a pre-phase-2 node gets the `.gitignore` line.
+- S8 A garbage `store.db` is replaced by `--rebuild` and by a normal `ingest`; no temp files remain.
+- S9 A normal `ingest` with nothing new leaves `store.db` untouched (mtime); a new node record or new canonical rows update it.
+- S10 `--rebuild` prints a `rebuilt store.db` line and no provider line; with `--hook` it is silent.
+- S11 `find TERM` stays literal and never lists messages; `find --sessions TERM` adds `message:` and `tool_call:` hits; with no usable store it prints the one-line note and keeps the record hits; `--sessions` without a TERM or with `--like` is exit 2.
+- S12 `find --like` output is identical with and without a store.
+- S13 `doctor` is ok with FTS5 and exits 1 with `fail ... FTS5` when `AWT_TEST_NO_FTS5` simulates its absence; `ingest --rebuild` then exits 1 with a `fix:`.
+
+## BRIEF.md and the short prompt (`test_brief.py`; plugin P2, P2b)
+
+| ID | Proves |
+|---|---|
+| B1 | `init` writes `BRIEF.md` equal to `resume` plus the trailing `Generated` line |
+| B2 | Every write verb (`note decide ask state ref status`) regenerates it |
+| B3 | `list`, `find`, `resume` do not touch it (same inode, same text) |
+| B4 | Written by rename: new inode, no temp left in the node or `.awt/` |
+| B5 | Never read back: a forged `BRIEF.md` changes nothing in `resume`; `list` and `list misc` do not show it |
+| B6 | It is not a "file newer than state" |
+| B7 | `BRIEF.md` is in `.gitignore` |
+| B8 | A directory named `BRIEF.md` does not fail the write |
+| B9, B10 | `resume --hook` refreshes it; outside a node it prints and writes nothing |
+| B11 | Agent fixture with no `AGENTS.md`: running the `SessionStart` command from its `settings.json` (as the host would) prints the brief, and `BRIEF.md` matches |
+| B12 | The settings template has `SessionStart` with no `matcher` (runs after compaction) |
+| B13 | The standalone AGENTS block is short, names `BRIEF.md`, `decide`, `ask`, the subagent line, and has no handoff line |
+| B14 to B16 | Tree: every node kind gets a brief at creation; a child write refreshes the parent; a task write refreshes the agents below it |
+| B17 | The tree block names `$AWT_DIR/BRIEF.md` and `$AWT_DIR/out.md` |
+| P2 | The plugin block is at most 260 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `decide`, `ask`; no `state`, no `find --like` |
+| P2b | An agent opened through the plugin has `BRIEF.md` in `AWT_DIR` before any tool call, refreshed by an awt write |
 
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
 
@@ -245,7 +284,7 @@ Snapshots live in `fixtures/paseo-v0/`: `basic.json` (2 projects, 3 workspaces, 
 Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by the installed `@getpaseo/plugin` SDK (so `tsc` catches drift, P11; recordings from a real daemon come with tier 2), and lets it call the real `awt` binary against a temp root. Assertions are on the tree and on what the hooks return.
 
 - P1 `workspace.create.after`: workspace node exists with key and refs (working directory, project, workspace) and a `main` task; the project's display name labels the workspace (P13); replay adds nothing.
-- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 700 chars, naming `find --like`; no brief text enters the prompt.
+- P2 `agent.create.before`: `systemPrompt` grows by the static block only, at most 260 chars, naming `$AWT_DIR/BRIEF.md`; no brief text enters the prompt.
 - P3 `agent.open.before` for a workspace with no task: task `main` is created once, even for several simultaneous agents.
 - PJ1 `workspace.create.after` creates the project node from `workspace.projectId` (key `paseo:project/<id>`, refs to the root path and to its own key) and the workspace under it.
 - PJ2 Two workspaces of one project share one project node, also under concurrent and replayed hooks and after a plugin restart.
