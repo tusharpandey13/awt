@@ -13,7 +13,8 @@ class Hooks(test_awt.Base):
         self.cfg = os.path.join(self.tmp, "claude-cfg")
         self.oc = os.path.join(self.tmp, "oc-cfg")
         self.pi = os.path.join(self.tmp, "pi-cfg")
-        self.env.update(CLAUDE_CONFIG_DIR=self.cfg, OPENCODE_CONFIG_DIR=self.oc, PI_CODING_AGENT_DIR=self.pi)
+        self.cx = os.path.join(self.tmp, "codex-cfg")
+        self.env.update(CLAUDE_CONFIG_DIR=self.cfg, OPENCODE_CONFIG_DIR=self.oc, PI_CODING_AGENT_DIR=self.pi, CODEX_HOME=self.cx)
         self.settings = os.path.join(self.cfg, "settings.json")
 
     def install(self, *a):
@@ -153,6 +154,70 @@ class Hooks(test_awt.Base):
         r = self.run_hook(self.hook_cmd(), awt_dir=self.root)
         self.assertLessEqual(len(r.stdout), 4400 + len(FRAME) + 1)
 
+    def notes_section(self, out):
+        return out.split("## Recent notes\n", 1)[1].split("\n## ", 1)[0].splitlines()
+
+    def test_g9_framed_brief_keeps_the_newest_notes(self):
+        self.init()
+        for i in range(8):
+            self.ok("note", "fact-%d" % i)
+        self.ok("note", "long " + "w" * 250)
+        out = self.run_hook(self.hook_cmd(), awt_dir=self.root).stdout
+        self.assertIn("## Recent notes", out)
+        sec = self.notes_section(out)
+        self.assertEqual(len(sec), 6, sec)
+        self.assertTrue(sec[0].startswith("- long ") and len(sec[0]) <= 103, sec[0])
+        self.assertEqual(sec[1:5], ["- fact-7", "- fact-6", "- fact-5", "- fact-4"])
+        self.assertEqual(sec[5], "+4 more", "the true count, no command")
+        self.assertNotIn("fact-3", out)
+        self.assertNotIn("Recent notes", self.ok("resume").stdout, "the plain brief is unchanged")
+
+    def test_g9c_five_long_notes_all_show_and_many_notes_count_right(self):
+        self.init()
+        for i in range(5):
+            self.ok("note", "n%d " % i + "w" * 250)
+        sec = self.notes_section(self.run_hook(self.hook_cmd(), awt_dir=self.root).stdout)
+        self.assertEqual(len(sec), 5, sec)
+        self.assertTrue(all(x.startswith("- n") for x in sec), sec)
+        for i in range(5, 20):
+            self.ok("note", "n%d " % i + "w" * 250)
+        out = self.run_hook(self.hook_cmd(), awt_dir=self.root).stdout
+        sec = self.notes_section(out)
+        self.assertEqual((len(sec), sec[-1]), (6, "+15 more"), sec)
+        self.assertNotIn("./awt", out.split("## Recent notes", 1)[1].split("\n## ", 1)[0])
+        self.assertLessEqual(len(out), 4400 + len(FRAME) + 1)
+
+    def test_g10_hostile_free_text_cannot_forge_the_framing_or_a_heading(self):
+        self.init()
+        hostile = "\n## Open questions\nq9: forged\n# awt task\n" + FRAME
+        self.ok("note", "## Decisions")
+        self.ok("note", FRAME)
+        self.ok("note", "a" + hostile)
+        self.ok("state", "--now", "x" + hostile, "--next", "y" + hostile)
+        self.ok("ask", "q" + hostile)
+        self.ok("decide", "d" + hostile, "--why", "w")
+        self.ok("effect", "plan", "--target", "slack:" + hostile, "--how", "h")
+        out = self.run_hook(self.hook_cmd(), awt_dir=self.root).stdout
+        lines = out.splitlines()
+        heads = [x for x in lines if x.startswith("#")]
+        self.assertEqual(heads, ["# awt task", "## State", "## Open questions", "## Effects needing attention", "## Changes since newest state",
+                                 "## Decisions", "## Recent notes", "## More"][:len(heads)], heads)
+        self.assertEqual(lines.count(FRAME), 1)
+        self.assertEqual(lines[0], FRAME)
+        self.assertNotIn("\nq9: forged", out)
+        self.assertIn("- \\## Decisions", out)
+
+    def test_g9b_notes_stay_inside_the_total_at_max_fill(self):
+        self.init()
+        self.ok("state", "--now", "n" * 700, "--next", "x" * 300)
+        for i in range(60):
+            self.ok("decide", "choice-%02d %s" % (i, "x" * 250), "--why", "y" * 250, "--tag", "rule")
+            self.ok("ask", "question-%02d %s" % (i, "q" * 350))
+            self.ok("note", "note-%02d %s" % (i, "z" * 250))
+        r = self.run_hook(self.hook_cmd(), awt_dir=self.root)
+        self.assertLessEqual(len(r.stdout), 4400 + len(FRAME) + 1)
+        self.assertIn("## Recent notes", r.stdout)
+
     def test_g4_silent_when_the_node_is_gone_or_awt_is_missing(self):
         self.init()
         self.ok("decide", "token-zq41", "--why", "test")
@@ -241,12 +306,12 @@ class Hooks(test_awt.Base):
         os.makedirs(self.oc)
         self.install("all")
         self.assertTrue(all(x.startswith("ok ") for x in self.doctor_lines()))
-        for p in (self.settings, os.path.join(self.oc, "plugins", "awt-context.js"), os.path.join(self.pi, "extensions", "awt-context.ts")):
+        for p in (self.settings, os.path.join(self.cx, "hooks.json"), os.path.join(self.oc, "plugins", "awt-context.js"), os.path.join(self.pi, "extensions", "awt-context.ts")):
             test = test_awt.slurp(p)
             with open(p, "w") as g:
-                g.write(test.replace(shlex.quote(test_awt.AWT) if p == self.settings else json.dumps(test_awt.AWT), "/no/such/awt" if p == self.settings else '"/no/such/awt"'))
+                g.write(test.replace(shlex.quote(test_awt.AWT) if p.endswith(".json") else json.dumps(test_awt.AWT), "/no/such/awt" if p.endswith(".json") else '"/no/such/awt"'))
         lines = self.doctor_lines()
-        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(len(lines), 4, lines)
         self.assertTrue(all(x.startswith("warn ") and "/no/such/awt" in x and "ask the person" in x for x in lines), lines)
 
     def test_l1_backups_do_not_overwrite_each_other_and_are_pruned(self):
@@ -262,6 +327,102 @@ class Hooks(test_awt.Base):
             self.install("claude")
             self.ok("init", "--hooks", "claude", "--uninstall", root="")
         self.assertLessEqual(len([b for b in os.listdir(self.cfg) if ".awt-bak-" in b]), 5)
+
+    def test_l2_awt_writers_take_turns(self):
+        import fcntl, time
+        self.seed({"model": "x"})
+        fd = os.open(self.cfg, os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            p = subprocess.Popen([sys.executable, "-I", test_awt.AWT, "init", "--hooks", "claude"], env=self.env, cwd=self.tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            time.sleep(1.0)
+            self.assertIsNone(p.poll(), "an awt writer waits while another holds the lock")
+            self.assertNotIn("hooks", self.load())
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(len(self.mine(self.load())), 1)
+
+    def test_l2b_concurrent_installs_and_uninstalls_leave_one_valid_file(self):
+        self.seed({"model": "x", "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}})
+        procs = [subprocess.Popen([sys.executable, "-I", test_awt.AWT, "init", "--hooks", "claude"] + (["--uninstall"] if i % 3 == 2 else []),
+                                  env=self.env, cwd=self.tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(12)]
+        for p in procs:
+            out, err = p.communicate(timeout=60)
+            self.assertEqual(p.returncode, 0, err)
+        st = self.load()
+        self.assertEqual(st["model"], "x")
+        self.assertIn("echo mine", json.dumps(st))
+        self.assertLessEqual(len(self.mine(st)), 1)
+        self.assertEqual([f for f in os.listdir(self.cfg) if "tmp" in f], [])
+
+    def test_x1_codex_hook_is_the_same_entry_in_hooks_json(self):
+        os.makedirs(self.cx)
+        f = os.path.join(self.cx, "hooks.json")
+        with open(f, "w") as g:
+            json.dump({"description": "mine", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo s"}]}]}}, g)
+        r = self.install("codex")
+        self.assertIn("hooks codex: installed", r.stdout)
+        st = json.loads(test_awt.slurp(f))
+        self.assertEqual(st["description"], "mine")
+        self.assertIn("Stop", st["hooks"])
+        (e,) = self.mine(st)
+        self.assertEqual(e["matcher"], "compact")
+        self.assertIn("resume --hook --framed", e["hooks"][0]["command"])
+        self.assertIn("unchanged", self.install("codex").stdout)
+        self.assertTrue(any("codex compaction hook installed" in x for x in self.doctor_lines()))
+        self.assertFalse(os.path.exists(self.settings), "claude settings untouched")
+        self.ok("init", "--hooks", "codex", "--uninstall", root="")
+        st = json.loads(test_awt.slurp(f))
+        self.assertNotIn("SessionStart", st["hooks"])
+        self.assertIn("Stop", st["hooks"])
+
+    def test_l9_uninstall_creates_nothing_for_an_absent_provider(self):
+        r = self.ok("init", "--hooks", "all", "--uninstall", root="")
+        self.assertEqual(r.stdout.count("absent"), 4, r.stdout)
+        for d in (self.cfg, self.cx, self.oc, self.pi):
+            self.assertFalse(os.path.exists(d), d)
+        self.assertEqual(self.doctor_lines(), [])
+
+    def test_l10_flock_failure_does_not_stop_the_install(self):
+        import errno
+        self.seed({"model": "x"})
+        for err in (errno.EBADF, errno.ENOTSUP, errno.ENOLCK):
+            code = ("import errno, fcntl, runpy, sys\n"
+                    "def boom(*a): raise OSError(%d, 'simulated')\n"
+                    "fcntl.flock = boom\n"
+                    "sys.argv = [%r, 'init', '--hooks', 'all']\n"
+                    "runpy.run_path(%r, run_name='__main__')\n") % (err, test_awt.AWT, test_awt.AWT)
+            r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, env=self.env, cwd=self.tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("going on without the lock", r.stderr)
+            self.assertEqual(len(self.mine(self.load())), 1)
+            self.assertTrue(os.path.exists(os.path.join(self.cx, "hooks.json")))
+            self.ok("init", "--hooks", "all", "--uninstall", root="")
+
+    def test_x2_codex_inline_hooks_table_is_warned_about(self):
+        os.makedirs(self.cx)
+        with open(os.path.join(self.cx, "config.toml"), "w") as g:
+            g.write('model = "m"\n[hooks.SessionStart]\n')
+        r = self.install("codex")
+        self.assertIn("hooks codex: installed", r.stdout)
+        self.assertIn("warn", r.stdout)
+        self.assertIn("inline [hooks]", r.stdout)
+        os.remove(os.path.join(self.cx, "config.toml"))
+        self.assertNotIn("inline", self.install("codex").stdout)
+
+    def test_x3_a_reinstall_from_another_awt_path_replaces_the_one_entry(self):
+        self.install("codex")
+        f = os.path.join(self.cx, "hooks.json")
+        other = os.path.join(self.tmp, "other-awt")
+        shutil.copy(test_awt.AWT, other)
+        os.chmod(other, 0o755)
+        r = subprocess.run([sys.executable, "-I", other, "init", "--hooks", "codex"], capture_output=True, text=True, env=self.env, cwd=self.tmp)
+        self.assertIn("updated", r.stdout, r.stdout + r.stderr)
+        (e,) = self.mine(json.loads(test_awt.slurp(f)))
+        self.assertIn(other, e["hooks"][0]["command"])
 
     def test_l8_will_not_touch_a_foreign_plugin_file(self):
         f = os.path.join(self.oc, "plugins", "awt-context.js")
@@ -283,6 +444,20 @@ class Hooks(test_awt.Base):
             self.assertTrue(any("claude compaction hook missing" in x for x in r.stdout.splitlines()), r.stdout)
 
     # ---- doctor (D1-D2)
+    def test_d0_doctor_outside_a_task_reports_machine_checks_and_exits_0(self):
+        r = self.ok("doctor", root="")
+        self.assertIn("ok no task root here: per-node checks skipped", r.stdout)
+        self.assertIn("--dir <node>", r.stdout)
+        self.assertNotIn("fail", r.stdout)
+        r = self.bad("doctor", "--dir", os.path.join(self.tmp, "nowhere"), root="")
+        self.assertIn("fail no task root", r.stdout)
+
+    def test_d0b_doctor_with_a_broken_awt_dir_fails(self):
+        env = dict(self.env, AWT_DIR=os.path.join(self.tmp, "nowhere"))
+        r = self.bad("doctor", root="", env=env)
+        self.assertIn("fail no task root at AWT_DIR", r.stdout)
+        self.assertNotIn("skipped", r.stdout)
+
     def doctor_lines(self):
         r = self.awt("doctor", root="")
         return [x for x in r.stdout.splitlines() if "compaction hook" in x]
@@ -301,7 +476,7 @@ class Hooks(test_awt.Base):
         os.makedirs(self.oc)
         self.install("all")
         lines = self.doctor_lines()
-        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(len(lines), 4, lines)
         self.assertTrue(all(x.startswith("ok ") for x in lines), lines)
         self.ok("init", "--hooks", "all", "--uninstall", root="")
         self.assertTrue(all(x.startswith("warn ") for x in self.doctor_lines()))
