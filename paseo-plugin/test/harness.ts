@@ -71,9 +71,6 @@ export function rig(extraEnv: Record<string, string | undefined> = {}, workspace
   const failRefetch = { n: 0 };
   const sendMode: { mode: "ok" | "fail" | "hang" } = { mode: "ok" };
   const items = new Map<string, unknown[]>();
-  const answered: { id: string; requestId: string; behavior: string }[] = [];
-  const appended: Rig["appended"] = [];
-  const failAppend = { on: false };
   const failRespond = { on: false };
   const runtime = new Map<string, string | null>();
   let stop: { idle: () => Promise<void> } = { idle: async () => {} };
