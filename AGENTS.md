@@ -140,7 +140,7 @@ More: [paseo-plugin/OVERVIEW.md](paseo-plugin/OVERVIEW.md).
 
 ## Silent context after compaction
 
-After a compaction an agent loses the brief. This puts it back without a chat message or an extra turn. On the machine that runs the agents, once per provider (ask the person first: it edits the provider's own config):
+After a compaction an agent loses the brief. This puts it back without a chat message or an extra turn. On the machine that runs the agents, once per provider (the person runs this, not an agent: it edits the provider's own config, so ask first and never run it yourself):
 
 ```sh
 awt init --hooks claude      # merges a SessionStart "compact" hook into ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json (backup kept)

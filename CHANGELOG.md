@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Upgrade
+- The Paseo plugin no longer posts the awt brief after a compaction by default (`AWT_COMPACT_BRIEF`). On an existing install, ask the owner to run `awt init --hooks claude|opencode|pi|all` once per provider on the agent machine; `awt doctor` warns for a detected provider without it (and for a hook that pins an `awt` that is gone). Codex has no hook: set `AWT_COMPACT_BRIEF=1` there.
+
 ### Fixed
 - The Paseo plugin no longer posts the awt brief into the chat after a compaction by default (`AWT_COMPACT_BRIEF` is now opt-in with `1`). The message showed as a user message the owner never sent, and agents read it as an instruction to continue. The static prompt block survives compaction, and `awt_resume` brings the brief back on demand.
 - The `AGENTS.md` block no longer says "Everything else is recorded for you": it is false without the Paseo plugin. It now says what the plugin and the Claude Code hooks record, and asks for a `state` handoff.

@@ -193,10 +193,14 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 | G2 | With `AWT_DIR` it prints the frame line, then exactly `resume`; the frame has no instruction words |
 | G3 | At max fill the output is at most 4,400 plus the frame line |
 | G4 | A missing node or a missing `awt` binary: exit 0, no output, no stderr |
+| G7, G8 | The framed hook leaves `BRIEF.md` unwritten and the record has no next-step hints (no `No handoff yet`, no `effect begin`); the plain brief keeps them |
+| M1, M2, M3 | A symlinked `settings.json` stays a link, its target is written with its mode; a mixed entry keeps the sibling hook and uninstall restores it; the pinned path is the invoked path (not a resolved symlink) and `doctor` warns when it is gone |
+| L1b, L7, L8 | Two runs in one second keep two backups, only 5 are kept; `doctor` survives odd or non-UTF-8 settings; a foreign `awt-context.js` is never overwritten or removed |
 | G5, G6 | `--framed` without `--hook` is exit 2; plain `resume --hook` is unchanged |
 | D1, D2 | `doctor` warns for each detected provider without the hook (none for absent providers, never `fail`), and says `ok` after install |
 | P1, P2 | The opencode plugin exposes only `experimental.session.compacting`, pushes the framed brief (with a decision's text), and pushes nothing without `AWT_DIR` |
 | P3, P4, P5 | The pi extension adds `awt_record` only after `session_compact` (or a resumed branch with a `compaction` entry), keeps the text stable across turns, and does nothing without `AWT_DIR` |
+| Gap | The opencode and pi e2e use a fake model that answers "OK summary", so they prove the record reaches the model, not that it survives in a real summary |
 | L1 (`test_hooks_e2e.py`, `AWT_E2E_LOCAL=1`) | Real opencode 1.19.3 with the plugin installed, a fake OpenAI-compatible model (`tests/fake/openai-compat.mjs`), `POST /session/:id/summarize`: the one request made carries the frame and the decision token; the session's messages hold no awt text and only opencode's own compaction pair |
 | L2 (same) | Real pi 1.5.0 over RPC: after `compact`, the next request's system message carries the frame and the token, one request was made by the compaction itself, and no user message carries the record |
 

@@ -1,5 +1,5 @@
 """Silent context after compaction (SPEC.md, "Context after compaction"; TEST-SPEC.md, "Compaction context")."""
-import json, os, shutil, subprocess, sys, textwrap, unittest
+import json, os, shlex, shutil, subprocess, sys, textwrap, unittest
 
 import test_awt
 
@@ -139,7 +139,7 @@ class Hooks(test_awt.Base):
         self.assertEqual(r.returncode, 0)
         first, rest = r.stdout.split("\n", 1)
         self.assertEqual(first, FRAME)
-        self.assertEqual(rest, self.ok("resume").stdout)
+        self.assertEqual(rest, self.ok("resume").stdout.replace("./awt list | ./awt find <term>\n", ""), "the plain brief minus its command pointers")
         low = r.stdout.lower()
         for bad in ("carry on", "continue", "reply", "please", "you should"):
             self.assertNotIn(bad, low.split("\n", 1)[0], bad)
@@ -154,9 +154,15 @@ class Hooks(test_awt.Base):
         self.assertLessEqual(len(r.stdout), 4400 + len(FRAME) + 1)
 
     def test_g4_silent_when_the_node_is_gone_or_awt_is_missing(self):
-        r = self.run_hook(self.hook_cmd(), awt_dir=os.path.join(self.tmp, "nowhere"))
+        self.init()
+        self.ok("decide", "token-zq41", "--why", "test")
+        cmd = self.hook_cmd()
+        self.assertIn("token-zq41", self.run_hook(cmd, awt_dir=self.root).stdout, "the unreplaced command prints")
+        r = self.run_hook(cmd, awt_dir=os.path.join(self.tmp, "nowhere"))
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
-        r = self.run_hook(self.hook_cmd().replace(test_awt.AWT, "/no/such/awt"), awt_dir=self.root)
+        gone = cmd.replace(shlex.quote(test_awt.AWT), "/no/such/awt")
+        self.assertNotEqual(gone, cmd)
+        r = self.run_hook(gone, awt_dir=self.root)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
 
     def test_g5_framed_needs_hook(self):
@@ -166,6 +172,115 @@ class Hooks(test_awt.Base):
     def test_g6_plain_hook_output_is_unchanged(self):
         self.init()
         self.assertEqual(self.ok("resume", "--hook").stdout, self.ok("resume").stdout)
+
+    def test_g7_framed_leaves_no_brief_file_and_no_imperative_hints(self):
+        self.init()
+        bf = self.p("BRIEF.md")
+        if os.path.exists(bf):
+            os.remove(bf)
+        r = self.run_hook(self.hook_cmd(), awt_dir=self.root)
+        self.assertFalse(os.path.exists(bf), "framed mode must not rebuild BRIEF.md after printing")
+        for hint in ("Before stopping", "No handoff yet", "./awt state", "./awt init"):
+            self.assertNotIn(hint, r.stdout)
+        self.assertIn("No handoff yet", self.ok("resume").stdout, "the plain brief keeps its hint")
+
+    def test_g8_framed_effects_are_facts_not_next_steps(self):
+        self.init()
+        self.write("outbox/n.md")
+        out = self.ok("effect", "plan", "--target", "slack:#eng", "--body", "outbox/n.md", "--how", "post").stdout
+        self.assertIn("effect begin", self.ok("resume").stdout)
+        r = self.run_hook(self.hook_cmd(), awt_dir=self.root)
+        self.assertIn("slack:#eng", r.stdout, out)
+        self.assertNotIn("effect begin", r.stdout)
+        self.assertNotIn("effect mark", r.stdout)
+
+    # ---- install merge edge cases (M1, M2, M3, L1, L2, L8)
+    def test_m1_symlinked_settings_is_followed_and_mode_kept(self):
+        real = os.path.join(self.tmp, "dotfiles", "settings.json")
+        os.makedirs(os.path.dirname(real))
+        os.makedirs(self.cfg)
+        with open(real, "w") as g:
+            json.dump({"model": "x"}, g)
+        os.chmod(real, 0o640)
+        os.symlink(real, self.settings)
+        self.install("claude")
+        self.assertTrue(os.path.islink(self.settings), "the link stays a link")
+        self.assertEqual(os.path.realpath(self.settings), real)
+        st = json.loads(test_awt.slurp(real))
+        self.assertEqual(st["model"], "x")
+        self.assertEqual(len(self.mine(st)), 1)
+        self.assertEqual(os.stat(real).st_mode & 0o777, 0o640)
+        self.ok("init", "--hooks", "claude", "--uninstall", root="")
+        self.assertTrue(os.path.islink(self.settings))
+        self.assertEqual(json.loads(test_awt.slurp(real)), {"model": "x"})
+
+    def test_m2_mixed_entry_keeps_the_sibling_hook(self):
+        mine = {"type": "command", "command": "x # awt:context"}
+        mix = {"matcher": "", "hooks": [{"type": "command", "command": "echo mine"}, mine]}
+        self.seed({"hooks": {"SessionStart": [mix]}})
+        self.install("claude")
+        ss = self.load()["hooks"]["SessionStart"]
+        self.assertIn({"matcher": "", "hooks": [{"type": "command", "command": "echo mine"}]}, ss)
+        self.assertEqual(len(self.mine({"hooks": {"SessionStart": ss}})), 1)
+        self.assertEqual(sum("echo mine" in json.dumps(e) for e in ss), 1)
+        self.assertNotIn('"x # awt:context"', json.dumps(ss))
+        self.assertIn("unchanged", self.install("claude").stdout)
+        self.ok("init", "--hooks", "claude", "--uninstall", root="")
+        self.assertEqual(self.load(), {"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "echo mine"}]}]}})
+
+    def test_m3_pinned_path_is_the_invoked_path_not_a_resolved_symlink(self):
+        link = os.path.join(self.tmp, "bin", "awt")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(test_awt.AWT, link)
+        r = subprocess.run([sys.executable, "-I", link, "init", "--hooks", "claude"], capture_output=True, text=True, env=self.env, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cmd = self.mine(self.load())[0]["hooks"][0]["command"]
+        self.assertIn(shlex.quote(link), cmd)
+
+    def test_m3_doctor_flags_a_pinned_awt_that_is_gone(self):
+        os.makedirs(self.oc)
+        self.install("all")
+        self.assertTrue(all(x.startswith("ok ") for x in self.doctor_lines()))
+        for p in (self.settings, os.path.join(self.oc, "plugins", "awt-context.js"), os.path.join(self.pi, "extensions", "awt-context.ts")):
+            test = test_awt.slurp(p)
+            with open(p, "w") as g:
+                g.write(test.replace(shlex.quote(test_awt.AWT) if p == self.settings else json.dumps(test_awt.AWT), "/no/such/awt" if p == self.settings else '"/no/such/awt"'))
+        lines = self.doctor_lines()
+        self.assertEqual(len(lines), 3, lines)
+        self.assertTrue(all(x.startswith("warn ") and "/no/such/awt" in x and "ask the person" in x for x in lines), lines)
+
+    def test_l1_backups_do_not_overwrite_each_other_and_are_pruned(self):
+        self.seed({"model": "x"})
+        first = test_awt.slurp(self.settings)
+        self.install("claude")
+        self.ok("init", "--hooks", "claude", "--uninstall", root="")
+        baks = sorted(os.listdir(self.cfg))
+        baks = [b for b in baks if ".awt-bak-" in b]
+        self.assertEqual(len(baks), 2, "two runs in the same second keep two backups")
+        self.assertIn(first, [test_awt.slurp(os.path.join(self.cfg, b)) for b in baks])
+        for _ in range(8):
+            self.install("claude")
+            self.ok("init", "--hooks", "claude", "--uninstall", root="")
+        self.assertLessEqual(len([b for b in os.listdir(self.cfg) if ".awt-bak-" in b]), 5)
+
+    def test_l8_will_not_touch_a_foreign_plugin_file(self):
+        f = os.path.join(self.oc, "plugins", "awt-context.js")
+        os.makedirs(os.path.dirname(f))
+        with open(f, "w") as g:
+            g.write("export const Mine = 1\n")
+        for args in (("opencode",), ("opencode", "--uninstall")):
+            r = self.bad("init", "--hooks", *args, root="")
+            self.assertIn("fix:", r.stderr)
+        self.assertEqual(test_awt.slurp(f), "export const Mine = 1\n")
+
+    def test_l7_doctor_survives_odd_settings(self):
+        os.makedirs(self.cfg)
+        for blob in (b"\xff\xfe\x00bad", b'{"hooks": {"SessionStart": 5}}', b'{"hooks": {"SessionStart": [5, null, {"hooks": 3}]}}'):
+            with open(self.settings, "wb") as g:
+                g.write(blob)
+            r = self.awt("doctor", root="")
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertTrue(any("claude compaction hook missing" in x for x in r.stdout.splitlines()), r.stdout)
 
     # ---- doctor (D1-D2)
     def doctor_lines(self):
