@@ -26,12 +26,19 @@ export interface Rig {
   sent: { id: string; text: string }[];
   /** What the fake daemon's timeline returns for an agent: its assistant messages, oldest first. */
   said: Map<string, string[]>;
+  /** A raw timeline page for an agent, returned by `refetch` instead of the `said` messages (for compaction items and the like). */
+  pages: Map<string, unknown>;
   /** Tool-call and other raw items the fake timeline returns after the messages, per agent (what a real turn leaves behind). */
   items: Map<string, unknown[]>;
   answered: { id: string; requestId: string; behavior: string }[];
   /** Plugin timeline rows appended through `agents.ref(id).timeline.append`. Set `failAppend` to make the append throw. */
   appended: { id: string; item: { type: string; id?: string; kind: string; version: number; data: any } }[];
   failAppend: { on: boolean };
+  /** Options of every `timeline.refetch` call. `failRefetch.n` makes that many calls throw. */
+  refetchOpts: Record<string, unknown>[];
+  failRefetch: { n: number };
+  /** What `send` does: succeed, throw, or never return. */
+  sendMode: { mode: "ok" | "fail" | "hang" };
   /** While on, `respondToPermission` throws. */
   failRespond: { on: boolean };
   /** What the fake daemon reports as an agent's resolved model (`runtimeInfo.model`). Absent: the provider default, unknown to Paseo. Set to null: no snapshot. */
@@ -56,10 +63,14 @@ export function rig(extraEnv: Record<string, string | undefined> = {}, workspace
   const logs: string[] = [];
   const sent: { id: string; text: string }[] = [];
   const said = new Map<string, string[]>();
-  const items = new Map<string, unknown[]>();
+  const pages = new Map<string, unknown>();
   const answered: { id: string; requestId: string; behavior: string }[] = [];
   const appended: Rig["appended"] = [];
   const failAppend = { on: false };
+  const refetchOpts: Record<string, unknown>[] = [];
+  const failRefetch = { n: 0 };
+  const sendMode: { mode: "ok" | "fail" | "hang" } = { mode: "ok" };
+  const items = new Map<string, unknown[]>();
   const failRespond = { on: false };
   const runtime = new Map<string, string | null>();
   let stop: { idle: () => Promise<void> } = { idle: async () => {} };
@@ -81,12 +92,12 @@ export function rig(extraEnv: Record<string, string | undefined> = {}, workspace
       },
     },
     projects: { list: async () => ({ requestId: "r1", projects: [project] }) },
-    agents: { ref: (id: string) => ({ runtimeInfo: null as unknown, refresh: async function (this: { runtimeInfo: unknown }) { const m = runtime.get(id); this.runtimeInfo = m ? { provider: "claude", sessionId: null, model: m } : null; return null; }, timeline: { append: async (item: Rig["appended"][number]["item"]) => { if (failAppend.on) throw new Error("append refused"); appended.push({ id, item }); return { ok: true }; }, refetch: async () => ({ entries: [...(said.get(id) ?? []).map((text) => ({ item: { type: "assistant_message", text } })), ...(items.get(id) ?? []).map((item) => ({ item }))] }) }, send: async (text: string) => void sent.push({ id, text }), respondToPermission: async (o: { requestId: string; response: { behavior: string } }) => { if (failRespond.on) throw new Error("respond refused"); answered.push({ id, requestId: o.requestId, behavior: o.response.behavior }); } }) as unknown as ReturnType<PaseoApi["agents"]["ref"]> },
+    agents: { ref: (id: string) => ({ runtimeInfo: null as unknown, refresh: async function (this: { runtimeInfo: unknown }) { const m = runtime.get(id); this.runtimeInfo = m ? { provider: "claude", sessionId: null, model: m } : null; return null; }, timeline: { append: async (item: Rig["appended"][number]["item"]) => { if (failAppend.on) throw new Error("append refused"); appended.push({ id, item }); return { ok: true }; }, refetch: async (o: Record<string, unknown> = {}) => { refetchOpts.push(o); if (failRefetch.n > 0) { failRefetch.n--; throw new Error("timeline unavailable"); } return pages.get(id) ?? ({ entries: [...(said.get(id) ?? []).map((text) => ({ item: { type: "assistant_message", text } })), ...(items.get(id) ?? []).map((item) => ({ item }))] }); } }, send: async (text: string) => { if (sendMode.mode === "hang") return new Promise<void>(() => {}); if (sendMode.mode === "fail") throw new Error("send refused"); sent.push({ id, text }); }, respondToPermission: async (o: { requestId: string; response: { behavior: string } }) => { if (failRespond.on) throw new Error("respond refused"); answered.push({ id, requestId: o.requestId, behavior: o.response.behavior }); } }) as unknown as ReturnType<PaseoApi["agents"]["ref"]> },
   } satisfies Partial<{ [K in keyof PaseoApi]: Partial<PaseoApi[K]> }>;
   const ctx = { paseo, signal: new AbortController().signal };
   const run = (dir: string, args: string[]) => execFileSync(AWT, ["--dir", dir, ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
-    tmp, root, store: join(tmp, "store"), runtime, models: runtime, idle: () => stop.idle(), projectsFile, writeProjects: (rows) => writeFileSync(projectsFile, JSON.stringify(rows)), logs, sent, said, items, answered, appended, failAppend, failRespond, hooks,
+    tmp, root, store: join(tmp, "store"), runtime, models: runtime, idle: () => stop.idle(), projectsFile, writeProjects: (rows) => writeFileSync(projectsFile, JSON.stringify(rows)), logs, sent, said, pages, items, answered, appended, failAppend, failRespond, refetchOpts, failRefetch, sendMode, hooks,
     restart: () => (hooks.clear(), void start()),
     call: async (name, payload) => {
       const h = hooks.get(name);

@@ -8,3 +8,9 @@ export function withBlock(existing: string | undefined): string {
   if (existing?.includes(AWT_BLOCK)) return existing;
   return existing ? `${existing}\n\n${AWT_BLOCK}` : AWT_BLOCK;
 }
+
+/** First line of the message that brings the brief back after a compaction. Tests and the harness look for it. */
+export const COMPACTED_MARK = "[awt] Your context was compacted. Your awt brief again:";
+
+export const afterCompaction = (brief: string): string =>
+  `${COMPACTED_MARK}\n\n${brief.trim()}\n\nCarry on from this brief. If nothing is waiting on you, reply only: ok`;
