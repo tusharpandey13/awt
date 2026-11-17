@@ -267,7 +267,7 @@ If `./relay` exists and the work splits into parts, do not run them all in one s
 USAGE = """awt VERB ...   (global: --dir PATH, --by NAME)
   init [--goal T --done T]    resume [--hook]          list [SECTION] [--all]   find TERM
   init --kind root|project|workspace|task|agent [--name N --key K]   (node tree, see SPEC.md)
-  init --hooks claude|opencode|pi|all [--uninstall]   (person only, ask first: edits the provider's own config; agents never run it)
+  init --hooks claude|codex|opencode|pi|all [--uninstall]   (person only, ask first: edits the provider's own config; agents never run it)
   state --now T --next T      note T                   decide C --why T         ask T
   find --like TEXT [--limit N]   list --since ISO --json [--down]   decide|ask ... [--related N]
   answer ID T                 ref TARGET --title T     capture --from S --title T [FILE]
@@ -1215,11 +1215,15 @@ def init_child(a):
             os.close(lockfd)
 
 
+JSON_HOOKS = ("claude", "codex")  # providers whose hook is an entry merged into a JSON file (same SessionStart shape)
+
+
 def hook_paths():
     """Where each provider's awt context hook lives; the environment variables are the providers' own."""
     home = os.path.expanduser("~")
     oc = os.environ.get("OPENCODE_CONFIG_DIR") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "opencode")
     return dict(claude=os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude"), "settings.json"),
+                codex=os.path.join(os.environ.get("CODEX_HOME") or os.path.join(home, ".codex"), "hooks.json"),
                 opencode=os.path.join(oc, "plugins", "awt-context.js"),
                 pi=os.path.join(os.environ.get("PI_CODING_AGENT_DIR") or os.path.join(home, ".pi", "agent"), "extensions", "awt-context.ts"))
 
@@ -1370,12 +1374,12 @@ def cmd_hooks(a):
     """init --hooks: put the awt record into each provider's context after a compaction, silently. Touches only the provider's own files."""
     if a.kind or a.goal or a.done or a.name or a.key:
         die("--hooks stands alone", "run it without --goal, --done, --kind, --name or --key", 2)
-    want = ["claude", "opencode", "pi"] if a.hooks == "all" else [a.hooks]
+    want = ["claude", "codex", "opencode", "pi"] if a.hooks == "all" else [a.hooks]
     paths = hook_paths()
     me = json.dumps(awt_path())
     for prov in want:
         p = paths[prov]
-        if prov == "claude":
+        if prov in JSON_HOOKS:
             res = merge_claude_settings(p, a.uninstall)
         else:
             res = install_file(p, (OC_PLUGIN if prov == "opencode" else PI_EXT).replace("__AWT_BIN__", me), a.uninstall)
@@ -1388,7 +1392,7 @@ def hook_state(prov):
     try:
         with open(p, encoding="utf-8") as g:
             txt = g.read()
-        if prov == "claude":
+        if prov in JSON_HOOKS:
             hs = [h for e in json.loads(txt)["hooks"]["SessionStart"] if isinstance(e, dict) and e.get("matcher") == "compact"
                   for h in e.get("hooks") or [] if isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))]
             if not hs:
@@ -1408,7 +1412,7 @@ def hook_state(prov):
 def hook_checks(line):
     """doctor: one line per detected provider; warns when the compaction hook is missing or pins an awt that is gone. Reads only; never fails."""
     for prov, p in hook_paths().items():
-        cfg = os.path.dirname(os.path.dirname(p)) if prov != "claude" else os.path.dirname(p)
+        cfg = os.path.dirname(p) if prov in JSON_HOOKS else os.path.dirname(os.path.dirname(p))
         if not os.path.isdir(cfg):
             continue
         st, pin = hook_state(prov)
@@ -4276,7 +4280,7 @@ def build():
         return q
     T, F = {}, dict(action="store_true")
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T),
-                         (("--hooks",), dict(choices=["claude", "opencode", "pi", "all"])), (("--uninstall",), F)])
+                         (("--hooks",), dict(choices=["claude", "codex", "opencode", "pi", "all"])), (("--uninstall",), F)])
     V(sp, "resume", opt=[(("--hook",), F), (("--framed",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
     V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F)])

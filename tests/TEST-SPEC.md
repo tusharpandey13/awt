@@ -199,6 +199,7 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 | G5, G6 | `--framed` without `--hook` is exit 2; plain `resume --hook` is unchanged |
 | L2, L2b | An awt writer waits while the settings directory is locked; 12 concurrent installs and uninstalls leave one valid file, other keys and hooks intact, no temp |
 | G9, G9b | The framed record lists the newest 5 notes (cut to 100 chars, newest first); the plain brief has none; at max fill the total stays 4,400 plus the frame line |
+| X1 | `--hooks codex` merges the same entry into `${CODEX_HOME}/hooks.json`, keeps other keys and events, is idempotent, `doctor` reports it, uninstall removes only ours |
 | D0 | `doctor` outside a task root exits 0 with the skipped-checks line; `--dir` at a non-task exits 1 |
 | D1, D2 | `doctor` warns for each detected provider without the hook (none for absent providers, never `fail`), and says `ok` after install |
 | P1, P2 | The opencode plugin exposes only `experimental.session.compacting`, pushes the framed brief (with a decision's text), and pushes nothing without `AWT_DIR` |

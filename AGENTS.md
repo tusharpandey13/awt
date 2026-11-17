@@ -145,6 +145,7 @@ After a compaction an agent loses the brief. This puts it back without a chat me
 ```sh
 awt init --hooks claude      # merges a SessionStart "compact" hook into ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json (backup kept)
 awt init --hooks opencode    # writes plugins/awt-context.js in ${OPENCODE_CONFIG_DIR:-~/.config/opencode}
+awt init --hooks codex      # merges the same hook into ${CODEX_HOME:-~/.codex}/hooks.json (Codex asks you to trust it once: /hooks)
 awt init --hooks pi          # writes extensions/awt-context.ts in ${PI_CODING_AGENT_DIR:-~/.pi/agent}
 ```
 

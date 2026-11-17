@@ -13,7 +13,8 @@ class Hooks(test_awt.Base):
         self.cfg = os.path.join(self.tmp, "claude-cfg")
         self.oc = os.path.join(self.tmp, "oc-cfg")
         self.pi = os.path.join(self.tmp, "pi-cfg")
-        self.env.update(CLAUDE_CONFIG_DIR=self.cfg, OPENCODE_CONFIG_DIR=self.oc, PI_CODING_AGENT_DIR=self.pi)
+        self.cx = os.path.join(self.tmp, "codex-cfg")
+        self.env.update(CLAUDE_CONFIG_DIR=self.cfg, OPENCODE_CONFIG_DIR=self.oc, PI_CODING_AGENT_DIR=self.pi, CODEX_HOME=self.cx)
         self.settings = os.path.join(self.cfg, "settings.json")
 
     def install(self, *a):
@@ -287,6 +288,57 @@ class Hooks(test_awt.Base):
             self.install("claude")
             self.ok("init", "--hooks", "claude", "--uninstall", root="")
         self.assertLessEqual(len([b for b in os.listdir(self.cfg) if ".awt-bak-" in b]), 5)
+
+    def test_l2_awt_writers_take_turns(self):
+        import fcntl, time
+        self.seed({"model": "x"})
+        fd = os.open(self.cfg, os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            p = subprocess.Popen([sys.executable, "-I", test_awt.AWT, "init", "--hooks", "claude"], env=self.env, cwd=self.tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            time.sleep(1.0)
+            self.assertIsNone(p.poll(), "an awt writer waits while another holds the lock")
+            self.assertNotIn("hooks", self.load())
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(len(self.mine(self.load())), 1)
+
+    def test_l2b_concurrent_installs_and_uninstalls_leave_one_valid_file(self):
+        self.seed({"model": "x", "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}})
+        procs = [subprocess.Popen([sys.executable, "-I", test_awt.AWT, "init", "--hooks", "claude"] + (["--uninstall"] if i % 3 == 2 else []),
+                                  env=self.env, cwd=self.tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(12)]
+        for p in procs:
+            out, err = p.communicate(timeout=60)
+            self.assertEqual(p.returncode, 0, err)
+        st = self.load()
+        self.assertEqual(st["model"], "x")
+        self.assertIn("echo mine", json.dumps(st))
+        self.assertLessEqual(len(self.mine(st)), 1)
+        self.assertEqual([f for f in os.listdir(self.cfg) if "tmp" in f], [])
+
+    def test_x1_codex_hook_is_the_same_entry_in_hooks_json(self):
+        os.makedirs(self.cx)
+        f = os.path.join(self.cx, "hooks.json")
+        with open(f, "w") as g:
+            json.dump({"description": "mine", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo s"}]}]}}, g)
+        r = self.install("codex")
+        self.assertIn("hooks codex: installed", r.stdout)
+        st = json.loads(test_awt.slurp(f))
+        self.assertEqual(st["description"], "mine")
+        self.assertIn("Stop", st["hooks"])
+        (e,) = self.mine(st)
+        self.assertEqual(e["matcher"], "compact")
+        self.assertIn("resume --hook --framed", e["hooks"][0]["command"])
+        self.assertIn("unchanged", self.install("codex").stdout)
+        self.assertTrue(any("codex compaction hook installed" in x for x in self.doctor_lines()))
+        self.assertFalse(os.path.exists(self.settings), "claude settings untouched")
+        self.ok("init", "--hooks", "codex", "--uninstall", root="")
+        st = json.loads(test_awt.slurp(f))
+        self.assertNotIn("SessionStart", st["hooks"])
+        self.assertIn("Stop", st["hooks"])
 
     def test_l8_will_not_touch_a_foreign_plugin_file(self):
         f = os.path.join(self.oc, "plugins", "awt-context.js")
