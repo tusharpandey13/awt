@@ -84,7 +84,7 @@ Classification only labels a call and the ledger rows are the same ones the decl
 - DE10 Detected rows reach `store.db` (`origin`, `rule`, `tool_call_id`) and `resume` lists a `begun` one. `init` writes `PreToolUse`, `PostToolUse` and `PostToolUseFailure` hooks (matcher `Bash|mcp__.*`) next to `SessionStart` and `SessionEnd`.
 - PD1 A shell permission request is recorded in the agent's node; the plugin answers nothing.
 - PD2 The turn scan settles it `sent` (paired by key); the same page again adds nothing.
-- PD3 A request repeating a `sent` effect appends an `awt.resend` row naming the effect; it never allows or denies; the repeat is recorded only if it goes ahead.
+- PD3 A request repeating a `sent` effect appends an `awt-resend` row naming the effect; it never allows or denies; the repeat is recorded only if it goes ahead.
 - PD4 An auto-allowed call with no request is recorded `seen: after`; non-outbound calls are not.
 - PD5 `failed` and `canceled` calls are `unknown`; a non-zero exit is `unknown`; `running` calls wait for a later turn.
 - PD6 MCP calls match by tool name and are keyed on input.

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /** The plugin timeline row that tells the person a tool call repeats a send awt already has as sent or unknown. */
-export const RESEND_KIND = "awt.resend";
+export const RESEND_KIND = "awt-resend";
 export const RESEND_VERSION = 1;
 
 export const resendSchema = z.object({
