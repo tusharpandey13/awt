@@ -41,7 +41,7 @@ test("P2 agent.create.before appends the static block once and touches nothing e
   assert.match(AWT_BLOCK, /awt ask/);
   assert.ok(!/state|find --like|note|resume`/.test(AWT_BLOCK), "decision 15: no handoff line, no other verbs");
   assert.deepEqual({ ...out.config, systemPrompt: undefined }, { ...config, systemPrompt: undefined });
-  assert.deepEqual(out.env, { A: "1" });
+  assert.deepEqual(out.env, { A: "1", AWT_MODEL: "m" }); // the configured model, for the agent's own awt calls
   const again = await r.call("agent.create.before", { request: out });
   assert.equal(again.config.systemPrompt, out.config.systemPrompt);
   assert.ok(!AWT_BLOCK.includes("awt resume`:") && !/# awt task/.test(AWT_BLOCK), "no brief text in the prompt");

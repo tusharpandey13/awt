@@ -12,7 +12,7 @@ PR #11 ranks `find --like` and the `related:` lines of `decide` and `ask` with i
 - `find --like` and the related lines **do not read `store.db`**. They build an in-memory FTS5 index over the records they just walked and rank with `bm25` there. Reasons: they must work with no store and before any ingest; records change on every write, so a store copy would be stale or need a freshness check on the hot path of `decide`; the index is small (at most 2,000 nodes of notes); and the same records give the same order, which the tests rely on. `find --sessions` is the only reader of `store.db`; with no store it prints a note.
 - The interface and output format of PR #11 are unchanged, and its tests (T-R1a to T-R2g, ER1 to ER5) pass unedited.
 - A rule decision keeps its x1.5 factor (applied to the bm25 score) and ties go to the newest row, as before.
-- `store.db` is derived and rebuilt in full (`awt ingest --rebuild`, and by `awt ingest` when its inputs' sizes changed). No incremental update: turn inference and tool-result pairing span rows, one tested code path is worth more than the saved time, and a rebuild reads only local files. The file is byte-identical for identical inputs on one SQLite version.
+- `store.db` is derived. `awt ingest --rebuild` rebuilds it in full (byte-identical for identical inputs on one SQLite version); a normal `awt ingest` updates it in place, per changed canonical file (a session is one file, so turn inference and tool-result pairing never span files) and, when a node log changed, the small node tables. The first version rebuilt on every change; measured on 62 MB of canonical data that cost 2.7 s per `awt note` + ingest, which the incremental path cuts to 0.08 s.
 
 ## What did not go away
 

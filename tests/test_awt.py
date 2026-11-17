@@ -1,4 +1,4 @@
-import ast, datetime, json, os, shutil, socket, subprocess, sys, tempfile, time, unittest
+import ast, datetime, json, os, re, shutil, socket, subprocess, sys, tempfile, time, unittest
 
 AWT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "awt"))
 GITENV = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e.x", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e.x",
@@ -25,6 +25,7 @@ class Base(unittest.TestCase):
         self.env = dict(os.environ, HOME=self.tmp, **GITENV)
         self.env.pop("AWT_DIR", None)
         self.env.pop("AWT_BY", None)
+        self.env["AWT_MODEL"] = "claude-test-1"  # doctor warns on unknown:* models; tests/test_model.py covers the unset case
 
     def awt(self, *args, root=None, **kw):
         cmd = [sys.executable, "-I", AWT] + (["--dir", root or self.root] if root != "" else []) + list(args)
@@ -96,7 +97,7 @@ class TestBasics(Base):
         for dp, dns, fns in os.walk(self.root):
             for n in dns + fns:
                 p = os.path.join(dp, n)
-                out[os.path.relpath(p, self.root)] = slurp(p, "rb") if os.path.isfile(p) else None
+                out[os.path.relpath(p, self.root)] = re.sub(rb"Generated [^;]*;", b"Generated;", slurp(p, "rb")) if os.path.isfile(p) else None  # BRIEF.md carries a clock stamp
         return out
 
     def test_init_preserves_existing(self):

@@ -1,0 +1,7 @@
+{"event":"turn","eid":"turn:agt_oc1:turn-0001","agentId":"agt_oc1","turnId":"turn-0001","provider":"opencode","model":"testprov/oc-test-1","startedAt":"2026-10-23T12:23:19.900Z","endedAt":"2026-10-23T12:23:26.000Z","outcome":"completed"}
+{"event":"turn","eid":"turn:agt_oc1:turn-0002","agentId":"agt_oc1","turnId":"turn-0002","provider":"opencode","model":"testprov/oc-test-2","startedAt":"2026-10-23T12:23:26.900Z","endedAt":"2026-10-23T12:23:30.000Z","outcome":"failed","code":"provider_error"}
+{"event":"permission","eid":"perm:agt_oc1:perm-0001","agentId":"agt_oc1","turnId":"turn-0001","requestId":"perm-0001","provider":"opencode","tool":"bash","target":"pytest -q","ts":"2026-10-23T12:23:24.000Z"}
+{"event":"permission_resolved","eid":"permres:agt_oc1:perm-0001","agentId":"agt_oc1","requestId":"perm-0001","decision":"allow","decidedBy":"person","ts":"2026-10-23T12:23:25.000Z"}
+{"event":"permission","eid":"perm:agt_oc1:perm-0002","agentId":"agt_oc1","turnId":"turn-0002","requestId":"perm-0002","provider":"opencode","tool":"write","target":"docs/index.md","ts":"2026-10-23T12:23:28.000Z"}
+{"event":"turn","eid":"turn:agt_pi1:turn-0001","agentId":"agt_pi1","turnId":"turn-0001","provider":"pi","model":"testprov/pi-test-1","startedAt":"2026-10-23T12:23:19.900Z","endedAt":"2026-10-23T12:23:30.000Z","outcome":"completed"}
+{"event":"turn","eid":"turn:agt_pi1:turn-0002","agentId":"agt_pi1","turnId":"turn-0002","provider":"pi","model":"testprov/pi-test-2","startedAt":"2026-10-23T12:30:59.900Z","endedAt":"2026-10-23T12:31:03.000Z","outcome":"canceled"}

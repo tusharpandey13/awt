@@ -265,7 +265,7 @@ class TestIngest(Ing):
         self.put(self.base_rows())
         self.ok("ingest", "--source", "all", root="")
         self.assertEqual(len(self.rows()), 5)
-        self.bad("ingest", "--source", "pi", root="", code=2)
+        self.bad("ingest", "--source", "bogus", root="", code=2)
 
     def test_hook_is_silent_and_exits_zero(self):
         self.put(self.base_rows())

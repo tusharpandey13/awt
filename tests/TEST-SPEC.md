@@ -17,6 +17,7 @@ Companion to `SPEC.md`. It covers the node tree, the Paseo plugin and `migrate-p
 | `tests/test_tree.py` | Node tree: init, resolution, reads, status, doctor | always |
 | `tests/test_recall.py` | Active recall: `find --like`, related lines on `decide`/`ask`, `list --since`, the template and prompt pointers | always |
 | `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots | always |
+| `tests/test_detect.py` | Detected effects: rules, keys, resend `ask`, declared matching, secrets, silence | always |
 | `tests/test_docs.py` | Existing. Extended: every `awt` command shown in the docs and the tree-form `AGENTS.md` block uses real verbs and flags | always |
 | `tests/chaos.py` | Existing. New attacks in groups `tree`, `migrate`; the plugin attacks (C30-C40) are in `paseo-plugin/test/resilience.test.ts` | `--quick` in CI, full nightly |
 | `paseo-plugin/test/*.test.ts` | Plugin hooks, driven by recorded payloads against real `awt` | always (needs Node) |
@@ -65,6 +66,30 @@ awt never executes commands (SPEC, Effects). Tests run the real verbs and check 
 - E10a Quarantine (`test_second_begun_row_for_the_same_attempt_is_quarantined`, `test_quarantine_counts_for_illegal_transitions`, `test_illegal_rows_are_quarantined`): a second `begun` row, `sent` to `begun` or `unknown`, `dropped` to `begun` or `sent`, `unknown` to `begun` or `dropped`, a row for an unknown id, each counted in `resume` and `doctor`; state is unchanged.
 - E10 Old trees (`TestLegacyEffects`): `claimed` reads `begun`; `unknown` stays; `show` prints `run` as `how`, `legacy class|snapshot|verify:` and `legacy file:` lines for `.awt/runs/<id>.*` and `.awt/blobs/*`; `list effects --json` has `how`; blobs are listed (tree-wide) only for an effect with `snapshot`; a re-plan of an old effect with the same target and body finds it by its legacy key (already sent, nothing written); two `claimed` rows read `begun` with `legacy conflict` in `show` and the brief; a planned `run` effect begins and marks like any other; reads and marks never rewrite earlier bytes of `events.jsonl` and never delete `runs/` or `blobs/`.
 - E11 `init` writes no `ask` rule and no outbox/effect paragraph. `doctor` warns (exit 0) for an old `ask` rule, one line per matching settings line with its number and text, and never edits the file. A fresh `init` has nothing to warn about.
+
+## Detected effects (`test_detect.py`; plugin `detect.test.ts`)
+
+Classification only labels a call and the ledger rows are the same ones the declared path writes (SPEC, Detected effects). Python tests pipe real hook payloads into `awt ingest --event --hook`; plugin tests drive the hooks with typed payloads against the real `awt`.
+
+- DE1 Rules table: every outbound form in SPEC gets its rule (`git push`, `gh pr|issue|release` writes, `gh api` with a method or fields, `curl`/`wget` writes, `ssh`/`scp`/`rsync` to remote hosts, `npm|cargo publish`, `twine upload`, through `cd x &&`, `sudo`, `VAR=1`, `bash -c`, a heredoc line); reads, dry runs, local hosts, `curl -G`, text in `echo`/`grep`/heredoc bodies get none. MCP tools match by name (`paseo`/`awt` servers do not). Garbage input never raises.
+- DE2 The key ignores spacing and a leading `cd`, and does change with cwd, arguments and the content of a named body file.
+- DE3 `PreToolUse` writes `planned` + `begun` (`origin: detected`, `rule`, `tool_call_id`, `seen: before`) with no agent call; `PostToolUse` writes `sent`. Non-outbound calls write nothing.
+- DE4 An exact resend of a `sent` effect makes the hook print `permissionDecision: ask` naming the earlier id, and writes nothing; if the person approves, the `PostToolUse` records it after the fact (`seen: after`) as its own effect. A replayed event writes nothing. `PostToolUseFailure` and an interrupted result give `unknown`, and an `unknown` effect asks too. A duplicate of a merely `begun` effect is only recorded.
+- DE5 A `PostToolUse` with no `PreToolUse` is recorded after the fact. The plugin shape pairs `before` and `after` by key although the ids differ.
+- DE6 A declared effect whose `how` equals the command is not recorded twice, is never moved by detection, and a `sent` one makes a resend ask.
+- DE7 A secret-shaped string in the command is not written to the log (the target says it was withheld) and the resend still matches. Owner lines in `$XDG_CONFIG_HOME/awt/outbound` add rules; a bad line is skipped.
+- DE8 The hook is silent with exit 0 for bad JSON, a wrong shape, no task, a list; `ingest --source claude --hook` still reads no stdin.
+- DE9 awt never runs what it detects (canary `git`, `gh`, `curl`, `npm` on `PATH` never run).
+- DE10 Detected rows reach `store.db` (`origin`, `rule`, `tool_call_id`) and `resume` lists a `begun` one. `init` writes `PreToolUse`, `PostToolUse` and `PostToolUseFailure` hooks (matcher `Bash|mcp__.*`) next to `SessionStart` and `SessionEnd`.
+- PD1 A shell permission request is recorded in the agent's node; the plugin answers nothing.
+- PD2 The turn scan settles it `sent` (paired by key); the same page again adds nothing.
+- PD3 A request repeating a `sent` effect appends an `awt.resend` row naming the effect; it never allows or denies; the repeat is recorded only if it goes ahead.
+- PD4 An auto-allowed call with no request is recorded `seen: after`; non-outbound calls are not.
+- PD5 `failed` and `canceled` calls are `unknown`; a non-zero exit is `unknown`; `running` calls wait for a later turn.
+- PD6 MCP calls match by tool name and are keyed on input.
+- PD7 Left alone without error: an opencode 2.x request (no `input`, no `detail`), an agent with no node, awt missing. The turn scan still sees the call.
+- PD8 Known gap, pinned: a native subagent's calls inside a `sub_agent` item are not seen.
+- PD9 `permissionEvent`, `callEvents` and `resendReason` read only what they understand.
 
 ## Node tree (`test_tree.py`)
 
@@ -182,7 +207,7 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 - S4 Records, effects (one row per effect folded from its steps), nodes and projects come from the node logs; record ids are unique.
 - S5 A session joins a node only on an exact `cwd`, with `join_confidence = 'cwd'`; otherwise null.
 - S6 Unparsed canonical rows count in `ingest_sources.errors`; no canonical files still builds an empty db.
-- S7 `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone; a from-scratch rebuild equals the incrementally built file.
+- S7 an in-place update equals a rebuild (same rows and search hits; rowids may differ), and `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone. Review fixes (tests/test_p2fix.py): H1 a bare-directory or other-tree ingest keeps the records; H2 a node-log change leaves canonical tables alone and a canonical change re-derives only that file; H3 a SIGKILLed build's temp file is swept and `doctor` warns; M1 a write during a build is not marked fresh; M2 a write runs git once; M3 a re-opened agent gets a brief; M5 contentless FTS and indexes; M6 `find --like` and `decide` work without FTS5; M7 a pre-phase-2 node gets the `.gitignore` line.
 - S8 A garbage `store.db` is replaced by `--rebuild` and by a normal `ingest`; no temp files remain.
 - S9 A normal `ingest` with nothing new leaves `store.db` untouched (mtime); a new node record or new canonical rows update it.
 - S10 `--rebuild` prints a `rebuilt store.db` line and no provider line; with `--hook` it is silent.

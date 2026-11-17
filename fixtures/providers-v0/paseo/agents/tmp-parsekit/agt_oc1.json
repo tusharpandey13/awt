@@ -1,0 +1,29 @@
+{
+ "id": "agt_oc1",
+ "provider": "opencode",
+ "cwd": "/work/parsekit",
+ "workspaceId": "ws_parsekit",
+ "createdAt": "2026-10-23T12:23:00.000Z",
+ "config": {
+  "model": "m",
+  "mcpServers": {
+   "paseo": {
+    "type": "http",
+    "url": "http://127.0.0.1:1/mcp",
+    "headers": {
+     "Authorization": "Bearer PLACEHOLDER"
+    }
+   }
+  }
+ },
+ "persistence": {
+  "provider": "opencode",
+  "sessionId": "ses_parsekit000001",
+  "nativeHandle": "ses_parsekit000001",
+  "metadata": {
+   "cwd": "/work/parsekit"
+  }
+ },
+ "title": "parsekit work",
+ "labels": {}
+}

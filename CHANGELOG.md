@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `store.db` is updated in place: only changed canonical files and (when a node log changed) the small node tables are derived again; `--rebuild` stays the full, byte-stable path. One store indexes one tree (`AWT_ROOT`, `--dir`, else the tree recorded at the last ingest), so ingest from a bare directory or another tree no longer empties it. Leftover `store.db.*.tmp` from killed builds are swept under the lock and `doctor` warns about them. FTS5 is contentless (schema 3: `fts_ref` maps rowids to rows) and the join columns are indexed. `find --like` ranks without FTS5 instead of failing. A re-opened agent node gets its `BRIEF.md`, other nodes' briefs skip git, and pre-phase-2 nodes get the `BRIEF.md` `.gitignore` line on their next write.
 - `store.db` (SQLite, stdlib only) at `$AWT_STORE/store.db`: derived tables `projects`, `nodes`, `sessions`, `turns`, `messages`, `tool_calls`, `records`, `effects`, `ingest_sources`, `schema_meta`, `canonical` (the raw JSON) and the FTS5 table `fts_text`, built from the canonical JSONL and the node logs. `awt ingest` rebuilds it when its inputs changed; `awt ingest --rebuild` deletes it and rebuilds it from local files only (byte-identical for identical inputs). `docs/schema.md`, `docs/adr/0004-fts5-over-custom-scoring.md`.
 - `find --sessions TERM`: adds message and tool-call hits from `store.db` ranked by FTS5 bm25; with no store, records only plus a one-line note.
 - `doctor` fails when the Python's sqlite3 has no FTS5.

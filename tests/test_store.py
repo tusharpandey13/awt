@@ -47,6 +47,21 @@ class Store(Ing):
         with open(self.db, "rb") as g:
             return hashlib.sha256(g.read()).hexdigest()
 
+    def logical(self):
+        """Every table's rows in key order (no rowids) plus the FTS hits of a few words, mapped back to their text."""
+        c = sqlite3.connect("file:%s?mode=ro" % self.db, uri=True)
+        try:
+            res = {}
+            for (t,) in c.execute("select name from sqlite_master where type='table' and name not like 'fts_text%' and name not in ('fts_ref', 'build_state') order by name").fetchall():
+                res[t] = sorted(map(repr, c.execute("select * from " + t).fetchall()))
+            for w in ("zephyr", "tokenizer", "lexer", "one", "note"):
+                res["fts:" + w] = sorted(c.execute("select r.kind, coalesce(m.text, t.args, x.fields) from fts_text join fts_ref r on r.id = fts_text.rowid "
+                                                   "left join messages m on r.kind='message' and m.rowid=r.ref left join tool_calls t on r.kind='tool_call' and t.rowid=r.ref "
+                                                   "left join records x on r.kind='record' and x.rowid=r.ref where fts_text match ?", ('"%s"' % w,)).fetchall())
+            return res
+        finally:
+            c.close()
+
     def dump(self):
         c = sqlite3.connect("file:%s?mode=ro" % self.db, uri=True)
         try:
@@ -64,7 +79,7 @@ class TestTables(Store):
                   "schema_meta", "canonical", "fts_text"):
             self.assertIn(t, names)
         meta = dict(self.q("select key, value from schema_meta"))
-        self.assertEqual(meta["schema_version"], "1")
+        self.assertEqual(meta["schema_version"], "5")
         self.assertEqual(meta["semconv_version"], "1.37.0")
 
     def test_sessions_turns_messages_tool_calls(self):
@@ -97,7 +112,7 @@ class TestTables(Store):
     def test_fts_covers_messages_and_tool_args_and_caps_only_the_index(self):
         big = "start " + "x" * 300000 + " tailword"
         self.build(self.rows_() + [rec("assistant", 6, big)])
-        hit = lambda w: self.q("select kind from fts_text where fts_text match ? order by rowid", w)
+        hit = lambda w: self.q("select r.kind from fts_text join fts_ref r on r.id = fts_text.rowid where fts_text match ? order by fts_text.rowid", w)
         self.assertEqual(hit('"zephyr"'), [("message",), ("message",)])
         self.assertEqual(hit('"lexer"'), [("tool_call",)])
         self.assertEqual(hit('"start"'), [("message",)])
@@ -122,7 +137,7 @@ class TestTables(Store):
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0][2:], (".", None, "unassigned", "active"))
         self.assertEqual(self.q("select project_id from projects"), [("unassigned",)])
-        self.assertEqual(self.q("select count(*) from fts_text where kind='record'"), [(len(self.q("select 1 from records")),)])
+        self.assertEqual(self.q("select count(*) from fts_ref where kind='record'"), [(len(self.q("select 1 from records")),)])
 
     def test_session_joins_a_node_only_on_an_exact_cwd(self):
         rows = [dict(r, cwd=self.root) for r in self.rows_()]
@@ -160,10 +175,9 @@ class TestRebuild(Store):
         self.build()
         self.build_more = self.put(self.rows_() + [rec("user", 6, "one more thing")])
         self.ok("ingest", "--source", "claude", root=self.root)
-        inc = self.digest()
-        os.unlink(self.db)
+        inc = self.logical()
         self.ok("ingest", "--rebuild", root=self.root)
-        self.assertEqual(self.digest(), inc)
+        self.assertEqual(self.logical(), inc)  # same rows and the same search hits (rowids may differ)
 
     def test_rebuild_replaces_a_broken_db_and_leaves_no_temp_files(self):
         self.build()

@@ -6,6 +6,10 @@ import type { AwtConfig } from "./config.js";
 const current = new AsyncLocalStorage<AbortSignal>();
 export const withSignal = <T>(signal: AbortSignal, fn: () => Promise<T>): Promise<T> => current.run(signal, fn);
 
+/** The model of the agent a hook is working for. Every awt call made inside `withModel` records it (`--model`). */
+const modelStore = new AsyncLocalStorage<string>();
+export const withModel = <T>(model: string, fn: () => Promise<T>): Promise<T> => modelStore.run(model, fn);
+
 export interface AwtResult {
   code: number;
   stdout: string;
@@ -13,20 +17,21 @@ export interface AwtResult {
 }
 
 /** Runs awt against one node. Never rejects: a missing binary, a timeout or a crash is a nonzero code. */
-export function awt(cfg: AwtConfig, dir: string, args: string[], by = "paseo-plugin"): Promise<AwtResult> {
+export function awt(cfg: AwtConfig, dir: string, args: string[], by = "paseo-plugin", input?: string): Promise<AwtResult> {
   const childEnv: NodeJS.ProcessEnv = { ...cfg.env };
   delete childEnv.AWT_DIR;
   return new Promise((resolve) => {
     try {
-      execFile(
+      const child = execFile(
         cfg.bin,
-        ["--dir", dir, "--by", by, ...args],
+        ["--dir", dir, "--by", by, ...(modelStore.getStore() ? ["--model", modelStore.getStore() as string] : []), ...args],
         { timeout: cfg.timeoutMs, maxBuffer: 16 * 1024 * 1024, env: childEnv, signal: current.getStore() },
         (err, stdout, stderr) => {
           const code = err ? (typeof (err as NodeJS.ErrnoException & { code?: unknown }).code === "number" ? ((err as { code: number }).code) : -1) : 0;
           resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? err?.message ?? "") });
         },
       );
+      if (input !== undefined) child.stdin?.on("error", () => {}).end(input);
     } catch (error) {
       resolve({ code: -1, stdout: "", stderr: String(error) });
     }
