@@ -1,5 +1,7 @@
 # Example session
 
+> Pre-v2 transcript. It shows `effect apply`, `--run`, an `ask` rule and `claimed`, which no longer exist: awt never runs commands now. The v2 path is `effect plan`, `effect begin`, send it yourself, `effect mark ... sent`. See the guide.
+
 This is the output of a real run: real Claude Sonnet sessions and workers, in a small demo repo, sandboxed with no network. Three things differ from everyday use:
 
 - The person's messages were scripted in advance.

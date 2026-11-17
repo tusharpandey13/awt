@@ -29,11 +29,11 @@ One directory per task. It holds context from unconnected informal sources (Slac
 ```
 AGENTS.md              contract (template below); existing file gets the marked block appended
 README.md              only if absent; short human guide (template below)
-.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/blobs/ .awt/runs/
+.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/runs/
 .claude/settings.json  only if absent (template below); if present, print the snippet instead
 context/ docs/ outbox/ misc/ scratch/
 .awt/events.jsonl      the only state
-.awt/claims/ .awt/blobs/ .awt/runs/
+.awt/claims/
 ```
 
 `init` is idempotent, never overwrites or deletes anything, and with `--goal`/`--done` on a later run appends a new `task` row, unless the latest task row already has the same goal and done-means. It does not run `git init`. It creates empty dirs without placeholder files. If `CLAUDE.md` exists in the directory or an ancestor (excluding `~/.claude/`), it prints a warning: Claude Code may then skip `AGENTS.md`; add the line `@AGENTS.md` to that file. It never edits that file.
@@ -95,8 +95,8 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `ref TARGET --title T [--why T] [--kind K] [--no-access]` | Prefer this to copying. Infer `kind` from the target unless given: local directory containing `.git` gives `repo` (store absolute `path` and current `branch`); `slack.com` gives `slack`; `atlassian.net/wiki` or `confluence` gives `confluence`; `atlassian.net/browse`, `jira` host or `[A-Z]+-[0-9]+` alone gives `jira`; `/pull/` or `/merge_requests/` gives `pr`; other URL gives `link`; otherwise `other`. `--no-access` sets `access: none`, meaning the agent cannot read it and must ask a person to paste it. |
 | `capture --from SRC --title T [--ref URL] [FILE]` | Stdin when FILE is absent or `-`. Writes `context/<YYYYMMDD>-<slug>.md` via temp file and `rename`, with a header block of `source`, `title`, `captured`, `ref`. Slug is `[a-z0-9-]` only, max 50, with a numeric suffix on collision. Secret matches in the **body** are replaced with `[REDACTED:<pattern>]` and counted in the output; the capture is not refused. Same body sha as an earlier capture: return that path, exit 0, no new row. Refuse an empty body. |
 | `supersede OLD NEW [--why T]` | Both must be under `docs/` and exist; moves OLD to `docs/_superseded/` with `rename`, with a numeric suffix on collision. Refuse OLD equal to NEW. |
-| `status active\|paused\|done` | `done` is refused while any question is unanswered or any effect is `planned`, `claimed` or `unknown`; the refusal lists them. |
-| `effect plan\|show\|apply\|mark` | Below. |
+| `status active\|paused\|done` | `done` is refused while any question is unanswered or any effect is `planned`, `begun` or `unknown`; the refusal lists them. |
+| `effect plan\|begin\|mark\|show` | Below. |
 | `doctor` | Below. |
 | `save MESSAGE` | Below. |
 
@@ -111,7 +111,7 @@ Sections in this order, each with a budget in one constants table. Total at most
 | 1 | Goal, done-means, status | 600 |
 | 2 | Newest state in full with its age and scope; other scopes one line each | 1,200 |
 | 3 | Open questions | 600 |
-| 4 | Effects needing attention: `planned`, `unknown`, conflicts, with the next command | 500 |
+| 4 | Effects needing attention: `planned`, `begun`, `unknown`, with the next command | 500 |
 | 5 | Changes since the newest state, not counting scope `auto` (the Paseo plugin's stand-in handoff) unless it is the only one: files in the root newer than it (count, up to 8 paths; excluding `.awt/`, `.git/`, `scratch/`), and for each `repo` ref on this host `git log` commit subjects since then plus a dirty count. No state yet: say so. Git failure: one degraded line. | 500 |
 | 6 | Current decisions: tag `rule` first, then newest, each cut to 120 chars | 800 |
 | 7 | One inventory line (counts of refs, no-access refs, context, docs, outbox, misc), quarantine count if nonzero, the pointer `./awt list`, `./awt find <term>` | 200 |
@@ -124,51 +124,51 @@ Listings walk the filesystem, so a file a person drops into `context/`, `docs/`,
 
 ## Effects
 
-A message, comment, doc or edit leaving this machine.
+An effect is a record of one thing leaving your machine (a message, comment, doc or edit), tracked so it is never sent twice or retried blindly.
+
+**awt never executes commands.** It keeps the ledger; the sender (an agent or a person) sends with their own tools, so the host's permission system sees the real command. No code path of an `effect` verb starts a process (no `git` either: the effect verbs only read and append the log and touch `.awt/claims/`). This is the *declared* path: optional, for sends where a blind retry is costly. (Detected effects, where a host hook writes the same rows, are a later phase.)
 
 ```
-planned --apply--> claimed --exit 0 and verify passes--> sent
-   |  \                |
-   |   \               +--non-zero exit, failed verify, timeout, crash--> unknown
-   |    mark sent (manual effects only) --> sent                            |
-   | mark dropped                         mark not-sent: attempt+1, planned-+
-   v                                      mark sent: sent ------------------+
-dropped
+planned --begin--> begun --mark sent--------> sent
+   |  \              |--mark not-sent-------> planned (attempt+1)
+   |   \             +--mark unknown--------> unknown --mark sent|not-sent
+   |    mark sent (a person, straight from planned) --> sent
+   +--mark dropped--> dropped
 ```
 
-`effect plan --target T [--body FILE] [--run CMD] [--class additive|overwrite] [--snapshot CMD] [--verify CMD] [--after ID]... [--again] [--why T]`
+`effect plan --target T [--body FILE] [--how TEXT] [--after ID]... [--again] [--why T]`
 
-- `--target` is free text such as `slack:#eng` or `jira:TKT-1`, cap 200. One of `--body` or `--run` is required. `--body` must be a regular file inside the root; `outbox/` is the convention.
-- No `--run` means **manual**: a person sends it. `apply` refuses and prints the body path and the `mark` command. This is the normal case for Slack when the agent has no access.
-- `--class` defaults to `additive`. `overwrite` without `--snapshot` is refused.
-- `key = sha256(target, run, body sha, class, nonce)`. `nonce` is empty unless `--again` sets a random one.
-- Same key as an existing effect: print its id and state, exit 0, write nothing. If that effect is `dropped`, refuse with fix `--again`.
+- `--target` is free text such as `slack:#eng` or `jira:TKT-1`, cap 200. `--body` is optional; it must be a regular file inside the root, `outbox/` is the convention.
+- `--how` is the intended command as text, cap 400. It is shown to people (`begin`, `show`, `list effects --json` as `how`). It is never run and is not part of the key.
+- `key = sha256(target, body sha, nonce)`. `nonce` is empty unless `--again` sets a random one.
+- Same key as an existing effect: print its id and state, exit 0, write nothing (if it is `sent`, say so and point to `--again` or a narrower `--target`). If that effect is `dropped`, refuse with fix `--again`. An old effect (its row has `class`) was keyed `sha256(target, run, body sha, class or additive, nonce)`; it also matches by that formula, using its own `run` and `class`, so a re-plan across the upgrade finds it.
 - A new plan on a target with an open `unknown` effect is refused unless `--again`.
-- `--after` ids must exist. Output includes the exact next command, quoted with `shlex`.
+- `--after` ids must exist. Output includes the exact next command.
 
-`effect apply ID --target T`
+`effect begin ID`
 
-1. Refuse unless state is `planned`, `--target` equals the effect's target, every `--after` effect is `sent`, and a body file's sha still matches (fix: plan again).
-2. With `--snapshot`: run it, store stdout in `.awt/blobs/<sha256>`. Empty stdout, non-zero exit or a timeout aborts with nothing consumed. `--timeout` below 1 is a usage error (exit 2).
-3. Re-read the log; abort if the effect is no longer `planned` (for example dropped during the snapshot). Create `.awt/claims/<key>.<attempt>` with `O_EXCL`. Losing means someone else is sending: exit 1.
-4. Emit `step: claimed` with `attempt`, `host`, `pid`, `timeout` (the whole time budget in seconds).
-5. Run `sh -c CMD` in the root with `AWT_BODY` (absolute path) and `AWT_TARGET` set, stdout and stderr to `.awt/runs/<id>.<attempt>.log`, timeout `--timeout` seconds (default 300).
-6. Exit 0: run `--verify` if present. Everything passes: emit `step: sent`. Otherwise emit `step: unknown` with the reason and exit 1. Never retry automatically.
+1. Refuse unless the state is `planned`, every `--after` effect is `sent`, and a body file's sha still matches (fix: plan again).
+2. Create `.awt/claims/<key>.<attempt>` with `O_EXCL`. Losing means someone else is sending: exit 1.
+3. Emit `step: begun` and print the body path, `--how` and the `mark` command. Then the caller sends.
 
-`effect mark ID sent|not-sent|dropped [--ref URL] [--why T]`
+`effect mark ID sent [--ref URL] | not-sent --why T | unknown --why T | dropped`
 
-Legal only as drawn. `sent` from `planned` is manual effects only. `not-sent` emits `step: planned` with `attempt+1`. Refuse any mark while the effect is `claimed` and the recorded pid is alive on this host.
+Legal only as drawn: from `planned`: `sent` (a person who sent it without `begin`) and `dropped`; from `begun`: `sent`, `not-sent`, `unknown`; from `unknown`: `sent`, `not-sent`. `not-sent` emits `step: planned` with `attempt+1`. `not-sent` and `unknown` need `--why` (exit 2). `begin`, `mark` and `plan` hold an exclusive lock on the log while they check and write, so concurrent verbs serialise.
 
-`effect show ID` prints every field, state, attempt history, body path and body.
+`effect show ID` prints every field, the state, the attempt history, `how`, the body path and body.
 
-State derivation in `load()`: `claimed` with no outcome reads as `unknown`, unless the pid is alive on this host and the claim is younger than its `timeout` plus a 30 s margin (a reused pid cannot hold an effect forever), when it reads as `claimed`. `planned` with an existing claim file for the current attempt reads as `unknown` (crash between steps 3 and 4). Two `claimed` rows with the same attempt read as `conflict`, shown in the brief until marked. Effect rows other than `planned` for an unknown id are quarantined.
+A `begun` effect with no mark stays `begun`, needs attention in the brief, and blocks `status done`. A reader cannot tell whether a `begun` effect was sent (a legacy dead-pid `claimed` row, or a crash between the claim file and the row, also read `begun`), so the brief and the agent reference say: send only if you ran `begin` yourself in this session, otherwise treat it as unknown and ask a person. No timeout changes it: only the sender knows. A crash after `begin` leaves `begun`, never retried, shown to a person. awt cannot verify a send: the sender records it with `mark sent --ref`.
+
+State derivation in `load()`: `planned` with an existing claim file for the current attempt reads as `begun` (crash between steps 2 and 3). Effect rows other than `planned` for an unknown id, and illegal transitions, are quarantined; so is a second `begun` row for an attempt already `begun`. Two legacy `claimed` rows for one attempt (the old `conflict`: two processes ran it) are not quarantined: the effect reads `begun`, and `show` and the brief say `legacy conflict: may have been sent twice`. Old trees read unchanged: step `claimed` reads as `begun`; a row's `run`, `class`, `snapshot` and `verify` are accepted, and `show` prints `run` as `how` and the others as `legacy NAME: VALUE`, plus `legacy file:` lines for `.awt/runs/<id>.*`, and for `.awt/blobs/*` (marked tree-wide: blobs are named by content hash) only for an effect whose row had `snapshot`. A `planned` row with `run` is an ordinary planned effect. `events.jsonl` is never rewritten; `.awt/runs/` and `.awt/blobs/` are never written by effect verbs and never deleted.
+
+Removed: `effect apply`, and the flags `--run`, `--snapshot`, `--verify`, `--class`, `--timeout`. They are registered as hidden options and refused after parsing (exit 2, `fix:` naming `plan`, `begin` and `mark`), so an option value such as `--why=--timeout` is not mistaken for one. (`.awt/runs/` is still written by `relay` for worker logs.)
 
 ## doctor
 
 Prints one `ok`, `warn` or `fail` line per check, and exits 1 on any `fail`. It tests behaviour rather than inspecting files.
 
 - `fail`: Python below 3.9; no task root; a real `O_APPEND` and `O_EXCL` probe in `.awt/` fails; `AGENTS.md` lacks the awt block; `./awt resume --hook` run as a subprocess prints no brief.
-- `warn`: quarantined rows, with their line numbers; the path contains `iCloud`, `Dropbox`, `OneDrive` or `Google Drive`, or is a network mount; `CLAUDE.md` in the directory or an ancestor; `.claude/settings.json` lacks the awt hook or `ask` rule; `awt` is not executable; a git remote exists (task data would be pushed if committed, so check it is private); open `unknown` or `conflict` effects.
+- `warn`: quarantined rows, with their line numbers; the path contains `iCloud`, `Dropbox`, `OneDrive` or `Google Drive`, or is a network mount; `CLAUDE.md` in the directory or an ancestor; `.claude/settings.json` lacks the awt hook; `.claude/settings.json` still has the obsolete `ask` rule for `effect apply` (one warning per line, naming the line number and text to remove; awt never edits the file); `awt` is not executable; a git remote exists (task data would be pushed if committed, so check it is private); open `begun` or `unknown` effects.
 
 ## save
 
@@ -202,14 +202,6 @@ Everything about this task lives here. Keep records with `./awt`. Never hand-edi
 | A question for a person | `./awt ask "..."`; record the reply with `./awt answer <id> "..."` |
 | Anything else | `misc/`. Throwaway work: `scratch/`. |
 
-**Anything leaving this machine** (message, comment, PR, ticket edit, published doc) goes through the outbox. Never send it directly.
-
-1. Write the draft in `outbox/`.
-2. `./awt effect plan --target "slack:#eng" --body outbox/x.md`. Add `--run '<cmd>'` only if a command can send it.
-3. Stop and show the person. They send it or approve `./awt effect apply`. Then `./awt effect mark <id> sent`.
-
-Effect state `unknown` means it may have been sent. Never resend, use `--again` or mark it. Ask a person.
-
 **Find things:** `./awt list`. `./awt find "term"` for an exact match; `./awt find --like "a sentence"` for related decisions, answers and notes from every workspace in the tree. Check before deciding or asking; `decide` and `ask` also list related records, so read them.
 **Stuck or refused:** read the `fix:` line, then `./awt help agents`.
 **Subagents:** skip resume, write output to `docs/<brief>.out.md`, leave `state` to the orchestrator.
@@ -225,7 +217,6 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
 - `./awt resume`: where things stand
 - `./awt list`, `./awt find <term>`: everything known about this task
 - `context/` inbound material, `docs/` working docs, `outbox/` drafts going out, `misc/` the rest, `scratch/` throwaway
-- `./awt effect mark <id> sent` after you send something from `outbox/`
 ```
 
 ### .claude/settings.json
@@ -236,9 +227,6 @@ Workspace for one piece of agent-operated work, managed by [awt](https://github.
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/awt resume --hook" } ] }
     ]
-  },
-  "permissions": {
-    "ask": [ "Bash(./awt effect apply *)", "Bash(awt effect apply *)" ]
   }
 }
 ```
@@ -298,7 +286,7 @@ Layout by kind:
 | `task` | The `init` layout above, with `AGENTS.md` in tree form, the `.claude/settings.json` hook running `awt resume --hook`, and no `README.md` |
 | `agent` | `.awt/`, `scratch/`, `out.md` created on first write |
 
-`.gitignore` lines for `scratch/` and `.awt/claims|blobs|runs/` are written at every node.
+`.gitignore` lines for `scratch/` and `.awt/claims|runs/` are written at every node.
 
 ### Resolution
 
@@ -332,7 +320,7 @@ Every walk of a node's own files (listing, `find`, resume section 5, `save`) ski
 - `decide` and `ask` related lines: after the id line they print up to N lines `related: ID @NODE ...`, ranked as `find --like` over the choice and why (`decide`) or the question text (`ask`), the new row excluded. N is `--related N`, else `AWT_RELATED`, else 3; range 0 to 20, 0 is off. A bad `--related` is exit 2; a bad `AWT_RELATED` warns on stderr and uses 3; an empty `AWT_RELATED` is the same as unset (3, no warning). The write comes first and is never undone: any error in the lookup is swallowed (exit 0), and the lookup stops after 2 s, counted from before the tree walk and checked between nodes during the walk and the reads (a single huge node file can still overrun it, since one read is not interrupted): the hits found so far print, then `related: (lookup stopped at 2 s; run awt find --like ...)`, all on stdout. Unreadable or corrupt nodes are skipped silently. `AWT_RELATED_MS` overrides the 2,000 ms budget (a test hook); a value that is not a finite number of at least 0 means 2,000.
 - `list --since ISO8601 [--down] --json`: an array of rows of every type at or after the timestamp in the node (and, with `--down`, its descendants), sorted by `ts` ascending, each with `type`, `ts`, `by`, `id`, `scope` (`null` unless a state) and, with `--down`, `node`: the node path relative to the queried node, `null` for the queried node's own rows. The timestamp is ISO 8601 with `Z` (either case) or an offset (`+HH:MM`, `+HHMM`, `-HH:MM`, `-HHMM`); a naive time (no `Z` or offset) or a bare date is exit 2 with a `fix:` line, as is an empty value. Requires `--json` (else exit 2), takes no section; a bad timestamp is exit 2. The Paseo plugin reads turn receipts through it.
 - `ref TARGET`: a target that is a directory containing `.awt/` and no `.git` infers `kind=node` (a node that is its own git repository still infers `repo`; pass `--kind node` to override) and stores the target's `key`, if it has one, and its path relative to the referencing node. Reading resolves by key under the tree root first, then by path, so a keyed target survives any move within the tree and an unkeyed one survives a move that contains both ends. A `paseo:` target infers `kind=paseo`. A node ref that resolves nowhere on this host is shown with `access: none`.
-- `status done`: refused while a descendant `workspace` or `task` is `active`, or any descendant has an unanswered question or an effect in `planned`, `claimed` or `unknown`. The refusal lists each with its path, at most 20 items and then `+N more`. If the walk hits a limit, the refusal says the tree exceeds depth 8 / 2,000 nodes and that the rest cannot be verified. `find --down|--tree` and `doctor` report a hit limit in the same words. A node archived by a harness without being finished is `paused`, not `done`.
+- `status done`: refused while a descendant `workspace` or `task` is `active`, or any descendant has an unanswered question or an effect in `planned`, `begun` or `unknown`. The refusal lists each with its path, at most 20 items and then `+N more`. If the walk hits a limit, the refusal says the tree exceeds depth 8 / 2,000 nodes and that the rest cannot be verified. `find --down|--tree` and `doctor` report a hit limit in the same words. A node archived by a harness without being finished is `paused`, not `done`.
 - Each node's event log is separate, so concurrent agents never contend on a log. `by` still names the writer.
 - `doctor` adds. `fail`: illegal kind nesting; a key used twice in the tree. `warn`: an unreadable reserved directory (the other checks go on); the walk limit; a `node` row that is not first or names a different kind than its reserved directory; a node inside another node but outside a reserved directory; a non-node entry in a reserved directory; leftover `.new-*` directories; a symlinked directory in a reserved directory; an active child under a `done` parent; `awt` not on `PATH` in a tree node.
 
