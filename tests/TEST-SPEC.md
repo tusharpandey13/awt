@@ -198,9 +198,12 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 | L1b, L7, L8 | Two runs in one second keep two backups, only 5 are kept; `doctor` survives odd or non-UTF-8 settings; a foreign `awt-context.js` is never overwritten or removed |
 | G5, G6 | `--framed` without `--hook` is exit 2; plain `resume --hook` is unchanged |
 | L2, L2b | An awt writer waits while the settings directory is locked; 12 concurrent installs and uninstalls leave one valid file, other keys and hooks intact, no temp |
-| G9, G9b | The framed record lists the newest 5 notes (cut to 100 chars, newest first); the plain brief has none; at max fill the total stays 4,400 plus the frame line |
+| G9, G9b, G9c | The framed record lists the newest 5 notes as `- ` items (newest first, cut so all 5 fit) then `+N more` with the true count and no command; 5 long notes all show; the plain brief has none; at max fill the total stays 4,400 plus the frame line |
+| G10 | Hostile notes, state, question, decision and effect text (newlines, `##`, the frame line) yield no forged heading and no second frame line |
+| L9, L10 | `--uninstall` creates no provider directory; a failing `flock` (EBADF, ENOTSUP, ENOLCK) does not stop `init --hooks` (note on stderr) |
+| X2, X3 | An inline `[hooks]` in the Codex `config.toml` gets a `warn` line; a reinstall from another awt path replaces the single entry |
 | X1 | `--hooks codex` merges the same entry into `${CODEX_HOME}/hooks.json`, keeps other keys and events, is idempotent, `doctor` reports it, uninstall removes only ours |
-| D0 | `doctor` outside a task root exits 0 with the skipped-checks line; `--dir` at a non-task exits 1 |
+| D0 | `doctor` outside a task root exits 0 with the skipped-checks line; `--dir` at a non-task exits 1; D0b a missing `AWT_DIR` exits 1 |
 | D1, D2 | `doctor` warns for each detected provider without the hook (none for absent providers, never `fail`), and says `ok` after install |
 | P1, P2 | The opencode plugin exposes only `experimental.session.compacting`, pushes the framed brief (with a decision's text), and pushes nothing without `AWT_DIR` |
 | P3, P4, P5 | The pi extension adds `awt_record` only after `session_compact` (or a resumed branch with a `compaction` entry), keeps the text stable across turns, and does nothing without `AWT_DIR` |

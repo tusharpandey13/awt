@@ -745,15 +745,24 @@ def git(path, *args):
 
 
 # ---------- brief and listing ----------
+def one(s):
+    """Framed record only: free text becomes one line that cannot start a heading, so a note, state, question or file name cannot forge the record's structure."""
+    if not FRAMED:
+        return s
+    s = " ".join(str(s).split())
+    return "\\" + s if s.startswith("#") else s
+
+
 def cut(s, n=None):
     n = n or K["line"]
+    s = one(s)
     return s if len(s) <= n else s[:n - 1] + "~"
 
 
 def fit(head, lines, key, sect, suffix=""):
     """head plus as many lines as fit the budget. The overflow line points at `awt list sect`; a first line that is too long is cut."""
     budget, o, n = (FRAMED_BUDGET if FRAMED and key in FRAMED_BUDGET else BUDGET)[key], [head], len(head) + 1
-    more = lambda k: c("+%d more: ./awt list %s" % (k, sect)) + suffix
+    more = (lambda k: "+%d more" % k) if FRAMED else (lambda k: c("+%d more: ./awt list %s" % (k, sect)) + suffix)
     reserve = len(more(999)) + 1
     for i, ln in enumerate(lines):
         room = budget - n - 1 - (reserve if i < len(lines) - 1 else 0)
@@ -808,7 +817,7 @@ def children_section(kids):
             "out.md %s, %s" % (ago(r["out_ts"]), size(r["out_bytes"])) if r["out_ts"] else "no state yet"
         n = r["open_questions"] + r["attention_effects"]
         rows.append((RANK.get(r["status"], 0), -epoch(r["state_ts"]) if r["state_ts"] else 0, "%s %s [%s]%s %s" % (
-            r["kind"], r["name"], r["status"], " (%d open)" % n if n else "", tail)))
+            r["kind"], one(r["name"]), r["status"], " (%d open)" % n if n else "", tail)))
     rows.sort(key=lambda r: r[:2])
     return fit("## Children", [r[2] for r in rows], "children", "nodes")
 
@@ -876,8 +885,8 @@ def brief(scope=None, git_section=True):
     sts = state_order(D, scope)
     if sts:
         s = sts[0]
-        o.append(fit("## State", ["[%s] %s\nnow: %s\nnext: %s" % (s.get("scope", "main"), ago(s["ts"]), s["now"], s["next"])] +
-                     ["[%s] %s: %s" % (x.get("scope", "main"), ago(x["ts"]), cut(x["now"], 100)) for x in sts[1:]], "state", "state"))
+        o.append(fit("## State", ["[%s] %s\nnow: %s\nnext: %s" % (one(s.get("scope", "main")), ago(s["ts"]), one(s["now"]), one(s["next"]))] +
+                     ["[%s] %s: %s" % (one(x.get("scope", "main")), ago(x["ts"]), cut(x["now"], 100)) for x in sts[1:]], "state", "state"))
     if kids:
         o.append(children_section(kids))
     if D["open_q"]:
@@ -915,13 +924,16 @@ def brief(scope=None, git_section=True):
         o.append(fit("## Decisions", ["%s %s%s" % (d["id"], "[rule] " if "rule" in (d.get("tags") or []) else "", cut(d["choice"], 120)) for d in ds] + inherited,
                      "decisions", "decisions", "; inherited: awt find --up rule" if inherited and not FRAMED else ""))
     if FRAMED and D["notes"]:
-        o.append(fit("## Recent notes", [cut(" ".join(n["text"].split()), NOTE_CUT) for n in D["notes"][-NOTES_SHOWN:][::-1]], "notes", "notes"))
+        # the newest NOTES_SHOWN notes, each cut so that all of them fit; the rest are counted, with no command to run
+        total, k = len(D["notes"]), min(NOTES_SHOWN, len(D["notes"]))
+        w = min(NOTE_CUT, (BUDGET["notes"] - len("## Recent notes") - 1 - (10 if total > k else 0)) // k - 3)
+        o.append(fit("## Recent notes", ["- " + cut(n["text"], w) for n in D["notes"][-k:][::-1]] + (["+%d more" % (total - k)] if total > k else []), "notes", "notes"))
     refs = [ref_view(r) for r in D["refs"].values()]
     inv = "Inventory: %d refs (%d no-access), " % (len(refs), sum(r["access"] == "none" for r in refs)) + ", ".join(
         "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))
     if D["bad"]:
         inv += "; %d quarantined rows" % D["bad"]
-    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c("./awt list | ./awt find <term>")]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % D["unread"]] if D["unread"] else []), "inventory", "state"))
+    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c("./awt list | ./awt find <term>")]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % one(D["unread"])] if D["unread"] else []), "inventory", "state"))
     if not sts and not FRAMED:
         o.append(c('No handoff yet. Before stopping: ./awt state --now "..." --next "..."\n'))
     return "".join(o)
@@ -1270,6 +1282,12 @@ def dir_lock(d):
         return
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as x:  # NFS (EBADF: the lock needs a writable fd), SMB/AFP (ENOTSUP), ENOLCK: go on unlocked; the stat re-check still guards the write
+        print("note: cannot lock %s (%s); going on without the lock" % (d, x.strerror or x), file=sys.stderr)
+        os.close(fd)
+        yield
+        return
+    try:
         yield
     finally:
         os.close(fd)
@@ -1277,6 +1295,8 @@ def dir_lock(d):
 
 def merge_claude_settings(path, uninstall):
     path = os.path.realpath(path)
+    if uninstall and not os.path.isdir(os.path.dirname(path)):
+        return "absent"  # a provider that is not there: create nothing
     with dir_lock(os.path.dirname(path)):
         return merge_claude_settings_locked(path, uninstall)
 
@@ -1288,9 +1308,9 @@ def merge_claude_settings_locked(path, uninstall):
     for attempt in range(3):
         try:
             with open(path, encoding="utf-8") as g:
+                sig = os.fstat(g.fileno())  # taken before the read, so a write inside the read window shows up at the re-check
+                sig = (sig.st_mtime_ns, sig.st_size)
                 raw = g.read()
-            sig = os.stat(path)
-            sig = (sig.st_mtime_ns, sig.st_size)
             st = json.loads(raw) if raw.strip() else {}
         except FileNotFoundError:
             raw, sig, st = None, None, {}
@@ -1381,9 +1401,19 @@ def cmd_hooks(a):
         p = paths[prov]
         if prov in JSON_HOOKS:
             res = merge_claude_settings(p, a.uninstall)
+            if prov == "codex" and not a.uninstall and codex_inline_hooks(p):
+                out("warn %s has an inline [hooks] table; Codex merges it with hooks.json and warns at every start; move those hooks into hooks.json or remove one of the two" % os.path.join(os.path.dirname(p), "config.toml"))
         else:
             res = install_file(p, (OC_PLUGIN if prov == "opencode" else PI_EXT).replace("__AWT_BIN__", me), a.uninstall)
         out("hooks %s: %s %s" % (prov, res, p))
+
+
+def codex_inline_hooks(hooks_json):
+    try:
+        with open(os.path.join(os.path.dirname(hooks_json), "config.toml"), encoding="utf-8", errors="replace") as g:
+            return re.search(r"^\s*\[+\s*hooks\s*[\].]", g.read(), re.M) is not None
+    except OSError:
+        return False
 
 
 def hook_state(prov):
@@ -2843,8 +2873,8 @@ def cmd_doctor(a):
     hook_checks(line)
     ROOT = find_root(a.dir)
     if not ROOT:
-        if a.dir:
-            line("fail", "no task root at --dir %s (./awt init)" % a.dir)
+        if a.dir or os.environ.get("AWT_DIR"):
+            line("fail", "no task root at %s (./awt init)" % (a.dir or "AWT_DIR " + os.environ["AWT_DIR"]))
         else:
             line("ok", "no task root here: per-node checks skipped (run in a task directory, or: awt doctor --dir <node>)")
         sys.exit(1 if "fail" in res else 0)
