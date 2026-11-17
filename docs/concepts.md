@@ -24,7 +24,7 @@ Each node holds a plain file, `BRIEF.md`: the `resume` brief, kept up to date af
 
 ## The store and store.db
 
-The node logs say what happened in the task. The **store** holds what the agent tools saw: full session transcripts, copied by `awt ingest` from Claude Code, pi, opencode and Paseo (and usage totals from ccusage). It lives outside the tree at `${AWT_STORE:-~/.local/share/awt-store}`, because it holds whole conversations. Everything in it is private to you (mode 700/600).
+The node logs say what happened in the task. The **store** holds what the agent tools saw: full session transcripts, copied by `awt ingest` from Claude Code, pi, opencode and Paseo (and usage totals from ccusage). It lives outside the tree at `${AWT_STORE:-${XDG_DATA_HOME:-~/.local/share}/awt-store}`, because it holds whole conversations. Everything in it is private to you (mode 700/600).
 
 `store.db` is a SQLite file built from the store and the node logs. It joins sessions, turns, messages, tool calls and cost to the projects, tasks and agents they belong to. It is derived: delete it, or run `awt ingest --rebuild`, and it comes back. The tables are in [schema.md](schema.md); ready-made queries are in [recipes/](recipes/). `awt ui` opens it read-only in a browser (needs `datasette`).
 
@@ -47,7 +47,7 @@ When a chat is compacted, the task record should reach the agent without a messa
 
 ## Upgrading the store
 
-`store.db` has a schema number (now 7). Install the new `awt` everywhere first (`command -v awt`, and the awt the Paseo plugin runs), update the Paseo plugin, then run `awt ingest --rebuild` once by hand. Until then hooks leave the old file alone, `doctor` warns, and `awt ui` refuses. A copy of `awt` that finds a newer schema than it knows never writes it and says to install the newer one. `awt ui` reads the live `store.db` read-only; restart it after a rebuild. `awt doctor` outside a task root runs the machine-wide checks and exits 0.
+`store.db` has a schema number (now 7). Install the new `awt` everywhere first (`command -v awt`, and the awt the Paseo plugin runs), update the Paseo plugin, then run `awt ingest --rebuild` once by hand. Until then hooks leave the old file alone, `doctor` warns, and `awt ui` refuses. A copy of `awt` that finds a newer schema than it knows never writes it and says to install the newer one. `awt ui` reads the live `store.db` read-only; restart it after a rebuild. `awt doctor` outside a task root runs the machine-wide checks and exits 0 unless one fails.
 
 ## Ingest sources and privacy
 

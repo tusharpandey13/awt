@@ -49,7 +49,7 @@ SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions
 LISTS = SECTIONS + ["nodes", "tree"]
 SKIPTOP = {".awt", ".git", ".claude", "scratch", "awt", "AGENTS.md", "README.md", "CLAUDE.md", ".gitignore", "BRIEF.md",
            "legacy", "context", "docs", "outbox", "misc"}
-IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/", "BRIEF.md"]  # runs/: relay worker logs; BRIEF.md: derived, regenerated
+IGNORE = ["scratch/", ".awt/claims/", ".awt/runs/", "BRIEF.md", ".awt/*.tmp"]  # runs/: relay worker logs; BRIEF.md: derived, regenerated
 SECRETS = [(n, re.compile(p)) for n, p in [
     ("aws-access-key", r"AKIA[0-9A-Z]{16}"), ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
     ("github-pat", r"github_pat_[A-Za-z0-9_]{20,}"), ("slack-token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
@@ -275,7 +275,7 @@ CLI_HELP = {
         "--uninstall": "with --hooks: remove the hook again"}),
     "resume": ("Print the brief: goal, state, open questions and effects, what changed since the last handoff.", {
         "--hook": "print nothing and exit 0 when there is no task or on any error (for a session-start hook)",
-        "--framed": "with --hook: put the one-line reference-only frame above the brief (needs AWT_COMPACT_CONTEXT or a hook from init --hooks)",
+        "--framed": "with --hook: put the one-line reference-only frame above the brief (prints nothing unless --dir or AWT_DIR names a node; the hooks from init --hooks set this up)",
         "--scope": "show the state of this scope only", "--json": "machine-readable output"}),
     "list": ("List what is known about the task, one section or all.", {
         "section": "one section: refs, context, docs, outbox, misc, decisions, questions, effects, notes, state, nodes or tree",
@@ -1106,6 +1106,13 @@ def write_brief(path, git_section=True):
         A = "awt" if (not node_info(path)["legacy"] or parent(path)) else "./awt"
         ensure_gitignore(True)
         text = brief(git_section=git_section) + "Generated %s; ages above are as of then.\n" % now()[:19]
+        for n in os.listdir(os.path.join(path, ".awt")):  # left by a killed run; a live one is younger than a minute
+            f = os.path.join(path, ".awt", n)
+            try:
+                if n.startswith("BRIEF.") and n.endswith(".tmp") and time.time() - os.path.getmtime(f) > 60:
+                    os.unlink(f)
+            except OSError:
+                pass
         with open(tmp, "w", encoding="utf-8") as g:
             g.write(text)
         os.replace(tmp, os.path.join(path, "BRIEF.md"))
@@ -1517,7 +1524,7 @@ def hook_checks(line):
 def cmd_init(a):
     global ROOT
     if a.uninstall and not a.hooks:
-        die("--uninstall needs --hooks", "awt init --hooks claude|opencode|pi|all --uninstall", 2)
+        die("--uninstall needs --hooks", "awt init --hooks claude|codex|opencode|pi|all --uninstall", 2)
     if a.hooks:
         return cmd_hooks(a)
     if a.kind and a.kind != "root":
@@ -4780,9 +4787,9 @@ def build():
         h = CLI_HELP.get(("" if parent is sp else "effect ") + name)  # none for the removed `effect apply`
         q = parent.add_parser(name, help=h[0], description=h[0]) if h else parent.add_parser(name)
         for n, kw in pos:
-            q.add_argument(n, help=h[1][n] if h else argparse.SUPPRESS, **kw)
+            q.add_argument(n, help=h[1].get(n, "") if h else argparse.SUPPRESS, **kw)
         for fl, kw in opt:
-            q.add_argument(*fl, help=h[1][fl[0]] if h else argparse.SUPPRESS, **kw)
+            q.add_argument(*fl, help=h[1].get(fl[0], "") if h else argparse.SUPPRESS, **kw)
         return q
     T, F = {}, dict(action="store_true")
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T),

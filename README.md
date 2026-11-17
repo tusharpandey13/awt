@@ -82,7 +82,7 @@ Every record carries the model that wrote it: pass `--model ID` or set `AWT_MODE
 
 ```sh
 ./awt ingest --source all
-./awt ui                     # read-only browser at http://127.0.0.1:8777; needs: pipx install datasette
+./awt ui                     # read-only browser at http://127.0.0.1:8777; needs: pipx install 'datasette<1'
 ```
 
 ## Big work: the node tree

@@ -513,7 +513,7 @@ def main():
         print("fix: pass an empty directory or an existing root", file=sys.stderr)
         return 1
     os.makedirs(root, exist_ok=True)
-    if not os.path.isdir(os.path.join(root, ".awt")):
+    if LIB["node_info"](root)["kind"] != "root":  # also repairs a root whose first init was killed
         awt(root, "init", "--kind", "root")
     os.makedirs(os.path.join(root, "legacy"), exist_ok=True)
     lock = os.open(os.path.join(root, "legacy", "paseo-migration.md"), os.O_WRONLY | os.O_APPEND | os.O_CREAT)  # the report doubles as the lock; awt takes flock on events.jsonl itself

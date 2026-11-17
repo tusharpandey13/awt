@@ -11,7 +11,7 @@ awt resume [--hook] [--framed] [--scope SCOPE] [--json]
 | Flag | Meaning |
 |---|---|
 | `--hook` | print nothing and exit 0 when there is no task or on any error (for a session-start hook) |
-| `--framed` | with --hook: put the one-line reference-only frame above the brief (needs AWT_COMPACT_CONTEXT or a hook from init --hooks) |
+| `--framed` | with --hook: put the one-line reference-only frame above the brief (prints nothing unless --dir or AWT_DIR names a node; the hooks from init --hooks set this up) |
 | `--scope SCOPE` | show the state of this scope only |
 | `--json` | machine-readable output |
 

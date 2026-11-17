@@ -94,7 +94,7 @@ The full lookup table, every refusal and what to do about it, and the subagent r
 
 - **Model.** Every record names the model that wrote it. Set `AWT_MODEL` in the agent's environment, or pass `--model ID` on any verb; with neither it is `unknown:unset`. A person writing with `--by person` ignores `AWT_MODEL`. The Paseo plugin sets it for you.
 - **Ingest.** `awt ingest --source claude|pi|opencode|paseo|ccusage|all` copies agent transcripts, read-only, into the store (`${AWT_STORE:-${XDG_DATA_HOME:-~/.local/share}/awt-store}`) and updates `store.db`. The default is `claude`; `all` runs every source, and a source that is missing is zero rows, not an error. `init` adds an `awt ingest --source claude --hook` to the `SessionEnd` hook in `.claude/settings.json`. Run `awt ingest --rebuild` to rebuild `store.db` from the stored logs. The store holds whole conversations: keep it out of git and synced folders.
-- **UI.** `awt ui [--port N]` serves `store.db` read-only on `127.0.0.1` (default port 8777). It needs `datasette`: `pipx install datasette` or `uv tool install datasette`. Run `awt ingest` first.
+- **UI.** `awt ui [--port N]` serves `store.db` read-only on `127.0.0.1` (default port 8777). It needs `datasette`: `pipx install 'datasette<1'` or `uv tool install 'datasette<1'`. Run `awt ingest` first.
 - Queries: [docs/recipes/](docs/recipes/), tables: [docs/schema.md](docs/schema.md), words: [docs/concepts.md](docs/concepts.md).
 
 ## Big work: the node tree

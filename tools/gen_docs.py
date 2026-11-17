@@ -53,7 +53,7 @@ def synopsis(key, q):
         s += " " + (tok if req else "[%s]" % tok)
     for tok, name, _, _ in pos:
         s += " " + (name if tok == name else tok)
-    return s.replace("[--hook] [--scope SCOPE]", "[--hook] [--scope SCOPE]")
+    return s
 
 
 def slug(key):
@@ -130,12 +130,13 @@ def main(argv):
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
                 f.write(text)
+    d = os.path.join(REPO, "docs", "reference")
+    stale = ["docs/reference/" + n for n in sorted(os.listdir(d)) if "docs/reference/" + n not in files]
     if "--check" not in argv:  # drop reference pages of verbs that no longer exist
-        d = os.path.join(REPO, "docs", "reference")
-        for n in os.listdir(d):
-            if "docs/reference/" + n not in files:
-                os.remove(os.path.join(d, n))
+        for rel in stale:
+            os.remove(os.path.join(REPO, rel))
         return 0
+    bad += stale
     for rel in bad:
         print("out of date: " + rel, file=sys.stderr)
     return 1 if bad else 0
