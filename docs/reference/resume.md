@@ -3,7 +3,7 @@
 Print the brief: goal, state, open questions and effects, what changed since the last handoff.
 
 ```
-awt resume [--hook] [--scope SCOPE] [--json]
+awt resume [--hook] [--framed] [--scope SCOPE] [--json]
 ```
 
 ## Flags
@@ -11,6 +11,7 @@ awt resume [--hook] [--scope SCOPE] [--json]
 | Flag | Meaning |
 |---|---|
 | `--hook` | print nothing and exit 0 when there is no task or on any error (for a session-start hook) |
+| `--framed` | with --hook: put the one-line reference-only frame above the brief (needs AWT_COMPACT_CONTEXT or a hook from init --hooks) |
 | `--scope SCOPE` | show the state of this scope only |
 | `--json` | machine-readable output |
 

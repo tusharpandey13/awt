@@ -61,7 +61,7 @@ After `init`, the task's own `AGENTS.md` holds the working rules for agents in t
 | The answer to one | `awt answer q-1a2b3c4d "Yes, set by the gateway"` |
 | A link | `awt ref https://example.com/doc --title "Design doc"` (add `--no-access` if you can't open it) |
 | Text that can't be linked | `awt capture --from slack --title "Retry thread" notes.txt` |
-| A doc replaced by a better one | `awt supersede docs/old.md docs/new.md --why "r"` |
+| A doc replaced by a better one | `mkdir -p docs/_superseded && mv -n docs/old.md docs/_superseded/ && test ! -e docs/old.md` (a name already taken there stays put: rename first), then `awt note "docs/new.md replaces docs/old.md: r"` |
 
 Long text goes in a file under `docs/`, with its path in the field.
 
@@ -146,6 +146,19 @@ Settings, read from the daemon's environment:
 To upgrade, install again with the new `--ref`. To remove: `paseo plugin remove awt`; the tree stays on disk.
 
 More: [paseo-plugin/OVERVIEW.md](paseo-plugin/OVERVIEW.md).
+
+## Silent context after compaction
+
+After a compaction an agent loses the brief. This puts it back without a chat message or an extra turn. On the machine that runs the agents, once per provider (the person runs this, not an agent: it edits the provider's own config, so ask first and never run it yourself):
+
+```sh
+awt init --hooks claude      # merges a SessionStart "compact" hook into ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json (backup kept)
+awt init --hooks opencode    # writes plugins/awt-context.js in ${OPENCODE_CONFIG_DIR:-~/.config/opencode}
+awt init --hooks codex      # merges the same hook into ${CODEX_HOME:-~/.codex}/hooks.json (Codex asks you to trust it once: /hooks)
+awt init --hooks pi          # writes extensions/awt-context.ts in ${PI_CODING_AGENT_DIR:-~/.pi/agent}
+```
+
+`--hooks all` does the three; `--uninstall` removes them. Each does nothing unless `AWT_DIR` is set, which the Paseo plugin does for its agents. `awt doctor` warns when a detected provider lacks it. Contract: [SPEC.md](SPEC.md#context-after-compaction).
 
 ## Import Paseo history
 

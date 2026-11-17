@@ -106,7 +106,7 @@ If you use Paseo, the `awt` plugin builds and maintains the tree for you:
 - a workspace node per Paseo workspace, with a `main` task in each;
 - an agent node per agent chat, with subagents nested under their parent agent;
 - `AWT_DIR` in every agent's environment, plus an `awt_resume` tool, and a short prompt block that points agents at `awt find --like` and tells them to call `awt_resume` again after compaction;
-- when an agent ends a turn without a handoff, its last reply is kept as a state in scope `auto` (no message in the chat, no extra model turn). An optional follow-up prompt is available with `AWT_NUDGE=1`, off by default;
+- when an agent ends a turn without a handoff, its last reply is kept as a state in scope `auto` (no message in the chat, no extra model turn). An optional follow-up prompt is available with `AWT_NUDGE=1`, off by default. After a compaction the plugin can send the agent its brief once as a chat message, off by default because the agent reads it as your instruction (`AWT_COMPACT_BRIEF=1` turns it on);
 - after every turn, one muted line in the chat shows what is stored in awt (`awt · 1 decision d-... · handoff`, or `nothing stored this turn`). `AWT_RECEIPT=changes` hides the empty ones, `0` turns it off;
 - archived agents and workspaces marked done, or paused when work is still open.
 

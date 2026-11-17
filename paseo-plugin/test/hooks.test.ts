@@ -3,7 +3,7 @@ import { test, afterEach } from "node:test";
 import { mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentPayload, exists, openReq, rig, type Rig } from "./harness.js";
-import { AWT_BLOCK } from "../server/prompt.js";
+import { AWT_BLOCK, COMPACTED_MARK } from "../server/prompt.js";
 
 const rigs: Rig[] = [];
 const mk = (...a: Parameters<typeof rig>) => {
@@ -509,4 +509,226 @@ test("PJ12 hostile project names never escape the tree or reach disk as secrets"
   for (const n of r.nodes()) for (const f of readdirSync(join(r.root, n.path), { recursive: true, encoding: "utf8" })) {
     if (f.endsWith("events.jsonl")) assert.ok(!readFileSync(join(r.root, n.path, f), "utf8").includes(AKIA), f);
   }
+});
+
+const entry = (seq: number, item: Record<string, unknown>) => ({ provider: "claude", item, seqStart: seq, seqEnd: seq }); // Paseo 0.15.4's entry shape
+const compactedPage = (...tail: Record<string, unknown>[]) => ({
+  entries: [entry(1, { type: "user_message", text: "/compact" }), entry(2, { type: "compaction", status: "loading" }), entry(3, { type: "compaction", status: "completed", trigger: "manual" }), ...tail.map((t, i) => entry(4 + i, t))],
+});
+
+test("R5 a turn that ends with a completed compaction gets the brief sent back, once", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.awt(open.env.AWT_DIR, "note", "before compact");
+  const done = { kind: "completed" };
+  const end = (t: string) => r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: t, outcome: done, timeline: [] });
+  r.pages.set("agt_1", compactedPage());
+  await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t1" });
+  await end("t1");
+  assert.equal(r.sent.length, 1);
+  assert.ok(r.sent[0].text.startsWith(COMPACTED_MARK), r.sent[0].text);
+  assert.ok(r.sent[0].text.includes("# awt task"), r.sent[0].text);
+  // the same page again (our own message not yet in it): no second message
+  await end("t2");
+  assert.equal(r.sent.length, 1);
+  // our message is the last user message now: nothing to do
+  r.pages.set("agt_1", { entries: [...compactedPage().entries, entry(9, { type: "user_message", text: r.sent[0].text }), entry(10, { type: "assistant_message", text: "ok" })] });
+  await end("t3");
+  assert.equal(r.sent.length, 1);
+  assert.deepEqual(r.logs, []);
+});
+
+test("R5 no brief for a loading compaction, a failed turn, a subagent, or an agent with no node", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  await r.call("agent.open.before", openReq("agt_s", { labels: { "paseo.parent-agent-id": "agt_1" } }));
+  const page = compactedPage();
+  r.pages.set("agt_1", { entries: page.entries.slice(0, 2) });
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "a", outcome: { kind: "completed" }, timeline: [] });
+  r.pages.set("agt_1", page);
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "b", outcome: { kind: "failed", error: { message: "x" } }, timeline: [] });
+  r.pages.set("agt_s", page);
+  await r.call("agent.turn.after", { agent: agentPayload("agt_s"), turnId: "c", outcome: { kind: "completed" }, timeline: [] });
+  r.pages.set("agt_x", page);
+  await r.call("agent.turn.after", { agent: agentPayload("agt_x"), turnId: "d", outcome: { kind: "completed" }, timeline: [] });
+  assert.deepEqual(r.sent, []);
+});
+
+test("R5 a compaction outside any turn (pi /compact) gets its brief at the next turn end, once, also after a reload (decided from the timeline)", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: [...compactedPage().entries, entry(9, { type: "user_message", text: "go on" }), entry(10, { type: "assistant_message", text: "done" })] });
+  const end = (t: string) => r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: t, outcome: { kind: "completed" }, timeline: [] });
+  await end("a");
+  assert.equal(r.sent.length, 1);
+  await end("b");
+  assert.equal(r.sent.length, 1);
+  // our message is on the page now; a reload (empty memory) must not send it again
+  r.pages.set("agt_1", { entries: [...compactedPage().entries, entry(9, { type: "user_message", text: "go on" }), entry(10, { type: "assistant_message", text: "done" }), entry(11, { type: "user_message", text: r.sent[0].text }), entry(12, { type: "assistant_message", text: "ok" }), entry(13, { type: "user_message", text: "more" }), entry(14, { type: "assistant_message", text: "done" })] });
+  r.restart();
+  await end("c");
+  assert.equal(r.sent.length, 1);
+  // a later compaction is a new one
+  r.pages.set("agt_1", { entries: [...compactedPage().entries, entry(11, { type: "user_message", text: r.sent[0].text }), entry(12, { type: "user_message", text: "carry on" }), entry(13, { type: "compaction", status: "completed" })] });
+  await end("e");
+  assert.equal(r.sent.length, 2);
+  await end("f");
+  assert.equal(r.sent.length, 2);
+});
+
+test("R5 the compaction brief replaces the nudge for that turn", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1", AWT_NUDGE: "1" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", compactedPage());
+  await r.call("agent.turn.before", { agent: agentPayload("agt_1"), turnId: "t1" });
+  await r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: "t1", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(r.sent.length, 1);
+  assert.ok(r.sent[0].text.startsWith(COMPACTED_MARK));
+});
+
+test("P8 permission: the plugin's own awt_resume tool is allowed under its per-provider name, a look-alike is not", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  await r.call("agent.open.before", openReq("agt_a"));
+  const rows: [string, string, string][] = [["claude", "mcp__paseo__awt_resume", "tool"], ["pi", "awt_resume", "tool"]];
+  for (const [provider, name, kind] of rows) await r.call("agent.permission.before", ask("agt_a", `${provider}:${name}`, { provider, name, kind }));
+  const no: [string, string, string][] = [
+    ["opencode", "awt_resume", "tool"], ["opencode", "awt_resume", "mcp"], ["claude", "awt_resume", "tool"], ["claude", "mcp__paseo__awt_resume", "mcp"],
+    ["pi", "awt_resume", "other"], ["claude", "mcp__other__awt_resume", "tool"], ["pi", "awt_resume2", "tool"], ["claude", "mcp__paseo__create_agent", "tool"], ["claude", "Bash", "tool"],
+  ];
+  for (const [provider, name, kind] of no) await r.call("agent.permission.before", ask("agt_a", `${provider}:${name}:${kind}`, { provider, name, kind }));
+  assert.deepEqual(r.answered.map((x) => x.requestId), ["claude:mcp__paseo__awt_resume", "pi:awt_resume"]);
+});
+
+
+// ---- review findings on the compaction brief (PR #16) ----
+const done = { kind: "completed" };
+const endTurn = async (r: ReturnType<typeof mk>, t: string, id = "agt_1") => {
+  await r.call("agent.turn.before", { agent: agentPayload(id), turnId: t });
+  await new Promise((x) => setTimeout(x, 20)); // a state row written in the same millisecond is not newer than the turn
+  await r.call("agent.turn.after", { agent: agentPayload(id), turnId: t, outcome: done, timeline: [] });
+};
+const work = [entry(1, { type: "user_message", text: "fix tokenizer" }), entry(2, { type: "compaction", status: "completed" }), entry(3, { type: "assistant_message", text: "Fixed the tokenizer bug in parsekit; tests pass." })];
+const briefPage = (r: ReturnType<typeof mk>) => ({ entries: [...work, entry(4, { type: "user_message", text: r.sent[0].text }), entry(5, { type: "assistant_message", text: "ok" })] });
+const states = (r: ReturnType<typeof mk>, dir: string): { scope?: string; now?: string }[] => JSON.parse(r.awt(dir, "list", "state", "--all", "--json"));
+
+test("H1 the compaction turn keeps its stand-in handoff; the brief turn adds neither a handoff nor a nudge", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: work });
+  await endTurn(r, "t1");
+  assert.equal(r.sent.length, 1);
+  assert.ok(r.sent[0].text.startsWith(COMPACTED_MARK));
+  const after1 = states(r, open.env.AWT_DIR);
+  assert.equal(after1.length, 1);
+  assert.match(after1[0].now ?? "", /^\[auto\] Fixed the tokenizer bug/);
+  r.pages.set("agt_1", briefPage(r));
+  await endTurn(r, "t2");
+  assert.equal(r.sent.length, 1);
+  assert.deepEqual(states(r, open.env.AWT_DIR).map((x) => x.now), after1.map((x) => x.now));
+});
+
+test("M2 with AWT_NUDGE=1 neither the compaction turn nor the brief turn sends a nudge", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1", AWT_NUDGE: "1" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: work });
+  await endTurn(r, "t1");
+  r.pages.set("agt_1", briefPage(r));
+  await endTurn(r, "t2");
+  assert.deepEqual(r.sent.map((x) => x.text.slice(0, COMPACTED_MARK.length)), [COMPACTED_MARK]);
+});
+
+test("M4 a failing timeline fetch does not lose the stand-in handoff", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: [entry(1, { type: "user_message", text: "x" }), entry(2, { type: "assistant_message", text: "All done here." })] });
+  r.failRefetch.n = 1;
+  await endTurn(r, "t1");
+  assert.match(states(r, open.env.AWT_DIR)[0]?.now ?? "", /^\[auto\] All done here/);
+});
+
+test("M4 a refused send of the brief does not lose the stand-in handoff or the nudge, and is retried at the next turn", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: work });
+  r.sendMode.mode = "fail";
+  await endTurn(r, "t1");
+  assert.equal(r.sent.length, 0);
+  assert.match(states(r, open.env.AWT_DIR)[0]?.now ?? "", /^\[auto\] Fixed/);
+  r.sendMode.mode = "ok";
+  await endTurn(r, "t2");
+  assert.equal(r.sent.length, 1);
+  const n = mk({ AWT_COMPACT_BRIEF: "1", AWT_NUDGE: "1" }, WS);
+  await n.call("agent.open.before", openReq("agt_1"));
+  n.pages.set("agt_1", { entries: work });
+  await endTurn(n, "t1"); // brief sent, so no nudge
+  assert.equal(n.sent.length, 1);
+});
+
+test("M4 a brief that hangs ends at the deadline and the turn still ends", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1", AWT_TIMEOUT_MS: "6000" }, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: work });
+  r.sendMode.mode = "hang";
+  const t0 = Date.now();
+  await endTurn(r, "t1");
+  assert.ok(Date.now() - t0 < 25000, `took ${Date.now() - t0} ms`);
+  assert.ok(r.logs.some((l) => /exceeded/.test(l)), r.logs.join("\n"));
+  assert.match(states(r, open.env.AWT_DIR)[0]?.now ?? "", /^\[auto\]/);
+});
+
+test("M5 the tail asked for is wide enough for a compaction early in a long turn", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  const long = [entry(1, { type: "user_message", text: "go" }), entry(2, { type: "compaction", status: "completed" }), ...Array.from({ length: 400 }, (_, i) => entry(3 + i, { type: "assistant_message", text: `step ${i}` }))];
+  r.pages.set("agt_1", { entries: long });
+  await endTurn(r, "t1");
+  assert.equal(r.sent.length, 1);
+  // The compaction/stand-in read is wide; the detect scan (phase 3) has its own 200-item tail.
+  assert.ok(r.refetchOpts.every((o) => o.direction === "tail") && r.refetchOpts.some((o) => Number(o.limit) >= 300), JSON.stringify(r.refetchOpts));
+});
+
+test("H2 no brief when an error row follows the compaction (pi: Nothing to compact)", async () => {
+  for (const err of [{ type: "assistant_message", text: "[Error] Nothing to compact (session too small)" }, { type: "error", message: "Nothing to compact" }]) {
+    const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
+    await r.call("agent.open.before", openReq("agt_1"));
+    r.pages.set("agt_1", { entries: [entry(1, { type: "user_message", text: "/compact" }), entry(2, { type: "compaction", status: "loading" }), entry(3, err), entry(4, { type: "compaction", status: "completed" })] });
+    await endTurn(r, "t1");
+    assert.deepEqual(r.sent, []);
+  }
+});
+
+test("the default config never sends a message into a chat: no brief after a compaction, no nudge", async () => {
+  const r = mk({}, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", compactedPage({ type: "assistant_message", text: "done" }));
+  for (const t of ["t1", "t2", "t3"]) await endTurn(r, t);
+  assert.deepEqual(r.sent, []);
+});
+
+test("M3 AWT_COMPACT_BRIEF=0 sends no brief; the stand-in handoff still runs", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "0" }, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: work });
+  await endTurn(r, "t1");
+  assert.deepEqual(r.sent, []);
+  assert.match(states(r, open.env.AWT_DIR)[0]?.now ?? "", /^\[auto\] Fixed/);
+});
+
+test("L1 a compaction with a lower seq than one seen before (timeline reset) still gets its brief", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1", AWT_AUTO_HANDOFF: "0" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: [entry(50, { type: "user_message", text: "a" }), entry(51, { type: "compaction", status: "completed" })] });
+  await endTurn(r, "t1");
+  r.pages.set("agt_1", { entries: [entry(1, { type: "user_message", text: "b" }), entry(2, { type: "compaction", status: "completed" })] });
+  await endTurn(r, "t2");
+  assert.equal(r.sent.length, 2);
+});
+
+test("L2 two turn ends at once send one brief", async () => {
+  const r = mk({ AWT_COMPACT_BRIEF: "1", AWT_AUTO_HANDOFF: "0" }, WS);
+  await r.call("agent.open.before", openReq("agt_1"));
+  r.pages.set("agt_1", { entries: work });
+  const end = (t: string) => r.call("agent.turn.after", { agent: agentPayload("agt_1"), turnId: t, outcome: done, timeline: [] });
+  await Promise.all([end("a"), end("b")]);
+  assert.equal(r.sent.length, 1);
 });

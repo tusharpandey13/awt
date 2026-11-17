@@ -1,6 +1,6 @@
 # store.db schema
 
-`$AWT_STORE/store.db` is SQLite, derived only: `awt ingest --rebuild` deletes it and builds it again from the canonical JSONL under `$AWT_STORE/log/` and the node logs (`.awt/events.jsonl`). Nothing is written to it that cannot be rebuilt. Read it with `sqlite3 -readonly`, DuckDB `ATTACH ... (TYPE sqlite, READ_ONLY)` or any SQLite client. Schema version 6 (`schema_meta.schema_version`); a version change means a rebuild, never a migration.
+`$AWT_STORE/store.db` is SQLite, derived only: `awt ingest --rebuild` deletes it and builds it again from the canonical JSONL under `$AWT_STORE/log/` and the node logs (`.awt/events.jsonl`). Nothing is written to it that cannot be rebuilt. Read it with `sqlite3 -readonly`, DuckDB `ATTACH ... (TYPE sqlite, READ_ONLY)` or any SQLite client. Schema version 7 (`schema_meta.schema_version`); a version change means a rebuild, never a migration.
 
 **Naming.** Where an OpenTelemetry GenAI attribute fits, the column is that attribute without the `gen_ai.` prefix, dots to underscores. **Semconv version pinned: 1.37.0** (`schema_meta.semconv_version`). The GenAI conventions are in development status; a column named for an attribute follows the pinned version, not later renames. Every other column is awt-specific.
 
@@ -61,10 +61,10 @@ Primary key `(agent_id, request_id)`. From the Paseo pipe only. `request_id`, `a
 One row per valid line of every node log. `record_id` (the row's own id, `d-`, `q-`, `n-`, when there is one and it is unused, else `<node_id>#<line index among valid rows>`; effect rows always use the second form), `node_id`, `type`, `ts`, `by`, `fields` (the whole row as JSON, `json_extract` reads any field), `origin` (`person` or `plugin` when `by` says so, else `agent`), `model` (NOT NULL: the row's `model`; `unknown:unset` when written without one, `unknown:legacy` for rows older than model tracking), `session_id` and `turn_id` (set when the row's `session` field (`AWT_SESSION`) or `by` names a session or conversation id, and for the turn also when `ts` lies inside the session's span; else null).
 
 ### effects (any level)
-One row per effect id, folded from its rows: `effect_id`, `node_id`, `target`, `key`, `state` (`planned`, `begun`, `sent`, `unknown`, `dropped`), `attempt`, `origin` (`declared` or `detected`), `rule` (the detection pattern, null for declared), `begun_by`, `begun_at` (from the first `begun` row), `sent_ref` (`ref` of the last `sent` row), `tool_call_id` (of the detected call; null for a declared effect). The effect's rows are in `records` (`type='effect'`, one per step) with their own `model`: a detected row's is the hook payload's model, else the writing process's (`--model`, `AWT_MODEL`, `unknown:unset`). Detected rows arrive through the incremental sync like any node-log row.
+One row per effect id, folded from its rows: `effect_id`, `node_id`, `target`, `key`, `state` (`planned`, `begun`, `sent`, `unknown`, `dropped`), `attempt`, `origin` (`declared` or `detected`), `rule` (the detection pattern, null for declared), `begun_by`, `begun_at` (from the first `begun` row), `sent_ref` (`ref` of the last `sent` row), `tool_call_id` (of the detected call; null for a declared effect), `of_key` (the family key from the row's `of`: the key of the effect this one repeats, so a resend shares it with the first send; null when the effect is its own family), `seen` (`before` or `after`: the hook phase, PreToolUse or PostToolUse, that first recorded a detected effect; null for a declared one). The effect's rows are in `records` (`type='effect'`, one per step) with their own `model`: a detected row's is the hook payload's model, else the writing process's (`--model`, `AWT_MODEL`, `unknown:unset`). Detected rows arrive through the incremental sync like any node-log row.
 
 ### ingest_sources
-A snapshot of every `ingest/<source>.offsets.json` taken at each build: `source` (`claude`, `pi`, `opencode`, `paseo`), `path` (relative to the projects directory; an opencode session id; a Paseo `<dir>/<agent>.json`), `inode`, `offset`, `adapter`, `last_run`, `errors` (canonical rows that were not JSON). It can lag the file until the next rebuild.
+A snapshot of every `ingest/<source>.offsets.json` taken at each build: `source` (`claude`, `pi`, `opencode`, `paseo`, `ccusage`), `path` (relative to the projects directory; an opencode session id; a Paseo `<dir>/<agent>.json`), `inode`, `offset`, `adapter`, `last_run`, `errors` (canonical rows that were not JSON). It can lag the file until the next rebuild.
 
 ### canonical
 `src`, `session`, `seq`, `file` (path under `log/`), `raw` (the provider record as compact JSON, verbatim). Primary key `(src, file, seq)`. Any field the tables lack is `json_extract(raw, '$.path')` away.
@@ -95,12 +95,23 @@ Primary key `usage_id`. Two grains share the table and **overlap, so never add t
 | `usage_input_tokens`, `usage_output_tokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` | provider counts. `usage_input_tokens` excludes cache tokens for Claude (it is the uncached input) |
 | `cache_read_tokens`, `cache_write_tokens` | | cache reads and cache creation |
 | `cost_usd`, `cost_source` | | `ccusage` (priced by ccusage), `computed` (the transcript carried a cost: pi, opencode; there is no price table, so Claude messages have none), or null |
-| `latency_ms` | | Claude: time since the parent record; pi: `durationMs`; opencode: completed minus created. Null on ccusage rows. Not time to first token |
+| `api_id` | | the provider's own message id (Claude `message.id`), used to count a message once when a resumed or forked transcript repeats it; null when the provider has none. Rows with the same (`provider_name`, `api_id`) are one message |
+| `as_of` | | ccusage rows only: ccusage's `lastActivity` for the session, the time its totals were last current. A row older than the newest message of its session is stale and `usage_cc` leaves it out |
+| `latency_ms` | | Claude: from the request (the parent of the message's first record) to the message's last record; pi: `durationMs`; opencode: completed minus created. Null on ccusage rows. Not time to first token |
 
 Messages join as `usage u JOIN messages m ON m.session_id = u.session_id AND m.message_id = u.message_id`, turns as `JOIN turns t ON t.turn_id = u.turn_id`. A Claude API message streamed as several records appears once, keyed by the last record's `uuid`.
 
+### usage_msg (view)
+The `message` rows with each API message counted once: of rows sharing (`provider_name`, `api_id`) the one with the lowest `usage_id` stays; rows without `api_id` stay. Columns as in `usage`.
+
+### usage_cc (view)
+The ccusage rows (`grain = 'session_model'`) that joined to a session here and are not stale: a row is dropped when any message of the same conversation is newer than its `as_of` (plus one second of slack). Columns as in `usage`.
+
+### usage_stale (view)
+The ccusage rows (`grain = 'session_model'`) that joined to a session here and are stale (the complement of `usage_cc`). Columns as in `usage`. `usage_best` keeps their cost as a floor, see below.
+
 ### usage_best (view)
-Per (`session_id`, `provider_name`, `response_model`): the ccusage row when the session has any, else the message rows summed (`cost_usd` summed, `cost_source` `computed` when any message had a cost). Columns as in `usage` without keys. Use it for cost and token totals; ccusage rows with no session here are not in it.
+Per (`session_id`, `provider_name`, `response_model`): the `usage_cc` rows, plus the `usage_msg` rows summed (`cost_usd` summed, `cost_source` `computed` when any message had a cost) for every conversation that has no `usage_cc` row. A conversation shared by several sessions (a subagent file, a resumed transcript) is covered by its ccusage row as a whole, so nothing is counted twice. Columns as in `usage` without keys. A stale ccusage row (`usage_stale`) adds one row with `cost_source = 'ccusage_stale'`, null tokens and the ccusage cost, unless the conversation's messages carry their own cost: the session keeps a cost floor (short by what it spent after the import) instead of dropping out of the totals; run `awt ingest --source ccusage` to refresh it. Use it for cost and token totals; ccusage rows with no session here are not in it.
 
 ## Queries
 
@@ -108,8 +119,7 @@ Per (`session_id`, `provider_name`, `response_model`): the ccusage row when the 
 
 | status | recipes |
 |---|---|
-| stub | `l7-redecisions` (needs the phase 9 similarity data) |
-| partial | `l6-rework` (exact repeats only), `l7-effects-by-rule` (no resend phase stored), `l7-find-use` (no hit-used link), `l8-latency-percentiles` (no time to first token), `rec-records-by-origin` (phase 8 judgments) |
+| partial | `l6-rework` (exact repeats only), `l7-effects-by-rule` (no stored outcome of a PreToolUse ask), `l7-redecisions` (candidate pairs by shared words; a person judges meaning), `l8-failed-turn-cost` (no per-message price for Claude; ccusage cost is pro-rated), `l8-latency-percentiles` (no time to first token), `rec-records-by-origin` (phase 8 judgments) |
 | real | the other 25 |
 
 `awt ui` serves them as canned queries (`docs/adr/0005-datasette-for-ui.md`); `sqlite3 -readonly "$AWT_STORE/store.db" < docs/recipes/NAME.sql` runs one by hand (pass `:now` with `-cmd ".param set :now '2026-11-16T12:00:00Z'"`).

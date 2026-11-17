@@ -7,7 +7,7 @@ import type { PluginHookAgent, PluginHookContext, PluginServerContext } from "@g
 import { awt, parseJson, withModel, withSignal } from "./awt.js";
 import type { AwtConfig } from "./config.js";
 import { readConfig } from "./config.js";
-import { NUDGE, withBlock } from "./prompt.js";
+import { COMPACTED_MARK, NUDGE, afterCompaction, withBlock } from "./prompt.js";
 import { Tree, clean, cut } from "./tree.js";
 import { readProjects } from "./projects.js";
 import { readReceipt } from "./receipt.js";
@@ -34,6 +34,65 @@ export function lastAssistantText(page: unknown): string | null {
   return text.trim() ? text : null;
 }
 
+/** What the plugin reads off a timeline page (a tail of it, in order). */
+export interface TimelineScan {
+  /** The newest completed compaction (highest `seq` when the entries carry one, else the last in page order). */
+  compaction: {
+    /** The entry's `seqEnd` (Paseo 0.15.4) or `seq`; null when the page has none. */
+    seq: number | null;
+    /** No user message comes after it: it happened during, or as, the turn that just ended. */
+    inLastTurn: boolean;
+    /** A user message that starts with COMPACTED_MARK (our own brief) comes after it. */
+    ownBriefAfter: boolean;
+    /** An error row (an `error` item or an `[Error]` message) follows it: the compaction was refused (pi: "Nothing to compact"). */
+    errorAfter: boolean;
+  } | null;
+  /** The last user message on the page is the plugin's own brief: that turn is not the agent's work. */
+  lastUserOwn: boolean;
+}
+
+export function scanTimeline(page: unknown): TimelineScan {
+  const items: { type: string; text: string; status: unknown; seq: number | null }[] = [];
+  const walk = (v: unknown, depth: number, seq: number | null): void => {
+    if (depth > 6 || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) return void v.forEach((x) => walk(x, depth + 1, seq));
+    const o = v as Record<string, unknown>;
+    const here = typeof o.seqEnd === "number" ? o.seqEnd : typeof o.seq === "number" ? o.seq : seq;
+    if (typeof o.type === "string" && ["user_message", "assistant_message", "compaction", "error"].includes(o.type)) items.push({ type: o.type, text: typeof o.text === "string" ? o.text : "", status: o.status, seq: here });
+    else Object.values(o).forEach((x) => walk(x, depth + 1, here));
+  };
+  walk(page, 0, null);
+  const own = (i: { text: string }) => i.text.startsWith(COMPACTED_MARK);
+  let best = -1;
+  items.forEach((i, n) => {
+    if (i.type !== "compaction" || i.status !== "completed") return;
+    if (best < 0 || i.seq === null || items[best].seq === null || i.seq >= (items[best].seq as number)) best = n;
+  });
+  const lastUser = [...items].reverse().find((i) => i.type === "user_message");
+  const lastUserOwn = !!lastUser && own(lastUser);
+  if (best < 0) return { compaction: null, lastUserOwn };
+  // The rows of this compaction start at its `loading` item, when it has one right before it (an error can sit between the two).
+  let start = best;
+  for (let n = best - 1; n >= 0 && items[n].type !== "user_message"; n--) if (items[n].type === "compaction") { if (items[n].status !== "completed") start = n; break; }
+  const after = items.slice(best + 1);
+  const rows = items.slice(start);
+  return {
+    compaction: {
+      seq: items[best].seq,
+      inLastTurn: !after.some((i) => i.type === "user_message"),
+      ownBriefAfter: after.some((i) => i.type === "user_message" && own(i)),
+      errorAfter: rows.some((i) => i.type === "error" || (i.type === "assistant_message" && /^\s*\[Error\]/.test(i.text))),
+    },
+    lastUserOwn,
+  };
+}
+
+/** The newest completed compaction on a page (see TimelineScan). */
+export const lastCompaction = (page: unknown): TimelineScan["compaction"] => scanTimeline(page).compaction;
+
+/** Timeline rows read at the end of a turn. Wide, because Claude Code autocompacts mid-turn and keeps working. */
+const TAIL = 500;
+
 type Log = (message: string) => void;
 
 /** Paseo records a subagent's parent only as this label in 0.15.4; `parentAgentId` is absent there. */
@@ -52,6 +111,11 @@ function realish(p: string): string {
 }
 
 /** The paths a permission request wants, or null when it is not a kind we understand (then it is left alone). */
+/** The plugin's own awt_resume tool, by the exact name its provider gives it. opencode is never offered it, so no opencode request is ours. */
+const OWN_TOOL: Record<string, string> = { claude: "mcp__paseo__awt_resume", pi: "awt_resume" };
+export const isOwnTool = (req: { kind?: string; provider?: string; name: string }): boolean =>
+  req.kind === "tool" && typeof req.provider === "string" && Object.hasOwn(OWN_TOOL, req.provider) && OWN_TOOL[req.provider] === req.name;
+
 export function permissionTargets(req: { name: string; input?: Record<string, unknown>; detail?: { type?: string; filePath?: string } }): string[] | null {
   const detail = req.detail;
   if (detail && (detail.type === "write" || detail.type === "edit" || detail.type === "read") && typeof detail.filePath === "string") return [detail.filePath];
@@ -185,6 +249,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
   const withDir = new Set<string>();
   /** When each agent was last nudged. It is nudged again only after it has recorded state since. */
   const nudgedAt = new Map<string, number>();
+  /** The `seq` of the compaction each agent last got its brief back for (never twice for one). */
+  const compacted = new Map<string, number>();
   /** Parent of each agent seen in open.before, whose request carries labels (the later hooks' agent payload may not). */
   const parents = new Map<string, string>();
   /** After a reload withDir is empty; an agent that already has a node is still tracked. */
@@ -294,6 +360,41 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     return node;
   };
 
+  /** Agents with a brief being sent right now; set before the first await so two turn ends cannot both send. */
+  const briefing = new Set<string>();
+  /**
+   * Paseo gives a plugin no hook at compaction and no way to put text into the next prompt. What it does show is the
+   * `compaction` item, so when a turn ends with a compaction the agent has not had its brief back for, the plugin sends the brief
+   * into the chat. A compaction that came before the turn's own user message (pi's `/compact` runs outside any turn) is caught
+   * here too, one turn late. "Once" is decided from the timeline (our own `COMPACTED_MARK` message after the compaction), so it
+   * holds across a plugin reload and a daemon restart; `compacted` only covers the window before that message shows up.
+   * No brief when an error row follows the compaction (it was refused). True when it sent the brief; never throws.
+   */
+  const briefAfterCompaction = async (id: string, scan: TimelineScan | null, ctx: PluginHookContext): Promise<boolean> => {
+    const c = scan?.compaction;
+    if (!cfg.compactBrief || !c || c.ownBriefAfter || c.errorAfter || briefing.has(id)) return false;
+    const seen = compacted.get(id);
+    // Without a seq (not expected) only a compaction inside this turn counts. The map is advisory: an equal seq only.
+    if (c.seq === null ? !c.inLastTurn : seen === c.seq) return false;
+    briefing.add(id);
+    try {
+      return await within(cfg, ctx.signal, log, "compaction brief", false, async () => {
+        const r = await tree.onNode(`paseo:agent/${id}`, (node) => awt(cfg, node, ["resume"], id));
+        if (!r || r.code !== 0 || !r.stdout.trim()) return false;
+        if (c.seq !== null) compacted.set(id, c.seq);
+        try {
+          await ctx.paseo.agents.ref(id).send(afterCompaction(r.stdout));
+        } catch (error) {
+          if (c.seq !== null && compacted.get(id) === c.seq) seen === undefined ? compacted.delete(id) : compacted.set(id, seen);
+          throw error;
+        }
+        return true;
+      });
+    } finally {
+      briefing.delete(id);
+    }
+  };
+
   const awtResume = defineAgentTool({
     name: "awt_resume",
     title: "awt resume",
@@ -374,32 +475,46 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
         code: outcome.kind === "failed" ? outcome.error.code : undefined };
       pipe.add(ev, true);
     }
+    let lastMain = 0;
     await safe(log, "agent.turn.after", undefined, () => withModel(model, async () => {
-      if (outcome.kind !== "completed" || parentOf(agent) || started === undefined || !(await tracked(agent.id))) return;
-      if (!cfg.nudge && !cfg.autoHandoff) return;
-      const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
-      if (!r) return;
-      const rows = parseJson<{ ts?: string; scope?: string }[]>(r.stdout, []);
-      const newest = (pick: (s: { scope?: string }) => boolean) =>
-        rows.filter(pick).map((s) => Date.parse(s.ts ?? "")).filter(Number.isFinite).sort((x, y) => y - x)[0] ?? 0;
-      const last = newest((s) => s.scope === "main" || s.scope === undefined);
-      if (last >= started) return; // the agent recorded its own handoff this turn
+      if (outcome.kind !== "completed" || parentOf(agent) || !(await tracked(agent.id))) return;
+      const ref = ctx.paseo.agents.ref(agent.id);
+      // One wide tail read serves the compaction rule and the stand-in. A turn can run long after an early autocompaction.
+      const page = await within(cfg, ctx.signal, log, "timeline tail", null as unknown, () => ref.timeline.refetch({ direction: "tail", limit: TAIL }));
+      const scan = page ? scanTimeline(page) : null;
+      if (scan?.lastUserOwn) return; // the plugin's own brief turn: no handoff of "ok", no nudge
 
-      if (cfg.autoHandoff && !cfg.nudge) {
-        // No message is sent into the chat. The agent's last reply stands in for the handoff, in a scope of its own,
-        // so it never replaces a handoff the agent wrote and `resume` shows it next to one.
-        const text = lastAssistantText(await ctx.paseo.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 20 }));
-        if (!text) return;
-        await tree.onNode(`paseo:agent/${agent.id}`, (node) =>
-          awt(cfg, node, ["state", "--scope", "auto", "--now", "[auto] " + cut(clean(text), 240), "--next", "not recorded: the agent ended its turn without a handoff"], "paseo-plugin"));
-        return;
+      let unrecorded = false;
+      if (started !== undefined && (cfg.nudge || cfg.autoHandoff)) {
+        const r = await tree.onNode(`paseo:agent/${agent.id}`, (node) => awt(cfg, node, ["list", "state", "--all", "--json"], agent.id));
+        if (r) {
+          const rows = parseJson<{ ts?: string; scope?: string }[]>(r.stdout, []);
+          const newest = (pick: (s: { scope?: string }) => boolean) =>
+            rows.filter(pick).map((s) => Date.parse(s.ts ?? "")).filter(Number.isFinite).sort((x, y) => y - x)[0] ?? 0;
+          lastMain = newest((s) => s.scope === "main" || s.scope === undefined);
+          unrecorded = lastMain < started; // else the agent recorded its own handoff this turn
+        }
       }
 
+      if (unrecorded && cfg.autoHandoff && !cfg.nudge) {
+        // No message is sent into the chat. The agent's last reply stands in for the handoff, in a scope of its own,
+        // so it never replaces a handoff the agent wrote and `resume` shows it next to one. It runs before the brief.
+        await safe(log, "agent.turn.after auto handoff", undefined, async () => {
+          const text = lastAssistantText(page ?? (await ref.timeline.refetch({ direction: "tail", limit: 20 })));
+          if (!text) return;
+          await tree.onNode(`paseo:agent/${agent.id}`, (node) =>
+            awt(cfg, node, ["state", "--scope", "auto", "--now", "[auto] " + cut(clean(text), 240), "--next", "not recorded: the agent ended its turn without a handoff"], "paseo-plugin"));
+        });
+      }
+
+      if (await briefAfterCompaction(agent.id, scan, ctx)) return; // the brief replaces the nudge for this turn
+      if (!unrecorded || !cfg.nudge) return;
+
       const before = nudgedAt.get(agent.id);
-      if (before !== undefined && last < before) return; // nudged already, and nothing recorded since
+      if (before !== undefined && lastMain < before) return; // nudged already, and nothing recorded since
       nudgedAt.set(agent.id, Date.now());
       try {
-        await ctx.paseo.agents.ref(agent.id).send(NUDGE);
+        await ref.send(NUDGE);
       } catch (error) {
         if (before === undefined) nudgedAt.delete(agent.id);
         else nudgedAt.set(agent.id, before);
@@ -448,8 +563,6 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     });
   }));
 
-  // The one permission the plugin answers: an agent touching its own node dir, which is always outside its cwd. Anything else
-  // (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
   add(server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, ctx) => {
     const mine = answeredByPlugin.delete(`${agent.id}:${requestId}`);
     pipe.add({ event: "permission_resolved", eid: `permres:${agent.id}:${requestId}`, agentId: agent.id, requestId, decision: resolution.behavior, decidedBy: mine ? "plugin" : "person", ts: new Date().toISOString() });
@@ -463,6 +576,8 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     }));
   }));
 
+  // The permissions the plugin answers: its own awt_resume tool (it only reads the caller's brief), and an agent touching its own
+  // node dir, which is always outside its cwd. Anything else (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
   add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
     pipe.add({ event: "permission", eid: `perm:${agent.id}:${request.id}`, agentId: agent.id, requestId: request.id, provider: agent.provider, tool: request.name, target: permissionTarget(request), ts: new Date().toISOString() });
     // Detected effects: a shell or MCP request that awt labels as outbound is recorded; a resend is left for the person with a note. Never denies.
@@ -480,6 +595,10 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       if (reason) await ctx.paseo.agents.ref(agent.id).timeline.append({ type: "plugin", id: `${RESEND_KIND}.${request.id}`, kind: RESEND_KIND, version: RESEND_VERSION, data: { reason: cut(clean(reason), 600) } });
     }));
     await safe(log, "agent.permission.before", undefined, async () => {
+      if (isOwnTool(request)) {
+        await ctx.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+        return;
+      }
       const targets = permissionTargets(request as Parameters<typeof permissionTargets>[0]);
       if (!targets) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);

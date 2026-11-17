@@ -24,7 +24,7 @@ print the version
 .SS init
 Create a task directory, or a node of the tree with \-\-kind.
 .PP
-.B awt init [\-\-goal GOAL] [\-\-done DONE] [\-\-kind KIND] [\-\-name NAME] [\-\-key KEY]
+.B awt init [\-\-goal GOAL] [\-\-done DONE] [\-\-kind KIND] [\-\-name NAME] [\-\-key KEY] [\-\-hooks HOOKS] [\-\-uninstall]
 .TP
 .B \-\-goal GOAL
 what this task is for (250 characters)
@@ -40,13 +40,22 @@ directory name of the new node
 .TP
 .B \-\-key KEY
 stable key of the new node, such as paseo:agent/ID
+.TP
+.B \-\-hooks HOOKS
+person only, ask first: install the after\-compaction context hook for claude, codex, opencode, pi or all (edits that provider's own config)
+.TP
+.B \-\-uninstall
+with \-\-hooks: remove the hook again
 .SS resume
 Print the brief: goal, state, open questions and effects, what changed since the last handoff.
 .PP
-.B awt resume [\-\-hook] [\-\-scope SCOPE] [\-\-json]
+.B awt resume [\-\-hook] [\-\-framed] [\-\-scope SCOPE] [\-\-json]
 .TP
 .B \-\-hook
 print nothing and exit 0 when there is no task or on any error (for a session\-start hook)
+.TP
+.B \-\-framed
+with \-\-hook: put the one\-line reference\-only frame above the brief (needs AWT_COMPACT_CONTEXT or a hook from init \-\-hooks)
 .TP
 .B \-\-scope SCOPE
 show the state of this scope only
@@ -191,19 +200,6 @@ short title (required)
 .TP
 .B \-\-ref REF
 URL of the original
-.SS supersede
-Move a doc replaced by a better one to docs/_superseded/.
-.PP
-.B awt supersede [\-\-why WHY] OLD NEW
-.TP
-.B OLD
-the old doc under docs/
-.TP
-.B NEW
-the new doc under docs/
-.TP
-.B \-\-why WHY
-the reason
 .SS status
 Set the task status; done is refused while questions or effects are open.
 .PP

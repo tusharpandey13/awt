@@ -89,15 +89,15 @@
  "l5-history-at-risk": [
   [
    "session_id",
-   "started_at",
+   "ended_at",
    "last_ingest",
    "age_days_at_ingest"
   ],
   [
    "s5",
-   "2026-09-20T10:00:00Z",
+   "2026-09-20T10:30:00Z",
    "2026-10-18T09:00:00Z",
-   28.0
+   27.9
   ]
  ],
  "l5-session-length-by-provider": [
@@ -140,43 +140,43 @@
  ],
  "l5-sessions-per-provider-model-week": [
   [
-   "week",
+   "week_start",
    "provider_name",
    "model",
    "sessions"
   ],
   [
-   "2026-W37",
+   "2026-09-14",
    "claude_code",
    "claude-a",
    1
   ],
   [
-   "2026-W44",
+   "2026-11-02",
    "claude_code",
    "claude-a",
    1
   ],
   [
-   "2026-W44",
+   "2026-11-02",
    "pi",
    "pi-a",
    1
   ],
   [
-   "2026-W45",
+   "2026-11-09",
    "claude_code",
    "claude-a",
    2
   ],
   [
-   "2026-W45",
+   "2026-11-09",
    "claude_code",
    "claude-b",
    1
   ],
   [
-   "2026-W45",
+   "2026-11-09",
    "opencode",
    "oc-a",
    1
@@ -245,34 +245,60 @@
  ],
  "l6-prompt-to-first-record": [
   [
-   "turn_id",
    "session_id",
-   "first_record",
-   "seconds"
+   "turns",
+   "first_record_turn",
+   "turns_before_first_record",
+   "seconds_to_first_record"
   ],
   [
-   "s1:0",
    "s1",
-   "2026-11-03T09:03:00Z",
+   3,
+   0,
+   0,
    180.0
   ],
   [
-   "s1:2",
-   "s1",
-   "2026-11-03T09:45:00Z",
-   300.0
+   "s2",
+   2,
+   null,
+   null,
+   null
   ],
   [
-   "s4:0",
+   "s3",
+   1,
+   null,
+   null,
+   null
+  ],
+  [
    "s4",
-   "2026-11-12T08:10:00Z",
+   1,
+   0,
+   0,
    600.0
   ],
   [
-   "s6:0",
+   "s5",
+   1,
+   null,
+   null,
+   null
+  ],
+  [
    "s6",
-   "2026-11-15T07:05:00Z",
+   1,
+   0,
+   0,
    300.0
+  ],
+  [
+   "s7",
+   1,
+   null,
+   null,
+   null
   ]
  ],
  "l6-rework": [
@@ -331,11 +357,17 @@
    "rule",
    "effects",
    "resent",
-   "caught_before_or_after"
+   "resent_seen_before",
+   "resent_seen_after",
+   "denied_retries",
+   "pretooluse_ask_outcome"
   ],
   [
    "(declared)",
    3,
+   0,
+   0,
+   0,
    0,
    "needs data"
   ],
@@ -343,11 +375,17 @@
    "gh-pr",
    1,
    0,
+   0,
+   0,
+   0,
    "needs data"
   ],
   [
    "git-push",
    2,
+   0,
+   0,
+   0,
    1,
    "needs data"
   ]
@@ -357,19 +395,22 @@
    "verb",
    "calls",
    "sessions",
-   "hit_used_afterwards"
+   "calls_with_hits",
+   "calls_with_a_used_hit"
   ],
   [
    "find",
    1,
    1,
-   "needs data"
+   0,
+   0
   ],
   [
    "find --like",
    1,
    1,
-   "needs data"
+   0,
+   0
   ]
  ],
  "l7-outbound-no-effect": [
@@ -438,12 +479,31 @@
  ],
  "l7-redecisions": [
   [
-   "status",
-   "missing"
+   "type",
+   "earlier",
+   "later",
+   "node_id",
+   "days_apart",
+   "rank",
+   "same_meaning"
   ],
   [
-   "needs data",
-   "phase 9 gate step 2: similarity of records in other words; no phase provides it"
+   "decision",
+   "d-1",
+   "d-2",
+   "ag1",
+   2.0,
+   -1.54,
+   "needs data"
+  ],
+  [
+   "question",
+   "q-3",
+   "q-4",
+   "ag5",
+   0.1,
+   -1.47,
+   "needs data"
   ]
  ],
  "l7-tools-and-errors": [
@@ -495,6 +555,16 @@
   ],
   [
    "low_session",
+   "s5 claude-a",
+   0.0
+  ],
+  [
+   "low_session",
+   "s6 claude-a",
+   0.0
+  ],
+  [
+   "low_session",
    "s6 claude-a",
    0.0
   ],
@@ -506,12 +576,12 @@
   [
    "model",
    "claude-a",
-   0.584
+   0.59
   ],
   [
    "model",
    "claude-b",
-   0.787
+   0.796
   ],
   [
    "model",
@@ -642,21 +712,27 @@
    "turns",
    "input_tokens",
    "output_tokens",
-   "cost_usd"
+   "cost_usd",
+   "ccusage_prorated_usd",
+   "unpriced_models"
   ],
   [
    "canceled",
    1,
    8,
    2,
-   0.001
+   0.001,
+   null,
+   null
   ],
   [
    "failed",
    2,
    160,
    30,
-   null
+   null,
+   null,
+   "needs data"
   ]
  ],
  "l8-latency-percentiles": [

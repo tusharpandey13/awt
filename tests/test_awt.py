@@ -193,16 +193,16 @@ class TestBasics(Base):
         self.assertIn("stuff/x.txt", lst)
         self.assertIn("misc/lnk -> /etc/hosts", lst)
 
-    def test_supersede_and_path_escape(self):
+    def test_supersede_is_removed_and_path_escape(self):
         self.init()
         self.write("docs/a.md", "# a\n")
         self.write("docs/b.md", "# b\n")
-        self.write("misc/c.md", "c\n")
-        self.bad("supersede", "docs/a.md", "docs/a.md")
-        self.bad("supersede", "docs/a.md", "misc/c.md")
-        self.bad("supersede", "docs/a.md", "../outside.md")
-        self.ok("supersede", "docs/a.md", "docs/b.md")
-        self.assertTrue(os.path.exists(self.p("docs", "_superseded", "a.md")))
+        r = self.bad("supersede", "docs/a.md", "docs/b.md", code=2)  # one line naming the host-native replacement; nothing moves
+        self.assertIn("docs/_superseded", r.stderr)
+        self.assertIn("awt note", r.stderr)
+        self.assertTrue(os.path.exists(self.p("docs", "a.md")))
+        os.makedirs(self.p("docs", "_superseded"))  # (the hint creates it; tests/test_p23fix.py runs the hint itself)
+        os.rename(self.p("docs", "a.md"), self.p("docs", "_superseded", "a.md"))  # the replacement
         self.assertNotIn("_superseded", self.ok("list", "docs").stdout)
         self.assertIn("_superseded", self.ok("list", "docs", "--all").stdout)
         # escape through effect body, plain and via symlink

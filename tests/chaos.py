@@ -355,7 +355,7 @@ def a_fuzz(c):
         elif v == 6:
             a = ["capture", "--from", A(), "--title", A()] + opt("--ref", A()) + r.choice([[], ["-"], [A()]])
             stdin = r.choice([b"", b"hello\n", b"\x00\x01binary\xff", os.urandom(3000), b"x" * 300000, SEC["aws"].encode() + b" body", "é日本😀\n".encode() * 100, b" \n "])
-        elif v == 7: a = ["supersede", A(), A()] + opt("--why", A())
+        elif v == 7: a = ["note", A()]
         elif v == 8: a = ["status", r.choice(["active", "paused", "done", A()])]
         elif v == 9: a = ["list", r.choice(SECTIONS + [A()])] + opt("--all")
         elif v == 10: a = ["find", A()]
@@ -831,7 +831,7 @@ def a_ro(c):
         os.chmod(d, 0o555)
     try:
         cases = [["note", "x"], ["ask", "x"], ["state", "--now", "a", "--next", "b"], ["decide", "c", "--why", "w"], ["ref", "http://x", "--title", "t"],
-                 ["capture", "--from", "s", "--title", "t"], ["supersede", "docs/a.md", "docs/b.md"], ["status", "paused"],
+                 ["capture", "--from", "s", "--title", "t"], ["status", "paused"],
                  ["effect", "plan", "--target", "ro:2", "--body", "outbox/o.md"], ["effect", "begin", e], ["init", "--goal", "g2", "--done", "d2"]]
         for a in cases:
             r = t.run(*a, stdin=b"body" if a[0] == "capture" else None)
@@ -1082,8 +1082,8 @@ def a_esc(c):
     for o, n in (("docs/old.md", "../outside/a.md"), ("../outside/a.md", "docs/new.md"), ("docs/lna.md", "docs/new.md"), ("docs/dl/a.md", "docs/new.md"),
                  (os.path.join(out, "a.md"), "docs/new.md"), ("docs/old.md", "docs/dl/a.md"), ("docs/../outbox/x", "docs/new.md")):
         r = t.run("supersede", o, n)
-        if r.rc == 0:
-            c.fail("supersede %s %s accepted" % (o, n))
+        if r.rc != 2:
+            c.fail("supersede %s %s: the removed verb should exit 2, got %d" % (o, n, r.rc))
     if not os.path.exists(os.path.join(out, "a.md")):
         c.fail("supersede moved a file out of the outside dir")
     snap = snapdir(out)
@@ -1093,18 +1093,15 @@ def a_esc(c):
     t.run("capture", "--from", "../..", "--title", "../../../evil", "--ref", "../x", stdin=b"x\n")
     if [x for x in os.listdir(c.base) if "evil" in x] or [x for x in os.listdir(t.dir) if "evil" in x]:
         c.fail("capture --title wrote outside context/")
-    # symlinked _superseded and context
+    # symlinked context
     os.makedirs(t.p("docs"), exist_ok=True)
-    os.symlink(out, t.p("docs", "_superseded"))
-    t.run("supersede", "docs/old.md", "docs/new.md")
-    os.unlink(t.p("docs", "_superseded"))
     shutil.rmtree(t.p("context"))
     os.symlink(out, t.p("context"))
     t.run("capture", "--from", "s", "--title", "through link", stdin=b"payload through symlinked context\n")
     now = snapdir(out)
     new = sorted(set(now) - set(snap))
     if new:
-        c.fail("writes landed OUTSIDE the task root via a symlinked docs/_superseded or context/: %s" % [os.path.relpath(x, c.base) for x in new])
+        c.fail("writes landed OUTSIDE the task root via a symlinked context/: %s" % [os.path.relpath(x, c.base) for x in new])
 
 
 # ---------------------------------------------------------------- save removed, doctor --staged

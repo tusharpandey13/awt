@@ -142,3 +142,10 @@ INSERT INTO records(record_id, node_id, type, ts, by, fields, session_id, origin
  ('n-1', 'ag4', 'note', '2026-11-12T08:10:00Z', 'a4', '{"type":"note","id":"n-1","text":"flaky test"}', 's4', 'agent', 'claude-b', 's4:0'),
  ('n-2', 'ag1', 'note', '2026-11-02T09:00:00Z', 'person', '{"type":"note","id":"n-2","text":"remember the spec"}', NULL, 'person', 'unknown:unset', NULL),
  ('ag6#n1', 'ag6', 'note', '2026-11-15T07:05:00Z', 'extractor', '{"type":"note","id":"n-3","text":"spike looks dead"}', 's6', 'inferred', 'unknown:unset', 's6:0');
+
+-- Full-text rows for the records above (awt fills them at ingest; the INSERTs above bypass that), used by l7-redecisions. The rows the 2-line ingest left are dropped first.
+INSERT INTO fts_text(fts_text) VALUES ('delete-all');
+DELETE FROM fts_ref;
+INSERT INTO fts_ref(kind, ref) SELECT 'record', rowid FROM records;
+INSERT INTO fts_text(rowid, text) SELECT f.id, CASE r.type WHEN 'decision' THEN json_extract(r.fields, '$.choice') || ' ' || json_extract(r.fields, '$.why') ELSE json_extract(r.fields, '$.text') END
+FROM fts_ref f JOIN records r ON r.rowid = f.ref;

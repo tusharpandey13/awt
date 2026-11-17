@@ -79,7 +79,7 @@ class TestTables(Store):
                   "schema_meta", "canonical", "fts_text"):
             self.assertIn(t, names)
         meta = dict(self.q("select key, value from schema_meta"))
-        self.assertEqual(meta["schema_version"], "6")
+        self.assertEqual(meta["schema_version"], "7")
         self.assertEqual(meta["semconv_version"], "1.37.0")
 
     def test_sessions_turns_messages_tool_calls(self):
@@ -188,11 +188,14 @@ class TestRebuild(Store):
         self.assertEqual(self.digest(), want)
         self.assertEqual(sorted(f for f in os.listdir(self.store) if f.startswith("store.db")), ["store.db"])
 
-    def test_normal_ingest_recovers_a_broken_db(self):
+    def test_normal_ingest_leaves_a_broken_db_for_rebuild(self):  # only an explicit --rebuild replaces a store that cannot be updated in place
         self.build()
         with open(self.db, "wb") as g:
             g.write(b"garbage")
-        self.ok("ingest", "--source", "claude", root=self.root)
+        r = self.ok("ingest", "--source", "claude", root=self.root)
+        self.assertIn("awt ingest --rebuild", r.stderr)
+        self.assertEqual(open(self.db, "rb").read(), b"garbage")
+        self.ok("ingest", "--rebuild", root=self.root)
         self.assertEqual(self.q("select count(*) from messages"), [(6,)])
 
     def test_normal_ingest_updates_and_an_unchanged_run_leaves_the_db_alone(self):

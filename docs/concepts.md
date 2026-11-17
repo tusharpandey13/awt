@@ -41,6 +41,14 @@ Both kinds are the same rows. Detected ones carry `origin: detected` and the `ru
 
 Every record names its model. `--model ID` wins, then `AWT_MODEL`, then `unknown:unset`. Old rows read as `unknown:legacy`. A person (`--by person`) ignores `AWT_MODEL`. The Paseo plugin sets it for every agent, so agents do nothing. In `store.db`, `records.model` and the per-message response model let you compare cost and outcomes across models.
 
+## Context after a compaction
+
+When a chat is compacted, the task record should reach the agent without a message from anyone. A person (never an agent) runs `awt init --hooks claude|codex|opencode|pi|all` once per provider on the agent machine; it edits that provider's own config, so ask first. `awt init --hooks PROVIDER --uninstall` removes it. `awt doctor` warns for a provider that is present without the hook. The Paseo plugin's own message after a compaction is off unless `AWT_COMPACT_BRIEF=1`.
+
+## Upgrading the store
+
+`store.db` has a schema number (now 7). Install the new `awt` everywhere first (`command -v awt`, and the awt the Paseo plugin runs), update the Paseo plugin, then run `awt ingest --rebuild` once by hand. Until then hooks leave the old file alone, `doctor` warns, and `awt ui` refuses. A copy of `awt` that finds a newer schema than it knows never writes it and says to install the newer one. `awt ui` reads the live `store.db` read-only; restart it after a rebuild. `awt doctor` outside a task root runs the machine-wide checks and exits 0.
+
 ## Ingest sources and privacy
 
 `awt ingest --source claude|pi|opencode|paseo|ccusage|all` reads each tool's own files read-only and appends them to the store. A missing source is zero rows, not an error. Nothing is sent anywhere; it makes no network calls (`awt ui` listens on `127.0.0.1` only).
