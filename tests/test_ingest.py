@@ -291,6 +291,11 @@ class TestIngest(Ing):
         self.ok("ingest", "--source", "claude", root="", env=env)
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "xdg", "awt-store", "log", "claude")))
 
+    def test_supersede_removed_with_a_hint(self):
+        r = self.bad("supersede", "docs/a.md", "docs/b.md", code=2)
+        self.assertEqual(len([x for x in r.stderr.splitlines() if x.strip()]), 2)  # the error line and the fix line
+        self.assertIn("mkdir -p docs/_superseded && mv -n docs/old.md docs/_superseded/", r.stderr)
+
     def test_save_removed_and_verb_count(self):
         r = self.bad("save", "m", code=2)
         self.assertIn("git commit", r.stderr)
@@ -303,7 +308,9 @@ class TestIngest(Ing):
         verbs = m.build()._subparsers._group_actions[0].choices
         self.assertIn("ingest", verbs)
         self.assertNotIn("save", verbs)
-        self.assertLessEqual(len([v for v in verbs if v != "help"]), 16)
+        self.assertNotIn("supersede", verbs)
+        self.assertIn("ui", verbs)
+        self.assertLessEqual(len([v for v in verbs if v != "help"]), 16)  # SPEC principle 8; v2 adds ingest and ui, removes save and supersede
 
     def test_lone_surrogate_is_stored_and_does_not_stop_the_run(self):
         bad = b'{"type":"user","message":{"role":"user","content":"x \\ud83d y"}}\n'  # built at runtime: a lone surrogate escape

@@ -1,0 +1,51 @@
+{
+  "session": [
+    {
+      "agent": "claude",
+      "period": "3f0c1a2b-0000-4000-8000-00000000aaaa",
+      "inputTokens": 1000,
+      "outputTokens": 400,
+      "cacheCreationTokens": 200,
+      "cacheReadTokens": 3000,
+      "totalTokens": 4600,
+      "totalCost": 0.0425,
+      "modelsUsed": ["claude-test-1", "claude-test-2"],
+      "modelBreakdowns": [
+        {"modelName": "claude-test-1", "inputTokens": 600, "outputTokens": 300, "cacheCreationTokens": 100, "cacheCreation1hTokens": 0, "cacheReadTokens": 2000, "cost": 0.03},
+        {"modelName": "claude-test-2", "inputTokens": 400, "outputTokens": 100, "cacheCreationTokens": 100, "cacheCreation1hTokens": 0, "cacheReadTokens": 1000, "cost": 0.0125}
+      ],
+      "metadata": {"lastActivity": "2026-10-03T09:05:00.000Z"}
+    },
+    {
+      "agent": "pi",
+      "period": "01a1b2c3-0000-7000-8000-0000000000p1",
+      "inputTokens": 10,
+      "outputTokens": 5,
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "totalTokens": 15,
+      "totalCost": 0.002,
+      "modelsUsed": ["pi-test-1"],
+      "modelBreakdowns": [
+        {"modelName": "pi-test-1", "inputTokens": 10, "outputTokens": 5, "cacheCreationTokens": 0, "cacheCreation1hTokens": 0, "cacheReadTokens": 0, "cost": 0.002}
+      ],
+      "metadata": {"lastActivity": "2026-10-23T12:40:00.000Z"}
+    },
+    {
+      "agent": "claude",
+      "period": "9a9a9a9a-0000-4000-8000-00000000bbbb",
+      "inputTokens": 50,
+      "outputTokens": 20,
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "totalTokens": 70,
+      "totalCost": 0.001,
+      "modelsUsed": ["claude-test-1"],
+      "modelBreakdowns": [
+        {"modelName": "claude-test-1", "inputTokens": 50, "outputTokens": 20, "cacheCreationTokens": 0, "cacheCreation1hTokens": 0, "cacheReadTokens": 0, "cost": 0.001}
+      ],
+      "metadata": {"lastActivity": "2026-10-04T10:00:00.000Z"}
+    }
+  ],
+  "totals": {"inputTokens": 1060, "outputTokens": 425, "cacheCreationTokens": 200, "cacheReadTokens": 3000, "totalTokens": 4685, "totalCost": 0.0455, "unpricedModels": []}
+}

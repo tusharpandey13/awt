@@ -201,15 +201,6 @@ class SmallInvariants(Base):
         self.assertEqual(kinds["https://acme.atlassian.net/browse/PK-12"], "jira")
         self.assertEqual(kinds["https://git.example.invalid/g/p/-/merge_requests/7"], "pr")
 
-    def test_supersede_suffixes_on_collision(self):
-        self.init()
-        for n in ("old.md", "new.md"):
-            self.write("docs/" + n, n + "\n")
-        self.write("docs/_superseded/old.md", "taken\n")
-        self.ok("supersede", "docs/old.md", "docs/new.md")
-        self.assertEqual(slurp(self.p("docs", "_superseded", "old.md")), "taken\n")
-        self.assertEqual(slurp(self.p("docs", "_superseded", "old-2.md")), "old.md\n")
-
     def test_init_warns_about_claude_md(self):
         parent = os.path.join(self.tmp, "p")
         os.makedirs(os.path.join(parent, "task"))

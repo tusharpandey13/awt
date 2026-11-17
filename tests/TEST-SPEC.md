@@ -245,12 +245,29 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 - S5 A session joins a node only on an exact `cwd`, with `join_confidence = 'cwd'`; otherwise null.
 - S6 Unparsed canonical rows count in `ingest_sources.errors`; no canonical files still builds an empty db.
 - S7 an in-place update equals a rebuild (same rows and search hits; rowids may differ), and `ingest --rebuild` gives a byte-identical file (SHA-256) and `.dump`, also with the provider directory gone. Review fixes (tests/test_p2fix.py): H1 a bare-directory or other-tree ingest keeps the records; H2 a node-log change leaves canonical tables alone and a canonical change re-derives only that file; H3 a SIGKILLed build's temp file is swept and `doctor` warns; M1 a write during a build is not marked fresh; M2 a write runs git once; M3 a re-opened agent gets a brief; M5 contentless FTS and indexes; M6 `find --like` and `decide` work without FTS5; M7 a pre-phase-2 node gets the `.gitignore` line.
-- S8 A garbage `store.db` is replaced by `--rebuild` and by a normal `ingest`; no temp files remain.
+- S8 A garbage `store.db` is replaced by `--rebuild`; a normal `ingest` leaves it and warns `awt ingest --rebuild`; no temp files remain.
 - S9 A normal `ingest` with nothing new leaves `store.db` untouched (mtime); a new node record or new canonical rows update it.
 - S10 `--rebuild` prints a `rebuilt store.db` line and no provider line; with `--hook` it is silent.
 - S11 `find TERM` stays literal and never lists messages; `find --sessions TERM` adds `message:` and `tool_call:` hits; with no usable store it prints the one-line note and keeps the record hits; `--sessions` without a TERM or with `--like` is exit 2.
 - S12 `find --like` output is identical with and without a store.
 - S13 `doctor` is ok with FTS5 and exits 1 with `fail ... FTS5` when `AWT_TEST_NO_FTS5` simulates its absence; `ingest --rebuild` then exits 1 with a `fix:`.
+
+### PR #23 review fixes (`test_p23fix.py`, `test_ui.py`)
+- S14 (H1) A store of an older schema is left byte-identical by `--hook`, `--stdin` and a plain `ingest` (the last warns `store schema 5 < 7` and `awt ingest --rebuild`; the first two are silent); `find` still reads it; `doctor` warns; `--rebuild` replaces it, with the canonical rows that arrived meanwhile. A broken file is treated the same.
+- S15 (H1) A hook builds a missing store only while the canonical logs are under 64 MB. `--rebuild` refuses with a `fix:` line when free disk (`AWT_TEST_FREE_BYTES`) is under 1.2 x the larger of the store and the logs plus 256 MB; a hook skips silently; the need grows with the store.
+- S16 (H1) An exclusive lock held on `store.db` (`AWT_TEST_BUSY_S=1`) makes `ingest` warn `not updated` and `--hook` stay silent; the store is untouched, no temp file, no rebuild; the next ingest updates it.
+- S17 (H1) A rebuild of 6 files of 5 MB peaks within 60 MB of a rebuild of 1 file (max RSS of the child): one file's rows in memory at a time.
+- S18 (M2) Integers of 10^20, 2^63 and below -2^63 in a transcript, and in ccusage output, are stored as null; under `--hook` the build completes. A file whose derivation raises (`AWT_TEST_DERIVE_RAISE`) is rolled back alone, counted in `build_state.errors`, its raw rows kept.
+- S19 (M3) The `supersede` hint, run in a temp tree, works without `docs/_superseded/` and refuses to replace an earlier file there; `AGENTS.md`, the ADR and `help agents` carry the same text.
+- S20 (L1) `fixtures/ccusage-v0/real-20.0.51/`: real `ccusage session --json --offline` output (20.0.51) on synthetic parsekit transcripts (a parent, a subagent, a resumed copy). awt's tokens (1107) and cost (0.003321) equal ccusage's totals; no transcript data is real. Regenerate by running that ccusage on `projects/` with `HOME` and `CLAUDE_CONFIG_DIR` pointed at a temp dir.
+- S21 (L3) A conversation past the last ccusage import keeps its message tokens and its ccusage cost as one `ccusage_stale` row; the l1 cost recipe still counts it; a computed cost (pi, opencode) is not added to it.
+- S22 (M1, L2, L4) `awt ui` starts Datasette on the live `store.db` (no `-i`, no copy; a later ingest is visible), refuses Datasette 1.x with `datasette<1`, and refuses an older store with `awt ingest --rebuild` (a fake `datasette` records its arguments).
+- S23 (N1) A store of schema 99 is byte-identical after every ingest mode (`--hook`, `--source all --hook`, plain, `--rebuild`, `--rebuild --hook`, `--stdin`); plain and `--rebuild` print `store schema 99 > 7: this awt is older than the store` and `install the newer awt`; hooks are silent; canonical rows are still copied; `doctor` warns; `awt ui` refuses.
+- S24 (N2) `human(4053296742)` is `3.8 GB`.
+- S25 (N3) In a full `--rebuild`, a file whose derivation raises after writing rows (`AWT_TEST_DERIVE_RAISE_AFTER`) leaves zero rows in messages, turns, tool_calls, usage and sessions; `fts_text` count equals `fts_ref`, no dangling message refs, `integrity_check` ok.
+- S26 (N4) SIGTERM and SIGHUP to a `--rebuild` (`AWT_TEST_BUILD_SLEEP`) remove the temp file and leave the old store byte-identical.
+- S27 (N5) `update_store` on a store whose schema is not this awt's raises `StoreChanged` (a skip with a warning), leaves the file byte-identical and never stamps the version.
+- N6 is documentation only (SPEC, CHANGELOG): restart `awt ui` after a rebuild.
 
 ## BRIEF.md and the short prompt (`test_brief.py`; plugin P2, P2b)
 
