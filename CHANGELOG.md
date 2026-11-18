@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Paseo agents get a read-only `awt_find` tool (`{ query, limit? }`, runs `awt find --like`), offered and auto-approved wherever `awt_resume` is. The plugin's prompt block and the brief footer (`awt find --like "topic" | awt list`) now tell agents to search before researching or asking, and `help agents` states it once.
+
 ### Changed
 - An unknown verb such as `awt crossref foo` prints `error: awt: no verb 'crossref'` and a `fix:` line naming the right command (`awt find --like "foo"`, `awt resume`, `awt state --now ... --next ...` or `awt help`), exits 2, and runs nothing. No aliases were added.
 - `awt find --like` help says it ranks related records across every workspace in the tree.

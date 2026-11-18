@@ -73,6 +73,9 @@ def top(root, path):
 
 def nomodel(text):
     """`list --json` rows gained `model` (SPEC, Model tracking); v0.2.0 output equals ours without it, since the old rows read as unknown:legacy."""
+    for pre in ("./", ""):
+        for q in ('"', '\\"'):  # plain and JSON-escaped
+            text = text.replace(pre + "awt find --like " + q + "topic" + q + " | " + pre + "awt list", pre + "awt list | " + pre + "awt find <term>")  # the brief footer changed after v0.3.1
     return re.sub(r', "model": "unknown:legacy"', "", text)
 
 
@@ -670,7 +673,7 @@ class ER20(Cli):
                 if job[1] == ("doctor",):
                     self.assertIn("0 quarantined", b.stdout)
         # 2: solo resume, v0.2.0 vs now
-        self.assertEqual(v("resume", dir=solo).stdout, self.run_awt("resume", dir=solo).stdout)
+        self.assertEqual(v("resume", dir=solo).stdout, nomodel(self.run_awt("resume", dir=solo).stdout))
         # 3: auto states never surface
         r = self.run_awt("find", "--like", "quillwort", cwd=R)
         self.assertEqual(r.stdout, "no related records\n")

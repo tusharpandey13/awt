@@ -140,7 +140,7 @@ class Hooks(test_awt.Base):
         self.assertEqual(r.returncode, 0)
         first, rest = r.stdout.split("\n", 1)
         self.assertEqual(first, FRAME)
-        self.assertEqual(rest, self.ok("resume").stdout.replace("./awt list | ./awt find <term>\n", ""), "the plain brief minus its command pointers")
+        self.assertEqual(rest, self.ok("resume").stdout.replace('./awt find --like "topic" | ./awt list\n', ""), "the plain brief minus its command pointers")
         low = r.stdout.lower()
         for bad in ("carry on", "continue", "reply", "please", "you should"):
             self.assertNotIn(bad, low.split("\n", 1)[0], bad)

@@ -63,7 +63,7 @@ test("P11 the recorded payloads drive the hooks end to end", async () => {
   assert.equal(open.env.PARSEKIT_ENV, "dev");
   const dir: string = open.env.AWT_DIR;
   assert.match(dir, /\/agents\/fix-parsekit-tokenizer$/);
-  assert.deepEqual(open.tools.map((t: any) => t.name), ["awt_resume"]);
+  assert.deepEqual(open.tools.map((t: any) => t.name), ["awt_resume", "awt_find"]);
 
   await call("agent.create.after");
   await call("agent.turn.before");
