@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `awt VERB --help` (and `awt effect plan --help` etc.) lists each flag with a one-line explanation. `awt --help`, the man page `docs/awt.1` and `docs/reference/` (one page per verb) are generated from one table in `awt` (`CLI_HELP`) by `tools/gen_docs.py`; `tests/test_docs.py` fails when they disagree, or when README, AGENTS.md or `docs/concepts.md` name a verb or flag that does not exist.
+- `docs/concepts.md`: a one-page glossary (tree, records, BRIEF.md, store and store.db, effects, model tracking, context after a compaction, upgrading the store, ingest privacy). README and AGENTS.md describe detected effects, model tracking, ingest and `awt ui`.
+
+### Fixed
+- `migrate-paseo` repairs a root whose first `awt init --kind root` was killed, instead of stopping on it.
+- `.awt/*.tmp` is in the `.gitignore` lines `init` appends, and a `BRIEF.*.tmp` older than 60 s, left by a killed run, is removed on the next write.
+- `awt init --uninstall` without `--hooks` names `codex` in its fix line.
+
 ## 0.3.0 (17-Nov-2026)
 
 ### Upgrade

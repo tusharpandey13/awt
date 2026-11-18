@@ -29,7 +29,7 @@ One directory per task. It holds context from unconnected informal sources (Slac
 ```
 AGENTS.md              contract (template below); existing file gets the marked block appended
 README.md              only if absent; short human guide (template below)
-.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/runs/ BRIEF.md
+.gitignore             lines appended if missing: scratch/ .awt/claims/ .awt/runs/ BRIEF.md .awt/*.tmp
 BRIEF.md               derived brief, written after every awt write (see "BRIEF.md")
 .claude/settings.json  only if absent (template below); if present, print the snippet instead
 context/ docs/ outbox/ misc/ scratch/
@@ -149,7 +149,7 @@ Add one last line when the newest state is missing: `No handoff yet. Before stop
 Every node has `BRIEF.md`: the `resume` brief for that node, plus one last line `Generated <time>; ages above are as of then.` (relative ages go stale in a file). It exists so an agent needs only `cat`, whatever the host: it is a plain file, so it works when the Paseo `awt_resume` tool is not delivered or the Claude Code hook does not load.
 
 - **Written:** after `init` (any kind), and after every verb that writes to a node: `state note decide ask answer ref capture status` and `effect plan|begin|mark`. It is written for the node written to, for its parent (the Children section shows the child's state), and, when that node is a task, for every agent below it, when there are at most 20 (their Task section shows the task's state; with more, they refresh at their own next write or session start). `resume --hook` also refreshes the node's own file (not when `AWT_NO_BRIEF` is set, which `doctor` sets for its hook check: a check writes nothing). Other changes (a file dropped in `docs/`, a git commit, an ancestor above the parent) show up at the next write to that node or the next session start.
-- **Atomic:** the text goes to `.awt/BRIEF.<pid>.tmp`, then `rename` onto `BRIEF.md`. A reader sees the old or the new file, never half.
+- **Atomic:** the text goes to `.awt/BRIEF.<pid>.tmp`, then `rename` onto `BRIEF.md`. A reader sees the old or the new file, never half. A `BRIEF.*.tmp` older than 60 s is left by a killed run and is removed on the next write.
 - **Derived, never state (rule 4):** nothing reads it back, `resume` and every listing ignore it, and it does not count as a change since the newest state. A failure to write it (read-only directory, a directory named `BRIEF.md`) is silent and never fails the verb. Reading verbs other than the hook do not write it.
 - **Git:** `BRIEF.md` is in the `.gitignore` lines `init` writes. It changes on every write, differs per checkout and is rebuilt from `.awt/events.jsonl`, which is what gets committed.
 - **Not covered here:** a brief regenerated on ingest (detected effects do not regenerate it either).
