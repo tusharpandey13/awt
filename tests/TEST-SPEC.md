@@ -173,7 +173,7 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R2f A simulated exceeded budget (`AWT_RELATED_MS`): the write stands, the stop line prints.
 - T-R2g The 200-character cut of a `related:` line includes its prefix.
 - T-R3a `awt help agents` has the `find --like` line; the task `AGENTS.md` template no longer does (it shrank to about 250 chars; `decide` and `ask` print related records anyway).
-- T-R3b The plugin block is at most 260 characters and names `BRIEF.md` and `awt_resume`; `find --like` moved to `help agents`.
+- T-R3b The plugin block is at most 360 characters and names `BRIEF.md`, `awt_resume` and `awt_find`. T-R3c The brief footer is `./awt find --like "topic" | ./awt list`; `help agents` states search-first once.
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
 
@@ -287,7 +287,7 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 | B13 | The standalone AGENTS block is short, names `BRIEF.md`, `decide`, `ask`, the subagent line, says what the plugin and the Claude Code hooks record, and asks for a `state` handoff without claiming everything is recorded |
 | B14 to B16 | Tree: every node kind gets a brief at creation; a child write refreshes the parent; a task write refreshes the agents below it |
 | B17 | The tree block names `$AWT_DIR/BRIEF.md` and `$AWT_DIR/out.md` |
-| P2 | The plugin block is at most 260 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `decide`, `ask`; no `state`, no `find --like` |
+| P2 | The plugin block is at most 360 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `awt_find`, `decide`, `ask`; no `state` |
 | P2b | An agent opened through the plugin has `BRIEF.md` in `AWT_DIR` before any tool call, refreshed by an awt write |
 
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
@@ -379,6 +379,7 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - PJ12 Hostile project names and root paths never escape the tree or reach disk as secrets.
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node, the parent read from `parentAgentId` or the label `paseo.parent-agent-id`; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
+- P6b `awt_find` takes `{query, limit?}`, runs `find --like` for the calling agent's node, passes `--limit`, and returns one-line error results (bad limit, no node). Per-provider names (`mcp__paseo__awt_find`, `awt_find`) are auto-approved like `awt_resume`; look-alikes are not (P8).
 - P6 `awt_resume` takes no input and returns the brief of the node found for the calling agent's key; an agent id with no node errors. A key on two nodes resolves to nothing (C36).
 - P14 `agent.turn.after` without `AWT_NUDGE`: no message is sent; with no `main` state since the turn started, the last reply is recorded in scope `auto`; never replaces an agent's own handoff; unchanged replies add nothing; `AWT_AUTO_HANDOFF=0` records nothing.
 - P7 (with `AWT_NUDGE=1`) `agent.turn.after`: nudge only for completed turns of non-subagents that have an `AWT_DIR`, with no newer state, at most once per stretch (C34, C35); not for failed or canceled turns.

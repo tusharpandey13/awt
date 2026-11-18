@@ -261,7 +261,7 @@ If `./relay` exists and the work splits into parts, do not run them all in one s
 - Writing a second handoff such as `docs/HANDOFF.md`. `state` is the handoff.
 - Putting long text in `--now`, `--why`, `note`. Write `docs/`, reference the path.
 - Using `--again` or a fresh `plan` to get around an `unknown` effect.
-- Re-asking or re-researching without `./awt find` first.'''
+- Researching or asking before searching: run `./awt find --like "topic"` first (exact words: `./awt find "term"`); the answer may already be recorded.'''
 
 USAGE_HEAD = "awt VERB ...   (global: --dir PATH, --by NAME, --model ID)"
 # One source for `awt --help`, `awt VERB --help`, awt.1 and docs/reference/ (tools/gen_docs.py writes the last two).
@@ -993,7 +993,7 @@ def brief(scope=None, git_section=True):
         "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))
     if D["bad"]:
         inv += "; %d quarantined rows" % D["bad"]
-    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c("./awt list | ./awt find <term>")]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % one(D["unread"])] if D["unread"] else []), "inventory", "state"))
+    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c('./awt find --like "topic" | ./awt list')]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % one(D["unread"])] if D["unread"] else []), "inventory", "state"))
     if not sts and not FRAMED:
         o.append(c('No handoff yet. Before stopping: ./awt state --now "..." --next "..."\n'))
     return "".join(o)

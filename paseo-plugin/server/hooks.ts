@@ -111,10 +111,10 @@ function realish(p: string): string {
 }
 
 /** The paths a permission request wants, or null when it is not a kind we understand (then it is left alone). */
-/** The plugin's own awt_resume tool, by the exact name its provider gives it. opencode is never offered it, so no opencode request is ours. */
-const OWN_TOOL: Record<string, string> = { claude: "mcp__paseo__awt_resume", pi: "awt_resume" };
+/** The plugin's own read-only tools, by the exact name each provider gives them. opencode is never offered them, so no opencode request is ours. */
+const OWN_TOOL: Record<string, string[]> = { claude: ["mcp__paseo__awt_resume", "mcp__paseo__awt_find"], pi: ["awt_resume", "awt_find"] };
 export const isOwnTool = (req: { kind?: string; provider?: string; name: string }): boolean =>
-  req.kind === "tool" && typeof req.provider === "string" && Object.hasOwn(OWN_TOOL, req.provider) && OWN_TOOL[req.provider] === req.name;
+  req.kind === "tool" && typeof req.provider === "string" && Object.hasOwn(OWN_TOOL, req.provider) && OWN_TOOL[req.provider].includes(req.name);
 
 export function permissionTargets(req: { name: string; input?: Record<string, unknown>; detail?: { type?: string; filePath?: string } }): string[] | null {
   const detail = req.detail;
@@ -407,6 +407,20 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     },
   });
 
+  const awtFind = defineAgentTool({
+    name: "awt_find",
+    title: "awt find",
+    description: "Search every awt workspace for earlier decisions, answers, notes and states about a topic. Use it before researching past work by hand or asking the person something that may already be answered.",
+    input: z.object({ query: z.string().min(1), limit: z.number().int().positive().optional() }),
+    async execute(input, context) {
+      const fail = (m: string) => ({ text: `awt find failed: ${m.trim().split("\n")[0] || "no output"}`.slice(0, 300), isError: true });
+      const r = await tree.onNode(`paseo:agent/${context.agent.id}`, (node) =>
+        awt(cfg, node, ["find", "--like", input.query, ...(input.limit ? ["--limit", String(input.limit)] : [])], context.agent.id));
+      if (!r) return fail("no awt node for this agent yet");
+      return r.code === 0 ? { text: r.stdout.trim() || "No related records." } : fail(r.stderr || `exit ${r.code}`);
+    },
+  });
+
   const removers: (() => void)[] = [];
   const add = (r: () => void) => removers.push(r);
 
@@ -439,7 +453,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       const node = await withModel(model, () => agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider, labels: request.labels }, ctx));
       withDir.add(request.agentId);
       const env = { ...request.env, AWT_DIR: node, AWT_BY: request.agentId, AWT_MODEL: model, ...(cfg.related ? { AWT_RELATED: cfg.related } : {}) };
-      return { ...request, env, tools: [...request.tools.filter((t) => t.name !== "awt_resume"), awtResume] };
+      return { ...request, env, tools: [...request.tools.filter((t) => t.name !== "awt_resume" && t.name !== "awt_find"), awtResume, awtFind] };
     });
   }));
 
@@ -576,7 +590,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     }));
   }));
 
-  // The permissions the plugin answers: its own awt_resume tool (it only reads the caller's brief), and an agent touching its own
+  // The permissions the plugin answers: its own awt_resume and awt_find tools (they only read), and an agent touching its own
   // node dir, which is always outside its cwd. Anything else (another node, AWT_ROOT, a symlink out, `..`, shell) is left for the person.
   add(server.addHook("agent.permission.before", async ({ agent, request }, ctx) => {
     pipe.add({ event: "permission", eid: `perm:${agent.id}:${request.id}`, agentId: agent.id, requestId: request.id, provider: agent.provider, tool: request.name, target: permissionTarget(request), ts: new Date().toISOString() });

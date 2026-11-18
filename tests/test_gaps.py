@@ -142,7 +142,8 @@ class PreTreeBrief(Base):
             f.write("BRIEF.md\n.awt/*.tmp\n")
         os.utime(gi, ns=(st.st_atime_ns, st.st_mtime_ns))
         for args in (("resume",), ("resume", "--hook"), ("resume", "--scope", "main")):
-            self.assertEqual(run(AWT, *args), run(old, *args), args)
+            new = run(AWT, *args).replace('./awt find --like "topic" | ./awt list', "./awt list | ./awt find <term>")  # the footer changed after the pre-tree release
+            self.assertEqual(new, run(old, *args), args)
 
 
 class SmallInvariants(Base):

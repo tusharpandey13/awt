@@ -34,12 +34,13 @@ test("P2 agent.create.before appends the static block once and touches nothing e
   const config = { provider: "claude", cwd: "/x", systemPrompt: "be kind", model: "m" };
   const out = await r.call("agent.create.before", { request: { config, env: { A: "1" } } });
   assert.equal(out.config.systemPrompt, "be kind\n\n" + AWT_BLOCK);
-  assert.ok(AWT_BLOCK.length <= 260, String(AWT_BLOCK.length));
+  assert.ok(AWT_BLOCK.length <= 360, String(AWT_BLOCK.length));
+  assert.match(AWT_BLOCK, /awt_find/);
   assert.match(AWT_BLOCK, /\$AWT_DIR\/BRIEF\.md/);
   assert.match(AWT_BLOCK, /awt_resume/);
   assert.match(AWT_BLOCK, /awt decide/);
   assert.match(AWT_BLOCK, /awt ask/);
-  assert.ok(!/state|find --like|note|resume`/.test(AWT_BLOCK), "decision 15: no handoff line, no other verbs");
+  assert.ok(!/state|note|resume`/.test(AWT_BLOCK), "decision 15: no handoff line, no other verbs");
   assert.deepEqual({ ...out.config, systemPrompt: undefined }, { ...config, systemPrompt: undefined });
   assert.deepEqual(out.env, { A: "1", AWT_MODEL: "m" }); // the configured model, for the agent's own awt calls
   const again = await r.call("agent.create.before", { request: out });
@@ -73,11 +74,11 @@ test("P4/P5 agent.open.before: env, tool, idempotent on resume", async () => {
   assert.equal(first.env.AWT_BY, "agt_1");
   assert.ok(exists(join(first.env.AWT_DIR, ".awt", "events.jsonl")));
   assert.ok(first.env.AWT_DIR.startsWith(r.root + "/projects/parsekit/workspaces/parsekit-main/tasks/main/agents/"), first.env.AWT_DIR);
-  assert.deepEqual(first.tools.map((t: any) => t.name), ["awt_resume"]);
+  assert.deepEqual(first.tools.map((t: any) => t.name), ["awt_resume", "awt_find"]);
   assert.deepEqual(first.mcpServers, {});
   const again = await r.call("agent.open.before", openReq("agt_1", { reason: "resume", tools: first.tools }));
   assert.equal(again.env.AWT_DIR, first.env.AWT_DIR);
-  assert.equal(again.tools.length, 1);
+  assert.equal(again.tools.length, 2);
   assert.equal(r.nodes().filter((x) => x.kind === "agent").length, 1);
 });
 
@@ -90,6 +91,27 @@ test("P6 awt_resume returns this agent's brief only", async () => {
   assert.match(text, /workspace parsekit--main/);
   const other = await open.tools[0].execute({}, { agent: agentPayload("agt_nope"), paseo: {}, signal: new AbortController().signal });
   assert.equal(other.isError, true);
+});
+
+test("P6b awt_find runs awt find --like, passes limit, fails soft", async () => {
+  const r = mk({}, WS);
+  const open = await r.call("agent.open.before", openReq("agt_1"));
+  const find = open.tools.find((t: any) => t.name === "awt_find");
+  assert.ok(find);
+  assert.ok(find.description.length < 300, String(find.description.length));
+  assert.match(find.description, /Search every awt workspace/);
+  const cx = { agent: agentPayload("agt_1"), paseo: {}, signal: new AbortController().signal };
+  const dir = open.env.AWT_DIR;
+  r.awt(dir, "decide", "use-sqlite-zq41", "--why", "local storage");
+  const hit = await find.execute({ query: "sqlite storage zq41" }, cx);
+  assert.ok(!hit.isError, hit.text);
+  const lim = await find.execute({ query: "sqlite storage zq41", limit: 1 }, cx);
+  assert.ok(!lim.isError, lim.text);
+  const bad = await find.execute({ query: "x", limit: 99999 }, cx);
+  assert.equal(bad.isError, true);
+  assert.ok(!bad.text.includes("\n"), "one line");
+  const none = await open.tools.find((t: any) => t.name === "awt_find").execute({ query: "x" }, { ...cx, agent: agentPayload("agt_nope") });
+  assert.equal(none.isError, true);
 });
 
 test("P4 a subagent whose parent is known lands under the parent's node", async () => {
@@ -589,14 +611,14 @@ test("R5 the compaction brief replaces the nudge for that turn", async () => {
 test("P8 permission: the plugin's own awt_resume tool is allowed under its per-provider name, a look-alike is not", async () => {
   const r = mk({ AWT_COMPACT_BRIEF: "1" }, WS);
   await r.call("agent.open.before", openReq("agt_a"));
-  const rows: [string, string, string][] = [["claude", "mcp__paseo__awt_resume", "tool"], ["pi", "awt_resume", "tool"]];
+  const rows: [string, string, string][] = [["claude", "mcp__paseo__awt_resume", "tool"], ["pi", "awt_resume", "tool"], ["claude", "mcp__paseo__awt_find", "tool"], ["pi", "awt_find", "tool"]];
   for (const [provider, name, kind] of rows) await r.call("agent.permission.before", ask("agt_a", `${provider}:${name}`, { provider, name, kind }));
   const no: [string, string, string][] = [
     ["opencode", "awt_resume", "tool"], ["opencode", "awt_resume", "mcp"], ["claude", "awt_resume", "tool"], ["claude", "mcp__paseo__awt_resume", "mcp"],
-    ["pi", "awt_resume", "other"], ["claude", "mcp__other__awt_resume", "tool"], ["pi", "awt_resume2", "tool"], ["claude", "mcp__paseo__create_agent", "tool"], ["claude", "Bash", "tool"],
+    ["pi", "awt_resume", "other"], ["claude", "mcp__other__awt_resume", "tool"], ["pi", "awt_resume2", "tool"], ["opencode", "awt_find", "tool"], ["claude", "awt_find", "tool"], ["claude", "mcp__other__awt_find", "tool"], ["pi", "awt_find", "mcp"], ["claude", "mcp__paseo__create_agent", "tool"], ["claude", "Bash", "tool"],
   ];
   for (const [provider, name, kind] of no) await r.call("agent.permission.before", ask("agt_a", `${provider}:${name}:${kind}`, { provider, name, kind }));
-  assert.deepEqual(r.answered.map((x) => x.requestId), ["claude:mcp__paseo__awt_resume", "pi:awt_resume"]);
+  assert.deepEqual(r.answered.map((x) => x.requestId), ["claude:mcp__paseo__awt_resume", "pi:awt_resume", "claude:mcp__paseo__awt_find", "pi:awt_find"]);
 });
 
 
