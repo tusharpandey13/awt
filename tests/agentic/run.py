@@ -29,7 +29,9 @@ def run_session(prompt, d, settings):
            # The task's own .claude/settings.json (the hooks `init` writes) loads; the person's
            # ~/.claude settings, plugins and MCP servers do not.
            "--setting-sources", "project,local", "--strict-mcp-config"]
-    env = scenarios.clean_env()
+    # A store beside the task dir, so the SessionEnd ingest never writes test sessions into the
+    # person's own awt store (and never inside d, where checkers scan for leaked text).
+    env = scenarios.clean_env(AWT_STORE=d + ".store")
     s = {"prompt": prompt, "result": "", "cost": 0.0, "infra": None}
     t0 = time.time()
     p = subprocess.Popen(cmd, cwd=d, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

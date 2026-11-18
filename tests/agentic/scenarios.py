@@ -36,7 +36,7 @@ def clean_env(**extra):
 
 def awt(d, *args):
     p = subprocess.run(["./awt", *args], cwd=d, capture_output=True, text=True, timeout=60,
-                       env=clean_env(AWT_BY="harness"))
+                       env=clean_env(AWT_BY="harness", AWT_STORE=d + ".store"))
     return p.returncode, p.stdout + p.stderr
 
 
