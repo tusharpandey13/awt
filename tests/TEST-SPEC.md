@@ -16,6 +16,8 @@ Companion to `SPEC.md`. It covers the node tree, the Paseo plugin and `migrate-p
 |---|---|---|
 | `tests/test_tree.py` | Node tree: init, resolution, reads, status, doctor | always |
 | `tests/test_recall.py` | Active recall: `find --like`, related lines on `decide`/`ask`, `list --since`, the template and prompt pointers | always |
+| `tests/test_passive_recall.py` | Passive recall: the first-prompt hook, the framed brief's section, the `recall` row, scope, gate, budget, shadow, the Claude hook entries, the pi extension | always |
+| `paseo-plugin/test/recall.test.ts` | Passive recall in the plugin: env forwarding, receipt `recalled` and `shadow` | always |
 | `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots | always |
 | `tests/test_detect.py` | Detected effects: rules, keys, resend `ask`, declared matching, secrets, silence | always |
 | `tests/test_hooks.py` | Compaction context: settings merge, `AWT_DIR` gate, framing line, doctor, the opencode plugin and pi extension loaded by node against fake hosts | always (the node part needs Node) |
@@ -173,9 +175,33 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R2f A simulated exceeded budget (`AWT_RELATED_MS`): the write stands, the stop line prints.
 - T-R2g The 200-character cut of a `related:` line includes its prefix.
 - T-R3a `awt help agents` has the `find --like` line; the task `AGENTS.md` template no longer does (it shrank to about 250 chars; `decide` and `ask` print related records anyway).
-- T-R3b The plugin block is at most 260 characters and names `BRIEF.md` and `awt_resume`; `find --like` moved to `help agents`.
+- T-R3b The plugin block is at most 360 characters and names `BRIEF.md`, `awt_resume` and `awt_find`. T-R3c The brief footer is `./awt find --like "topic" | ./awt list`; `help agents` states search-first once.
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
+
+## Passive recall (`test_passive_recall.py`, `paseo-plugin/test/recall.test.ts`, chaos `recall-*`)
+
+Spec: `docs/spec-passive-recall.md`; normative text in `SPEC.md` (Passive recall). Fixtures: fictional `parsekit` and `ledgerline` workspaces, made-up ids, filler notes so the idf gate has a corpus (the gate counts `N` over all candidates). Rules PR1 to PR24 of the spec; each has a test, written first.
+
+Core (`test_passive_recall.py`):
+- T-PR1 Only `find --like - --hook` and `resume --hook --framed` print recall lines; `decide`, `ask` and plain `find --like` write no `recall` row.
+- T-PR2 No `AWT_DIR`, a task node, `AWT_RECALL=0` and `off`, a subagent: nothing printed, no row; the parent still gets recall.
+- T-PR3 The first call prints and writes a `prompt` row; the second prints nothing and writes nothing, also after `every` rows; a framed brief writes a `compact` row and the next prompt prints nothing.
+- T-PR4 A read-only log: nothing printed, exit 0.
+- T-PR5 JSON `prompt`, raw text and malformed JSON; words after char 2,000 never match; two words give `result: none`; an `[awt]` prompt writes no row; B's query uses the `auto` state.
+- T-PR6 Refs, states and superseded decisions never appear. T-PR7 Scope: project (project node, the `unassigned` project is not one, and the legacy fallback through `paseo` refs to `paseo:project/*` only), `workspace`, `tree`, an unknown value is `project`. T-PR8 Own node, subagent, an id in the brief, `no-recall` (and its undoing, and `find --like` ignoring it), identical text once.
+- T-PR9 Two shared words, and three common words, are not shown; three rare words are; no hit prints nothing. T-PR10 12 qualifying records give 5 lines, the `rule` first, at most 1,200 chars. T-PR11 Frame and line shape, a forged heading, frame and control characters, B's heading after the brief and no second frame.
+- T-PR12 `AWT_RECALL_MS=0`: `stopped`, used up. T-PR13 `AWT_TEST_RECALL_FAULT`: nothing, exit 0, `error` row; the hook command strings end `2>/dev/null; exit 0 # awt:context`. T-PR14 `AWT_STORE` that is a file is never touched.
+- T-PR15 Row fields, quarantine of a bad `ids`, `BRIEF.md` untouched, hidden from `list`, `find`, `resume`, present in `list --since --json`. T-PR16 Shadow is the default: row `shadow`, nothing printed. T-PR17 Plain `resume` unchanged. T-PR22 `ingest --rebuild` puts the rows in `records`; `l7-recall-use` returns the hand-worked M1 to M3 and M5 counts on `fixtures/recipes-v0` (one shown id used, one not, one shadow id used unaided), and the work-record recipes do not count `recall` rows.
+- T-PR18 `init --hooks claude`: `UserPromptSubmit` entry and `compact|clear` matcher, a foreign `clear` hook untouched, idempotent, `--uninstall` removes only awt's; the fake pi sets `awt_recall` at the first prompt, repeats it byte-identically and drops it at `session_compact`; in shadow it sets nothing. T-PR19 `doctor` writes no row and warns on a missing `UserPromptSubmit`. T-PR23 The installed `SessionStart` command prints the framed brief.
+- T-PR24 Shadow: one `prompt` row then `every` rows, ids equal to `on`'s, no text, nothing written at `AWT_RECALL_MS=0`; `on` writes no later row.
+
+Plugin (`recall.test.ts`, named PRP1 to PRP7 so they do not clash with the pipe tests PP1 to PP9):
+- PRP1 `AWT_RECALL` and `AWT_RECALL_SCOPE` reach the agent env, unset stays unset. PRP2 A receipt has `recalled`, no `recall` in `counts`, `empty` true. PRP3 `AWT_RECEIPT=changes` shows a recall-only receipt. PRP4 Shadow and `every` rows: `would recall ... (shadow)`. PRP5 Old receipts render, new keys strip under the old schema. PRP6 The prompt block says nothing about recall. PRP7 `{id, text}` with text at most 80 chars, never stored; a failing fetch leaves the id.
+
+Chaos (`recall-*`): `recall-2000` (a big tree: a valid block or `stopped`), `recall-corrupt` (corrupt, symlinked and `.new-*` nodes), `recall-readonly`, `recall-forge` (frame, headings, 4 KB lines, control characters), `recall-shadow-volume`, `recall-race`, `recall-old-awt` (v0.3.2 reads a log with `recall` rows), `recall-hook-exit` (a missing awt and an awt that exits 2: the hook command exits 0).
+
+Not run here: D-PR1 to D-PR3 (live Paseo daemon) and E-PR1 to E-PR5 (spend tokens; owner approval per batch), as in the spec.
 
 ## Compaction context (`test_hooks.py`; SPEC, Context after compaction)
 
@@ -287,7 +313,7 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 | B13 | The standalone AGENTS block is short, names `BRIEF.md`, `decide`, `ask`, the subagent line, says what the plugin and the Claude Code hooks record, and asks for a `state` handoff without claiming everything is recorded |
 | B14 to B16 | Tree: every node kind gets a brief at creation; a child write refreshes the parent; a task write refreshes the agents below it |
 | B17 | The tree block names `$AWT_DIR/BRIEF.md` and `$AWT_DIR/out.md` |
-| P2 | The plugin block is at most 260 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `decide`, `ask`; no `state`, no `find --like` |
+| P2 | The plugin block is at most 360 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `awt_find`, `decide`, `ask`; no `state` |
 | P2b | An agent opened through the plugin has `BRIEF.md` in `AWT_DIR` before any tool call, refreshed by an awt write |
 
 ## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
@@ -379,6 +405,7 @@ Tier 1, always. A harness loads `index.server.ts`, feeds it payloads typed by th
 - PJ12 Hostile project names and root paths never escape the tree or reach disk as secrets.
 - P4 `agent.create.after`: agent node under the right task; subagent under its parent's node, the parent read from `parentAgentId` or the label `paseo.parent-agent-id`; unknown parent: under the task with a `note`.
 - P5 `agent.open.before`: `env` has `AWT_DIR` and `AWT_BY` and keeps the existing entries; an `awt_resume` tool is attached; `mcpServers` are untouched. Runs again on `reason: resume` with the same result.
+- P6b `awt_find` takes `{query, limit?}`, runs `find --like` for the calling agent's node, passes `--limit`, and returns one-line error results (bad limit, no node). Per-provider names (`mcp__paseo__awt_find`, `awt_find`) are auto-approved like `awt_resume`; look-alikes are not (P8).
 - P6 `awt_resume` takes no input and returns the brief of the node found for the calling agent's key; an agent id with no node errors. A key on two nodes resolves to nothing (C36).
 - P14 `agent.turn.after` without `AWT_NUDGE`: no message is sent; with no `main` state since the turn started, the last reply is recorded in scope `auto`; never replaces an agent's own handoff; unchanged replies add nothing; `AWT_AUTO_HANDOFF=0` records nothing.
 - P7 (with `AWT_NUDGE=1`) `agent.turn.after`: nudge only for completed turns of non-subagents that have an `AWT_DIR`, with no newer state, at most once per stretch (C34, C35); not for failed or canceled turns.

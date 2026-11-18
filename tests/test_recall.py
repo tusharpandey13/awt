@@ -277,10 +277,21 @@ class Pointers(RecallBase):
     def test_plugin_block_is_short_and_points_at_the_brief(self):  # T-R3b
         src = test_awt.slurp(os.path.join(REPO, "paseo-plugin", "server", "prompt.ts"))
         block = re.search(r"AWT_BLOCK = `(.*?)`;", src, re.S).group(1).replace("\\`", "`")
-        self.assertLessEqual(len(block), 260, len(block))
-        self.assertNotIn("find --like", block)
+        self.assertLessEqual(len(block), 360, len(block))
+        self.assertIn("awt_find", block)
+        self.assertEqual(block.count("find"), 2, "one search-first clause")
         self.assertIn("BRIEF.md", block)
         self.assertIn("awt_resume", block)
+
+    def test_brief_footer_points_at_like_search(self):
+        self.init()
+        out = self.ok("resume").stdout
+        self.assertIn('./awt find --like "topic" | ./awt list', out)
+        self.assertNotIn("find <term>", out)
+
+    def test_agent_rules_state_search_first_once(self):
+        ref = self.ok("help", "agents", root="").stdout
+        self.assertEqual(ref.count("Researching or asking before searching"), 1)
 
     def test_session_start_hook_covers_compaction(self):  # T-R5a
         self.init()
@@ -293,7 +304,7 @@ class Pointers(RecallBase):
 
 
 class Since(RecallBase):
-    KEYS = {"type", "ts", "by", "id", "scope"}
+    KEYS = {"type", "ts", "by", "id", "scope", "ids", "result"}
 
     def since(self, ts, *extra, root):
         return json.loads(self.ok("list", "--since", ts, *extra, "--json", root=root).stdout)

@@ -15,6 +15,9 @@ export interface AwtConfig {
   receipt: "on" | "changes" | "off";
   /** AWT_RELATED of the daemon, passed on to agents as it is (awt validates it). Empty or unset: not passed. */
   related: string | null;
+  /** AWT_RECALL and AWT_RECALL_SCOPE of the daemon, passed on to agents as they are (awt validates them). Empty or unset: not passed. */
+  recall: string | null;
+  recallScope: string | null;
   /** AWT_RECEIPT held a value other than 0, changes, on or empty. It is treated as on; the plugin logs one warning. */
   receiptBad: boolean;
   /** Paseo's `projects.json`, read only for `archivedAt` (the SDK has no project archive hook and `projects.list` carries no `archivedAt`). AWT_PASEO_PROJECTS overrides it; tests point it at a temp file. */
@@ -37,6 +40,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): AwtConfig {
     compactBrief: env.AWT_COMPACT_BRIEF === "1",
     receipt: env.AWT_RECEIPT === "0" || env.AWT_RECEIPT === "off" ? "off" : env.AWT_RECEIPT === "changes" ? "changes" : "on",
     related: env.AWT_RELATED || null,
+    recall: env.AWT_RECALL || null,
+    recallScope: env.AWT_RECALL_SCOPE || null,
     receiptBad: !["", "0", "off", "1", "on", "changes", undefined].includes(env.AWT_RECEIPT),
     projectsFile: env.AWT_PASEO_PROJECTS || join(env.PASEO_HOME || join(env.HOME || homedir(), ".paseo"), "projects", "projects.json"),
     store: env.AWT_STORE || join(data, "awt-store"),

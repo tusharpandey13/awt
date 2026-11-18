@@ -3,7 +3,7 @@
 Search records and files; --like ranks related records from the whole tree.
 
 ```
-awt find [--up] [--down] [--tree] [--like LIKE] [--limit LIMIT] [--sessions] TERM
+awt find [--up] [--down] [--tree] [--like LIKE] [--limit LIMIT] [--sessions] [--hook] TERM
 ```
 
 ## Arguments
@@ -19,9 +19,10 @@ awt find [--up] [--down] [--tree] [--like LIKE] [--limit LIMIT] [--sessions] TER
 | `--up` | search ancestors |
 | `--down` | search descendants |
 | `--tree` | search the whole tree under the nearest root |
-| `--like LIKE` | rank related decisions, answers and notes for this sentence |
+| `--like LIKE` | rank related decisions, answers and notes from every workspace in the tree for this sentence |
 | `--limit LIMIT` | most results to print |
 | `--sessions` | also search ingested session text (needs store.db) |
+| `--hook` | with --like -: the first-prompt recall for a hook (reads the prompt on stdin; prints nothing and exits 0 unless an agent node gets related records) |
 
 Global flags `--dir`, `--by` and `--model` work with every verb. Exit codes: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id.
 

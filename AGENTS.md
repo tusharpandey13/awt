@@ -140,6 +140,8 @@ Settings, read from the daemon's environment:
 | `AWT_TIMEOUT_MS` | `5000` | How long one `awt` call may take |
 | `AWT_AUTO_HANDOFF` | on | `0` stops the plugin keeping an agent's last reply as an `auto` state when it ended a turn without a handoff |
 | `AWT_RELATED` | `3` | Related records `decide` and `ask` print after writing (0 to 20; 0 is off). Forwarded to every agent's environment |
+| `AWT_RECALL` | `shadow` | Passive recall at an agent's first prompt and after a compaction or `/clear`: `on` injects up to 5 related records, `shadow` (default) only logs which it would have injected, `0` or `off` disables it. Forwarded to every agent's environment |
+| `AWT_RECALL_SCOPE` | `project` | Where passive recall looks: `project`, `workspace` or `tree`. Forwarded to every agent's environment |
 | `AWT_RECEIPT` | on | `0` turns off the per-turn receipt line in the chat; `changes` shows it only when something was stored |
 | `AWT_NUDGE` | off | `1` sends a follow-up prompt when an agent ends a turn without a handoff. Off by default: it adds a visible message and a model turn to the chat |
 
@@ -152,13 +154,13 @@ More: [paseo-plugin/OVERVIEW.md](paseo-plugin/OVERVIEW.md).
 After a compaction an agent loses the brief. This puts it back without a chat message or an extra turn. On the machine that runs the agents, once per provider (the person runs this, not an agent: it edits the provider's own config, so ask first and never run it yourself):
 
 ```sh
-awt init --hooks claude      # merges a SessionStart "compact" hook into ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json (backup kept)
+awt init --hooks claude      # merges a SessionStart "compact|clear" hook and a UserPromptSubmit hook (first-prompt recall) into ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json (backup kept)
 awt init --hooks opencode    # writes plugins/awt-context.js in ${OPENCODE_CONFIG_DIR:-~/.config/opencode}
 awt init --hooks codex      # merges the same hook into ${CODEX_HOME:-~/.codex}/hooks.json (Codex asks you to trust it once: /hooks)
 awt init --hooks pi          # writes extensions/awt-context.ts in ${PI_CODING_AGENT_DIR:-~/.pi/agent}
 ```
 
-`--hooks all` does the three; `--uninstall` removes them. Each does nothing unless `AWT_DIR` is set, which the Paseo plugin does for its agents. `awt doctor` warns when a detected provider lacks it. Contract: [SPEC.md](SPEC.md#context-after-compaction).
+`--hooks all` does the three; `--uninstall` removes them. Each does nothing unless `AWT_DIR` is set, which the Paseo plugin does for its agents. `awt doctor` warns when a detected provider lacks it. Contract: [SPEC.md](SPEC.md#context-after-compaction) and [SPEC.md](SPEC.md#passive-recall).
 
 ## Import Paseo history
 

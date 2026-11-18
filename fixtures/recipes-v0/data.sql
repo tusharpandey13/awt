@@ -149,3 +149,12 @@ DELETE FROM fts_ref;
 INSERT INTO fts_ref(kind, ref) SELECT 'record', rowid FROM records;
 INSERT INTO fts_text(rowid, text) SELECT f.id, CASE r.type WHEN 'decision' THEN json_extract(r.fields, '$.choice') || ' ' || json_extract(r.fields, '$.why') ELSE json_extract(r.fields, '$.text') END
 FROM fts_ref f JOIN records r ON r.rowid = f.ref;
+
+-- Passive recall rows (l7-recall-use): ag4 was shown d-1 and n-2 and used d-1; ag2's shadow id q-1 was never shown and used unaided; one every row with no ids.
+INSERT INTO records(record_id, node_id, type, ts, by, fields, session_id, origin, model, turn_id) VALUES
+ ('ag4#r1', 'ag4', 'recall', '2026-11-12T08:00:01Z', 'a4', '{"type":"recall","trigger":"prompt","result":"hits","ids":["d-1","n-2"],"chars":240}', NULL, 'agent', 'claude-b', NULL),
+ ('ag2#r1', 'ag2', 'recall', '2026-11-04T09:00:01Z', 'a2', '{"type":"recall","trigger":"prompt","result":"shadow","ids":["q-1"],"chars":0}', NULL, 'agent', 'pi-a', NULL),
+ ('ag2#r2', 'ag2', 'recall', '2026-11-04T09:15:00Z', 'a2', '{"type":"recall","trigger":"every","result":"shadow","ids":[],"chars":0}', NULL, 'agent', 'pi-a', NULL);
+INSERT INTO messages(message_id, turn_id, session_id, seq, role, ts, text, parent_id, response_finish_reasons, response_model) VALUES
+ ('m21', 's4:0', 's4', 3, 'assistant', '2026-11-12T08:00:20Z', 'keeping to d-1', 'm14', '["end_turn"]', 'claude-b'),
+ ('m22', 's2:0', 's2', 5, 'assistant', '2026-11-04T09:00:03Z', 'q-1 was asked before', 'm8', '["stop"]', 'pi-a');
