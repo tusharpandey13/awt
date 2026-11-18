@@ -9,7 +9,7 @@ try:
 except ImportError:  # no _sqlite3: every verb but find --like, ingest and doctor's store line still works
     sqlite3 = None
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 HOST = socket.gethostname()
 ROOT = None
 BY = "agent"

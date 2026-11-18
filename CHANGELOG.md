@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (18-Nov-2026)
 
 ### Added
 - `awt VERB --help` (and `awt effect plan --help` etc.) lists each flag with a one-line explanation. `awt --help`, the man page `docs/awt.1` and `docs/reference/` (one page per verb) are generated from one table in `awt` (`CLI_HELP`) by `tools/gen_docs.py`; `tests/test_docs.py` fails when they disagree, or when README, AGENTS.md or `docs/concepts.md` name a verb or flag that does not exist.
