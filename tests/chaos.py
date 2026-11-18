@@ -2308,6 +2308,218 @@ def a_recall_hook_exit(c):
             c.fail("hook with %s awt exited %d" % (label, r.rc))
 
 
+# ---------------------------------------------------------------- child nodes
+def child_parent(c):
+    top = tree_root(c)
+    w = tnode(c, top, "workspace", "w")
+    return top, tnode(c, w, "task", "t")
+
+
+def th(c, node, payload, allow=(0,)):
+    """One hook event on stdin, the way a Claude Code hook sends it."""
+    argv = [sys.executable, "-I", AWT, "--dir", node, "ingest", "--event", "--hook"]
+    return c.raw(argv, cwd=c.base, stdin=payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8", "surrogatepass"), args=argv[-3:], allow=allow)
+
+
+def launch_payload(key, tid, prompt=None):
+    return dict(hook_event_name="PreToolUse", tool_name="Agent", tool_use_id=tid, cwd="/w", tool_input=dict(prompt=prompt if prompt is not None else "go\nRUN_KEY: %s\nend\n" % key))
+
+
+def run_rows(node, typ):
+    rs = []
+    try:
+        with open(os.path.join(node, ".awt", "events.jsonl"), "rb") as g:
+            lines = g.read().split(b"\n")
+    except OSError:
+        return []
+    for x in lines:
+        try:
+            rs.append(json.loads(x))
+        except ValueError:
+            pass  # a torn or garbled line
+    return [r for r in rs if isinstance(r, dict) and r.get("type") == typ]
+
+
+@attack("child-race-key")
+def a_child_race_key(c):
+    """CH-1: many processes make the same child node: one node, one line, no leftover."""
+    top, t = child_parent(c)
+    n = 12 if c.quick else 20
+    with cf.ThreadPoolExecutor(n) as ex:
+        rs = list(ex.map(lambda i: tw(c, t, "init", "--child", "k"), range(n)))
+    if any(r.rc != 0 for r in rs):
+        c.fail("a creator failed: " + next(r.err for r in rs if r.rc != 0)[:120])
+    if len({r.out for r in rs}) != 1:
+        c.fail("creators print different lines: %s" % sorted({r.out for r in rs})[:3])
+    left = [x for x in os.listdir(os.path.join(t, "agents")) if x != "k"]
+    if left:
+        c.fail("leftovers beside the child: %s" % left)
+    if len(run_rows(os.path.join(t, "agents", "k"), "node")) != 1:
+        c.fail("the child node has more than one node row")
+    tree_audit(c, top)
+
+
+@attack("child-race-hooks")
+def a_child_race_hooks(c):
+    """CH-2: different keys in parallel, plus hook events for the same keys: one node and one link each."""
+    top, t = child_parent(c)
+    n = 12 if c.quick else 20
+
+    def one(i):
+        k = "k%d" % (i % n)
+        if i < n:
+            return tw(c, t, "init", "--child", k)
+        return th(c, t, launch_payload(k, "toolu_%d" % (i % n)))
+    with cf.ThreadPoolExecutor(8) as ex:
+        list(ex.map(one, range(2 * n)))
+    with cf.ThreadPoolExecutor(8) as ex:
+        list(ex.map(lambda i: th(c, t, launch_payload("k%d" % i, "toolu_%d" % i)), range(n)))
+    nodes = tree_nodes(t)[0]
+    if len(nodes) != n:
+        c.fail("expected %d child nodes, found %d" % (n, len(nodes)))
+    for p in nodes:
+        refs = run_rows(p, "ref")
+        if len(refs) != 1:
+            c.fail("%s has %d link rows, wanted 1" % (os.path.basename(p), len(refs)))
+    tree_audit(c, top)
+
+
+@attack("child-kill-init")
+def a_child_kill_init(c):
+    """CH-3: SIGKILL at random points of a creation: a leftover .new-* or a whole node, never half a node; a rerun works and doctor names the leftover."""
+    top, t = child_parent(c)
+    for i in range(40 if c.quick else 150):
+        cmd = [sys.executable, "-I", AWT, "--dir", t, "init", "--child", "k%d" % (i % 8)]
+        c.log(" ".join(cmd))
+        p = subprocess.Popen(cmd, env=c.env(), cwd=c.base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(c.rng.random() * 0.05)
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.wait()
+    tree_audit(c, top)
+    nodes, left = tree_nodes(t)
+    for p in nodes:
+        r = first_row(p)
+        if not r or r.get("run") != os.path.basename(p):
+            c.fail("a visible child node is not whole: " + p)
+    if left and "leftover" not in tw(c, t, "doctor").out:
+        c.fail("doctor does not name the leftover .new-* directory")
+    for i in range(8):
+        r = tw(c, t, "init", "--child", "k%d" % i)
+        if r.rc != 0:
+            c.fail("a rerun after kills failed: " + r.err[:120])
+    if len(tree_nodes(t)[0]) != 8:
+        c.fail("expected 8 child nodes after the reruns")
+
+
+@attack("child-garbage-hooks")
+def a_child_garbage_hooks(c):
+    """CH-4: hostile launch payloads: exit 0, no output, no half-written node."""
+    top, t = child_parent(c)
+    secret = SEC["aws"]
+    payloads = [b"", b"not json", b"[1,2,3]", b"null", b'{"hook_event_name":"PreToolUse"}', json.dumps(launch_payload("k", "t")).encode()[:40],
+                json.dumps(dict(hook_event_name="PreToolUse", tool_name="Agent", tool_input="x", tool_use_id=5)).encode(),
+                json.dumps(dict(hook_event_name="PreToolUse", tool_name="Agent", tool_input=dict(prompt=["RUN_KEY: a"]), tool_use_id=None)).encode(),
+                json.dumps(dict(phase="before", tool="subagent", input=dict(tasks="RUN_KEY: a", task=7), id=[1])).encode(),
+                json.dumps(dict(phase="before", tool="subagent", input=dict(tasks=[1, None, dict(task=3)] * 400), id="c")).encode(),
+                launch_payload("k", "t", "RUN_KEY: k\n" + "A" * (9 << 20)),
+                launch_payload("k", "t", "RUN_KEY: k\ud800\n"),
+                launch_payload("k", "t" * 5000),
+                launch_payload("sk", "toolu_" + secret),
+                launch_payload("k", "t", "RUN_KEY: k " + secret + "\n"),
+                launch_payload("k", "t", "x\n" * 5 + "RUN_KEY: late\n")]
+    for pl in payloads:
+        r = th(c, t, pl)
+        if r.out or r.err:
+            c.fail("a hook is not silent: out=%r err=%r" % (r.out[:80], r.err[:80]))
+    tree_audit(c, top)
+    nodes, left = tree_nodes(t)
+    if left:
+        c.fail("a garbage payload left a .new-* directory")
+    for p in nodes:
+        if os.path.basename(p) not in ("k", "sk"):
+            c.fail("a garbage payload made an unexpected node: " + p)
+        for r in run_rows(p, "ref"):
+            if any(rx.search(json.dumps(r)) for rx in SECRE):
+                c.fail("a secret-shaped value reached a ref row")
+    d = tw(c, top, "doctor", allow=(0, 1))
+    if "quarantined" in d.out and re.search(r"[1-9]\d* quarantined", d.out):
+        c.fail("garbage payloads produced quarantined rows")
+
+
+@attack("child-agents-symlink")
+def a_child_agents_symlink(c):
+    """CH-5: `agents/` swapped for a symlink to another node: refused, nothing written through it."""
+    top, t = child_parent(c)
+    other = tnode(c, os.path.dirname(os.path.dirname(t)), "task", "other")
+    a = os.path.join(t, "agents")
+    os.rename(a, os.path.join(t, "agents-gone")) if os.path.isdir(a) else None
+    os.symlink(os.path.join(other, "agents"), a)
+    before = sorted(os.listdir(os.path.join(other, "agents"))) if os.path.isdir(os.path.join(other, "agents")) else []
+    r = tw(c, t, "init", "--child", "k", allow=(1,))
+    h = th(c, t, launch_payload("k", "toolu_1"))
+    if r.rc != 1 or "fix:" not in r.err:
+        c.fail("init --child through a symlinked agents/ was not refused")
+    after = sorted(os.listdir(os.path.join(other, "agents"))) if os.path.isdir(os.path.join(other, "agents")) else []
+    if before != after or h.out:
+        c.fail("something was written through the symlink: %s -> %s" % (before, after))
+
+
+@attack("child-torn-log")
+def a_child_torn_log(c):
+    """CH-6: a torn last line in the child's log, then a launch hook: the link still lands and doctor names the quarantined row."""
+    top, t = child_parent(c)
+    tw(c, t, "init", "--child", "k")
+    node = os.path.join(t, "agents", "k")
+    with open(os.path.join(node, ".awt", "events.jsonl"), "ab") as g:
+        g.write(b'{"v":1,"ts":"2026-01-01T00:00:00.000000Z","type":"note","id":"n-aaaaaaaa","te')
+    th(c, t, launch_payload("k", "toolu_T"))
+    if [r["target"] for r in run_rows(node, "ref")] != ["tool-call:toolu_T"]:
+        c.fail("the link did not land after a torn tail")
+    if not re.search(r"[1-9]\d* quarantined", tw(c, node, "doctor", allow=(0, 1)).out):
+        c.fail("doctor does not name the quarantined torn row")
+
+
+@attack("child-done-locked")
+def a_child_done_locked(c):
+    """CH-7: the parent's log held by another writer for 3 s while `status done` finishes its children: it succeeds, each child has one status row."""
+    import fcntl
+    top, t = child_parent(c)
+    for i in range(6):
+        tw(c, t, "init", "--child", "k%d" % i)
+    fd = os.open(os.path.join(t, ".awt", "events.jsonl"), os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    threading.Timer(3, lambda: os.close(fd)).start()
+    r = tw(c, t, "status", "done", allow=(0, 1))
+    if r.rc != 0:
+        c.fail("status done failed under a held lock: " + r.err[:120])
+    for i in range(6):
+        rows = run_rows(os.path.join(t, "agents", "k%d" % i), "status")
+        if [x["status"] for x in rows] != ["done"]:
+            c.fail("child k%d has status rows %s" % (i, [x["status"] for x in rows]))
+    tree_audit(c, top)
+
+
+@attack("child-walk-limit")
+def a_child_walk_limit(c):
+    """CH-8: more child nodes than the walk limit: find --down and doctor say so in the standard words."""
+    top, t = child_parent(c)
+    n = 2005
+    for i in range(n):
+        k = "k%04d" % i
+        d = os.path.join(t, "agents", k)
+        os.makedirs(os.path.join(d, ".awt"))
+        row = dict(v=1, ts="2026-01-01T00:00:00.000000Z", type="node", host="h", by="x", kind="agent", name=k, run=k, model="m")
+        with open(os.path.join(d, ".awt", "events.jsonl"), "w") as g:
+            g.write(json.dumps(row) + "\n")
+    for verb in (["find", "--down", "zzz"], ["doctor"]):
+        r = c.raw([sys.executable, "-I", AWT, "--dir", t] + verb, cwd=c.base, args=verb, allow=(0, 1))
+        if "tree exceeds depth 8 / 2000 nodes" not in r.out:
+            c.fail("%s does not report the walk limit: %s" % (verb[0], r.out[-120:]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")

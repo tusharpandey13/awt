@@ -3,7 +3,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
 import argparse, contextlib, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, stat, subprocess, tempfile, time, urllib.parse
-import itertools, math
+import itertools, io, math
 try:
     import sqlite3
 except ImportError:  # no _sqlite3: every verb but find --like, ingest and doctor's store line still works
@@ -13,6 +13,7 @@ VERSION = "0.3.2"
 HOST = socket.gethostname()
 ROOT = None
 BY = "agent"
+BY_SET = False  # --by was given (or a hook named itself): then emit stamps BY, not the child node's own sub:RUN_KEY
 MODEL = "unknown:unset"
 A = "./awt"
 ROWMAX = 4096
@@ -30,7 +31,7 @@ CAPS = {
     "answer.text": 400, "ref.target": 1000, "ref.title": 120, "ref.why": 200, "ref.kind": 40, "ref.branch": 200,
     "capture.from": 40, "capture.title": 120, "capture.ref": 1000, "doc.why": 200, "effect.target": 200,
     "effect.why": 200, "effect.reason": 200, "effect.ref": 1000, "effect.how": 400, "effect.run": 1000, "effect.snapshot": 1000,
-    "effect.verify": 1000, "node.name": 60, "node.key": 200, "ref.key": 200,
+    "effect.verify": 1000, "node.name": 60, "node.key": 200, "node.run": 40, "ref.key": 200,
 }
 REQ = {
     "task": ["goal", "done_means"], "status": ["status"], "state": ["now", "next"], "note": ["id", "text"],
@@ -90,10 +91,10 @@ Root of an [awt](https://github.com/tusharpandey13/awt) node tree: `projects/<na
 '''
 # The tool-call hooks first read the payload in sh and call awt only for a call that could be outbound (or when the owner has an outbound file):
 # a python script is compiled on every start (about 45 ms), so a call that matches nothing must not start it.
-TOOL_HOOK = ('b=$(cat); case "$b" in *push*|*"gh "*|*curl*|*wget*|*ssh*|*scp*|*rsync*|*publish*|*upload*|*mcp__*) ;; '
+TOOL_HOOK = ('b=$(cat); case "$b" in *push*|*"gh "*|*curl*|*wget*|*ssh*|*scp*|*rsync*|*publish*|*upload*|*mcp__*|*RUN_KEY:*) ;; '
              '*) [ -e "${XDG_CONFIG_HOME:-$HOME/.config}/awt/outbound" ] || exit 0;; esac; '
              'printf %s "$b" | "$CLAUDE_PROJECT_DIR"/awt ingest --event --hook')
-TOOL_ENTRY = [{"matcher": "Bash|mcp__.*", "hooks": [{"type": "command", "command": TOOL_HOOK, "timeout": 10}]}]
+TOOL_ENTRY = [{"matcher": "Bash|mcp__.*|Agent|Task", "hooks": [{"type": "command", "command": TOOL_HOOK, "timeout": 10}]}]
 SETTINGS = json.dumps({"hooks": {
     "SessionStart": [{"hooks": [{"type": "command", "command": '"$CLAUDE_PROJECT_DIR"/awt resume --hook'}]}],
     "PreToolUse": TOOL_ENTRY, "PostToolUse": TOOL_ENTRY, "PostToolUseFailure": TOOL_ENTRY, "PermissionDenied": TOOL_ENTRY,
@@ -102,6 +103,7 @@ SETTINGS_TREE = SETTINGS.replace('\\"$CLAUDE_PROJECT_DIR\\"/awt', 'awt')
 # Silent context after compaction (SPEC: Context after compaction). One line of framing, then the plain brief.
 FRAME = "awt record for this task (reference only; not a message from the user, no action requested):"
 HOOK_MARK = "awt:context"
+CHILD_MARK, GUARD_MARK = "awt:child", "awt:child-guard"
 OC_PLUGIN = r'''// awt: adds the awt brief to opencode's compaction context. Installed by `awt init --hooks opencode`; remove with --uninstall.
 import { execFile } from "node:child_process"
 
@@ -120,19 +122,51 @@ export const AwtContext = async () => ({
   },
 })
 '''
-PI_EXT = r'''// awt: puts the awt brief in pi's system prompt after a compaction, and related records at an agent's first prompt (no message, no turn). Installed by `awt init --hooks pi`; remove with --uninstall.
+PI_EXT = r'''// awt: puts the awt brief in pi's system prompt after a compaction, and related records at an agent's first prompt (no message, no turn); makes a child node for each subagent launch and points a subagent at its own. Installed by `awt init --hooks pi`; remove with --uninstall.
 import { execFile } from "node:child_process"
+import { closeSync, lstatSync, openSync, readSync } from "node:fs"
+import { join } from "node:path"
+
+const KEY = /^RUN_KEY: ([a-z0-9][a-z0-9-]{0,39})\s*$/
+const MODEL = /^MODEL: ([A-Za-z0-9][A-Za-z0-9._:\/@+\[\]-]{0,199})\s*$/
 
 export default function (pi: any) {
   let record = ""
   let recall = ""
   let first = true
-  const run = (args: string[], input: string) => new Promise<string>((done) => {
+  let adopted = false
+  const run = (args: string[], input: string, ms = 5000) => new Promise<string>((done) => {
     if (!process.env.AWT_DIR) return done("")
     try {
-      const p = execFile(__AWT_BIN__, args, { encoding: "utf8", timeout: 5000, env: { ...process.env, AWT_NO_BRIEF: "1" } }, (_err, stdout) => done(String(stdout || "")))
+      const p = execFile(__AWT_BIN__, args, { encoding: "utf8", timeout: ms, env: { ...process.env, AWT_NO_BRIEF: "1" } }, (_err, stdout) => done(String(stdout || "")))
       p.stdin?.end(input)
     } catch { done("") }
+  })
+  // A subagent: the first prompt names its child node (RUN_KEY line) and, optionally, its model (MODEL line); the process then writes there.
+  const adopt = (prompt: unknown) => {
+    if (adopted || !process.env.PI_SUBAGENT_CHILD || !process.env.AWT_DIR) return
+    adopted = true
+    const lines = String(prompt ?? "").slice(0, 8192).split("\n").slice(0, 5).map((l) => l.replace(/\r$/, ""))
+    const key = lines.map((l) => KEY.exec(l)?.[1]).find(Boolean)
+    if (!key) return
+    const dir = join(process.env.AWT_DIR, "agents", key)
+    try {
+      if (lstatSync(join(process.env.AWT_DIR, "agents")).isSymbolicLink() || lstatSync(dir).isSymbolicLink()) return
+      const fd = openSync(join(dir, ".awt", "events.jsonl"), "r")
+      const buf = Buffer.alloc(4096)
+      const n = readSync(fd, buf, 0, 4096, 0)
+      closeSync(fd)
+      const row = JSON.parse(buf.toString("utf8", 0, n).split("\n", 1)[0])
+      if (row.type !== "node" || row.run !== key) return
+    } catch { return }
+    process.env.AWT_DIR = dir
+    process.env.AWT_BY = "sub:" + key
+    const model = lines.map((l) => MODEL.exec(l)?.[1]).find(Boolean)
+    if (model) process.env.AWT_MODEL = model
+  }
+  pi.on("tool_call", async (event: any) => {
+    if (event?.toolName !== "subagent" || !process.env.AWT_DIR || process.env.PI_SUBAGENT_CHILD) return
+    await run(["ingest", "--event", "--hook"], JSON.stringify({ phase: "before", tool: "subagent", input: event.input, id: event.toolCallId, cwd: process.cwd() }), 3000)
   })
   const load = async () => {
     const t = await run(["resume", "--hook", "--framed"], "")
@@ -149,6 +183,7 @@ export default function (pi: any) {
   })
   pi.on("session_compact", async () => { recall = ""; record = await load() })
   pi.on("before_agent_start", async (event: any) => {
+    adopt(event?.prompt)
     const sections = event?.systemPromptOptions?.sections
     if (first) {
       first = false
@@ -265,10 +300,12 @@ Worker, with a brief:
 - Use `note`, `decide`, `ref`, `capture`, `ask`: parallel writes are safe.
 - Do not run `state` or `status`. Do not write a handoff.
 - Use `effect` only if the brief says so, and send only when it says so.
+- A brief with an `awt-node:` line names your own node: pass `--dir <that path>` on every call of awt, and write your result to `<that path>/out.md`. Without `--dir`, your notes land in the parent's node under the parent's name.
 
 Orchestrator:
 - Owns `state` and `status`. Run `./awt state` once after collecting worker output, with `--next` naming the next step.
 - Links worker files from `state` text by path (`docs/<brief>.out.md`).
+- A worker you launch with your own tool (`Agent`, `Task`, `subagent`) shares your `AWT_DIR` and `AWT_BY`. Give it a node: `./awt init --child RUN_KEY` prints `AWT_DIR=... AWT_BY=sub:RUN_KEY` (RUN_KEY: lowercase letters, digits, `-`). Put `RUN_KEY: <key>` in the first 5 lines of the brief; where awt's hooks are installed the node is then made for you, and the brief adds `awt-node: $AWT_DIR/agents/<key>`.
 
 ## Big tasks: relay
 
@@ -291,6 +328,7 @@ CLI_HELP = {
         "--goal": "what this task is for (250 characters)", "--done": "what finished looks like (250 characters)",
         "--kind": "make a node of this kind under the nearest enclosing node (see SPEC.md, Node tree)",
         "--name": "directory name of the new node", "--key": "stable key of the new node, such as paseo:agent/ID",
+        "--child": "make (or find) the child node agents/RUN_KEY for a subagent you launch, and print its AWT_DIR and AWT_BY (lowercase letters, digits, -; at most 40)",
         "--hooks": "person only, ask first: install the context hooks (after compaction and /clear, and at the first prompt on claude and pi) for claude, codex, opencode, pi or all (edits that provider's own config)",
         "--uninstall": "with --hooks: remove the hook again"}),
     "resume": ("Print the brief: goal, state, open questions and effects, what changed since the last handoff.", {
@@ -315,7 +353,7 @@ CLI_HELP = {
     "ask": ("Record a question for a person.", {"text": "the question", "--related": "related records to print after writing (0 turns it off)"}),
     "answer": ("Answer a question.", {"id": "question id, such as q-1a2b3c4d", "text": "the answer"}),
     "ref": ("Record a link instead of copying its content.", {
-        "target": "URL or path", "--title": "short title (required)", "--why": "why it matters", "--kind": "override the guessed kind",
+        "target": "URL or path; tool-call:ID links a child node to the call that launched it", "--title": "short title (required)", "--why": "why it matters", "--kind": "override the guessed kind",
         "--no-access": "mark a link the agent cannot open, so it asks a person to paste it"}),
     "capture": ("Save pasted text that cannot be linked into context/.", {
         "file": "file to read; stdin when absent or -", "--from": "where it came from, such as slack (required)",
@@ -461,7 +499,7 @@ def is_node_dir(path):
 
 def node_info(path):
     """kind, name and key of the node at path, from its first row. No node row reads as a legacy task."""
-    info = dict(kind="task", name=os.path.basename(path), key=None, legacy=True)
+    info = dict(kind="task", name=os.path.basename(path), key=None, run=None, legacy=True)
     try:
         with open(os.path.join(path, ".awt", "events.jsonl"), "rb") as g:
             for ln in g:
@@ -472,7 +510,7 @@ def node_info(path):
                 except (ValueError, RecursionError):
                     return info
                 if isinstance(r, dict) and r.get("type") == "node" and valid(r):
-                    info.update(kind=r["kind"], name=r["name"], key=r.get("key"), legacy=False)
+                    info.update(kind=r["kind"], name=r["name"], key=r.get("key"), run=r.get("run"), legacy=False)
                 return info
     except OSError:
         pass
@@ -558,7 +596,7 @@ def summarize(path, base, depth=None):
         out_ts, out_bytes = datetime.datetime.fromtimestamp(o.st_mtime, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), o.st_size
     except OSError:
         out_ts = out_bytes = None
-    return dict(path=os.path.relpath(path, base), depth=depth, kind=info["kind"], name=info["name"], key=info["key"], status=D["status"],
+    return dict(path=os.path.relpath(path, base), depth=depth, kind=info["kind"], name=info["name"], key=info["key"], run=info["run"], status=D["status"],
                 goal=(D["task"] or {}).get("goal", ""), now=st["now"] if st else None, state_ts=st["ts"] if st else None,
                 out_ts=out_ts, out_bytes=out_bytes, open_questions=len(D["open_q"]), attention_effects=len(attention(D)))
 
@@ -587,10 +625,17 @@ def check(typ, f):
                 die("%s.%s matches secret pattern %s" % (typ, k, n), "remove the secret; reference where it lives instead")
 
 
+def writer():
+    """Who a row is stamped as. In a child node, without --by: sub:RUN_KEY, whatever AWT_BY says (it was set for the parent: #27)."""
+    run = None if BY_SET else node_info(ROOT)["run"]
+    return "sub:" + run if run else BY
+
+
 def emit(typ, **f):
     f = {k: v for k, v in f.items() if v is not None}
-    check(typ, dict(f, by=BY))
-    row = dict(v=1, ts=now(), type=typ, host=HOST, by=BY, model=MODEL)
+    by = writer()
+    check(typ, dict(f, by=by))
+    row = dict(v=1, ts=now(), type=typ, host=HOST, by=by, model=MODEL)
     if os.environ.get("AWT_SESSION", "").strip():
         row["session"] = os.environ["AWT_SESSION"].strip()
     row.update(f)
@@ -1200,15 +1245,16 @@ def ensure_gitignore(existing_only=False):
     return bool(miss)
 
 
-def build_node(path, kind, name, key, goal, done):
+def build_node(path, kind, name, key, goal, done, run=None):
     """Write a complete node at path. Rows go through emit(), so the secret scan and caps apply."""
-    global ROOT
-    old, ROOT = ROOT, path
+    global ROOT, BY_SET
+    old, ROOT, by_set = ROOT, path, BY_SET
+    BY_SET = True  # the creator signs these rows, even in a child node
     try:
         for d in NODE_DIRS[kind] + (".awt/claims",):
             os.makedirs(P(d), exist_ok=True)
         os.close(os.open(P(".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644))
-        emit("node", kind=kind, name=name, key=key)
+        emit("node", kind=kind, name=name, key=key, run=run)
         if goal:
             emit("task", goal=goal, done_means=done)
         ensure_gitignore()
@@ -1217,7 +1263,7 @@ def build_node(path, kind, name, key, goal, done):
             os.makedirs(P(".claude"), exist_ok=True)
             create(P(".claude", "settings.json"), SETTINGS_TREE)
     finally:
-        ROOT = old
+        ROOT, BY_SET = old, by_set
 
 
 def tree_top(node):
@@ -1315,6 +1361,82 @@ def init_child(a):
             os.close(lockfd)
 
 
+RUN_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+RUN_LINE = re.compile(r"RUN_KEY: ([a-z0-9][a-z0-9-]{0,39})\s*")
+RUN_FIX = "use lowercase letters, digits and -"
+
+
+def child_state(final, run):
+    """None when final is free (absent or an empty directory), "same" when it already is the child node for run, else exit 1."""
+    if os.path.islink(final) or (os.path.lexists(final) and not os.path.isdir(final)):
+        die("%s is not a free child slot" % rel(final), "pick another RUN_KEY")
+    if not os.path.lexists(final):
+        return None
+    if is_node_dir(final):
+        i = node_info(final)
+        if i["run"] == run and i["kind"] == "agent":
+            return "same"
+        die("%s already exists and is not the child node for %s" % (rel(final), run), "pick another RUN_KEY")
+    if os.listdir(final):
+        die("%s exists and is not empty" % rel(final), "pick another RUN_KEY")
+    return None
+
+
+def make_child(run, goal=None, done=None):
+    """The child node agents/RUN under ROOT (C1-C4): (path, created). Idempotent without a lock: the loser of the rename re-reads the target."""
+    if not RUN_KEY.fullmatch(run):
+        die("RUN_KEY %r is not valid" % run[:60], RUN_FIX, 2)
+    if bool(goal) != bool(done):
+        die("--goal and --done go together", "give both", 2)
+    pk = node_info(ROOT)["kind"]
+    if "agent" not in LEGAL[pk]:
+        die("a %s cannot contain a agent" % pk, "a %s may contain: %s" % (pk, ", ".join(LEGAL[pk])))
+    base = P("agents")
+    if os.path.islink(base):
+        die("agents/ is a symlink", "replace it with a real directory inside " + ROOT)
+    os.makedirs(base, exist_ok=True)
+    final = os.path.join(base, run)
+    if child_state(final, run):
+        return final, False
+    goal, done = goal or run, done or "agent work recorded"
+    check("node", dict(kind="agent", name=run, run=run, by=BY))
+    check("task", dict(goal=goal, done_means=done, by=BY))
+    tmp = os.path.join(base, ".new-" + os.urandom(4).hex())
+    os.mkdir(tmp)
+    try:
+        build_node(tmp, "agent", run, None, goal, done, run=run)
+        try:
+            os.rename(tmp, final)
+        except OSError as x:
+            if x.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR) and not os.path.lexists(final):
+                raise
+            if child_state(final, run) is None:
+                raise
+            shutil.rmtree(tmp, ignore_errors=True)
+            return final, False
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    refresh_briefs(final)
+    return final, True
+
+
+def init_run(a):
+    """init --child RUN_KEY: print the env a child needs (C5)."""
+    global ROOT
+    if a.kind or a.name or a.key or a.hooks:
+        die("--child stands alone", "run it without --kind, --name, --key or --hooks", 2)
+    if not RUN_KEY.fullmatch(a.child):
+        die("RUN_KEY %r is not valid" % a.child[:60], RUN_FIX, 2)
+    ROOT = find_root(a.dir)
+    if not ROOT:
+        die("no parent node", "cd into a node, set AWT_DIR or pass --dir", 4)
+    final, created = make_child(a.child, a.goal, a.done)
+    if not created:
+        print("note: child node %s already exists" % rel(final), file=sys.stderr)
+    out("AWT_DIR=%s AWT_BY=%s" % (shlex.quote(os.path.realpath(final)), shlex.quote("sub:" + a.child)))
+
+
 JSON_HOOKS = ("claude", "codex")  # providers whose hook is an entry merged into a JSON file (same SessionStart shape)
 
 
@@ -1344,6 +1466,13 @@ def hook_command(prompt=False):
     """The Claude hook command line. Exit 0 whatever happens: a UserPromptSubmit hook that exits 2 would block the person's prompt (PR13)."""
     me = awt_path()
     return '[ -n "$AWT_DIR" ] || exit 0; %s %s 2>/dev/null; exit 0 # %s' % (shlex.quote(me), "find --like - --hook" if prompt else "resume --hook --framed", HOOK_MARK)
+
+
+def child_command(guard=False):
+    """The machine-level Claude hooks of child nodes: the launch hook (C9) and the Bash guard (C13). Silent unless AWT_DIR is set; the sh prefilter keeps awt from starting for any other call."""
+    want = '*agent_id*) ;; *) exit 0;; esac; case "$b" in *awt*' if guard else "*RUN_KEY:*"
+    return '[ -n "$AWT_DIR" ] || exit 0; b=$(cat); case "$b" in %s) ;; *) exit 0;; esac; printf %%s "$b" | %s ingest --event --hook 2>/dev/null; exit 0 # %s' % (
+        want, shlex.quote(awt_path()), GUARD_MARK if guard else CHILD_MARK)
 
 
 def is_awt_hook(entry):
@@ -1391,13 +1520,17 @@ def merge_claude_settings(path, uninstall, prov="claude"):
 
 
 def merge_claude_settings_locked(path, uninstall, prov="claude"):
-    """Add or remove awt's two Claude hooks: SessionStart `compact|clear` (the framed brief and recall) and UserPromptSubmit (the first-prompt recall). Returns what happened;
+    """Add or remove awt's Claude hooks: SessionStart `compact|clear` (the framed brief and recall), UserPromptSubmit (the first-prompt recall), and the child-node launch and Bash guard hooks. Returns what happened;
     every other key and every other hook stays as it was, even in an entry that also holds awt's hook. A symlinked settings file is followed: the target is written."""
     path = os.path.realpath(path)
-    ours = lambda h: isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))
-    want = {"SessionStart": ("compact|clear" if prov == "claude" else "compact", {"type": "command", "timeout": 10, "command": hook_command()})}
+    mark = lambda m: lambda h: isinstance(h, dict) and str(h.get("command", "")).rstrip().endswith("# " + m)
+    ctx = lambda h: isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))
+    want = [("SessionStart", "compact|clear" if prov == "claude" else "compact", {"type": "command", "timeout": 10, "command": hook_command()}, ctx)]
     if prov == "claude":  # Codex keeps its one compaction hook
-        want["UserPromptSubmit"] = (None, {"type": "command", "timeout": 5, "command": hook_command(True)})
+        want.append(("UserPromptSubmit", None, {"type": "command", "timeout": 5, "command": hook_command(True)}, ctx))
+        for ev in ("PreToolUse", "PostToolUse"):
+            want.append((ev, "Agent|Task", {"type": "command", "timeout": 10, "command": child_command()}, mark(CHILD_MARK)))
+        want.append(("PreToolUse", "Bash", {"type": "command", "timeout": 5, "command": child_command(True)}, mark(GUARD_MARK)))
     for attempt in range(3):
         try:
             with open(path, encoding="utf-8") as g:
@@ -1409,11 +1542,11 @@ def merge_claude_settings_locked(path, uninstall, prov="claude"):
             raw, sig, st = None, None, {}
         except ValueError:
             die("%s is not valid JSON; awt will not touch it" % path, "fix the file by hand, then run this again")
-        if not isinstance(st, dict) or not isinstance(st.get("hooks", {}), dict) or any(not isinstance(st.get("hooks", {}).get(ev, []), list) for ev in want):
-            die("%s has an unexpected hooks shape; awt will not touch it" % path, "make hooks.SessionStart and hooks.UserPromptSubmit lists, then run this again")
+        if not isinstance(st, dict) or not isinstance(st.get("hooks", {}), dict) or any(not isinstance(st.get("hooks", {}).get(ev, []), list) for ev, *_ in want):
+            die("%s has an unexpected hooks shape; awt will not touch it" % path, "make hooks.SessionStart, hooks.UserPromptSubmit, hooks.PreToolUse and hooks.PostToolUse lists, then run this again")
         hooks = st.setdefault("hooks", {})
         same, anyone = True, False
-        for ev, (matcher, hook) in want.items():
+        for ev, matcher, hook, ours in want:
             lst = hooks.setdefault(ev, [])
             mine = [h for e in lst if isinstance(e, dict) for h in (e.get("hooks") or []) if ours(h)]
             anyone = anyone or bool(mine)
@@ -1486,7 +1619,7 @@ def install_file(path, text, uninstall):
 
 def cmd_hooks(a):
     """init --hooks: put the awt record into each provider's context after a compaction, silently. Touches only the provider's own files."""
-    if a.kind or a.goal or a.done or a.name or a.key:
+    if a.kind or a.goal or a.done or a.name or a.key or a.child is not None:
         die("--hooks stands alone", "run it without --goal, --done, --kind, --name or --key", 2)
     want = ["claude", "codex", "opencode", "pi"] if a.hooks == "all" else [a.hooks]
     paths = hook_paths()
@@ -1562,6 +1695,8 @@ def cmd_init(a):
     global ROOT
     if a.uninstall and not a.hooks:
         die("--uninstall needs --hooks", "awt init --hooks claude|codex|opencode|pi|all --uninstall", 2)
+    if a.child is not None:
+        return init_run(a)
     if a.hooks:
         return cmd_hooks(a)
     if a.kind and a.kind != "root":
@@ -2286,6 +2421,8 @@ def infer_kind(t):
     host = re.sub(r"^\w+://", "", lt).split("/")[0]
     if lt.startswith("paseo:"):
         return "paseo"
+    if lt.startswith("tool-call:"):
+        return "tool-call"
     if os.path.exists(os.path.join(os.path.expanduser(t), ".git")):
         return "repo"
     if os.path.isdir(os.path.join(os.path.expanduser(t), ".awt")):
@@ -2373,6 +2510,11 @@ def cmd_status(a):
         if bl:
             die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first (a begun effect: ./awt effect mark ID sent|not-sent|unknown)")
     emit("status", status=a.value)
+    if a.value == "done":
+        who = writer()  # the caller, as its own status row is signed
+        for p in children(ROOT):  # K3: a child node still active goes with its parent (open work in it was refused above)
+            if node_info(p)["run"] and load_at(p)["status"] == "active":
+                finish_child(p, who)
     out("status " + a.value)
 
 
@@ -2869,11 +3011,15 @@ def norm_event(raw):
             return None
         resp = raw.get("tool_response")
         ok = False if name == "PostToolUseFailure" else None if isinstance(resp, dict) and resp.get("interrupted") else True
-        return dict(phase={"PreToolUse": "before", "PermissionDenied": "denied"}.get(name, "after"), tool=raw.get("tool_name"), input=raw.get("tool_input"), cwd=raw.get("cwd"), id=raw.get("tool_use_id"), ok=ok, model=model_of(raw))
+        done = name == "PostToolUse" and isinstance(resp, dict) and resp.get("status") == "completed" and not resp.get("isAsync")
+        return dict(phase={"PreToolUse": "before", "PermissionDenied": "denied"}.get(name, "after"), tool=raw.get("tool_name"), input=raw.get("tool_input"), cwd=raw.get("cwd"), id=raw.get("tool_use_id"), ok=ok, model=model_of(raw),
+                    agent=raw.get("agent_id") if isinstance(raw.get("agent_id"), str) and raw.get("agent_id") else None, ended=done)
     if raw.get("phase") not in ("before", "after", "denied"):
         return None
     inp = raw.get("input") if isinstance(raw.get("input"), dict) else {"command": raw["command"]} if "command" in raw else {}
-    return dict(phase=raw["phase"], tool=raw.get("tool"), input=inp, cwd=raw.get("cwd"), id=raw.get("id"), ok=raw.get("ok") if raw.get("ok") in (True, False) else None, model=model_of(raw))
+    ok = raw.get("ok") if raw.get("ok") in (True, False) else None
+    return dict(phase=raw["phase"], tool=raw.get("tool"), input=inp, cwd=raw.get("cwd"), id=raw.get("id"), ok=ok, model=model_of(raw), agent=None,
+                ended=raw["phase"] == "after" and ok is True and not inp.get("async") and not inp.get("isAsync") and not inp.get("run_in_background"))
 
 
 def fam(e):
@@ -2992,8 +3138,111 @@ def record_detected(rule, text, key, family, tid, seen, em, begin=True):
     return i
 
 
+LAUNCH_TOOLS = ("Agent", "Task", "subagent")
+GUARDED = {"note", "ask", "decide", "ref", "effect"}
+GUARD_FIX = "awt: you are a subagent and this awt call has no --dir, so it writes to the parent's node under the parent's name. fix: pass --dir <your awt-node> on every call of awt"
+
+
+def run_key_of(text):
+    """The RUN_KEY a launch text names: the first of its first 5 lines that is exactly `RUN_KEY: key` (C8), else None."""
+    for ln in text[:8192].split("\n")[:5]:
+        m = RUN_LINE.fullmatch(ln.rstrip("\r"))
+        if m:
+            return m.group(1)
+
+
+def launch_keys(ev):
+    """The RUN_KEYs of the launch texts of one Agent/Task/subagent call (a pi parallel call has one per task)."""
+    t, inp = ev["tool"], ev["input"]
+    if t in ("Agent", "Task"):
+        texts = [inp.get("prompt")]
+    elif t == "subagent" and inp.get("action") in (None, "resume"):
+        texts = [inp.get("task")] + [x.get("task") for x in (inp.get("tasks") if isinstance(inp.get("tasks"), list) else [])[:50] if isinstance(x, dict)]
+    else:
+        return []
+    return [k for k in (run_key_of(x) for x in texts if isinstance(x, str)) if k]
+
+
+@contextlib.contextmanager
+def node_flock(path, wait=3):
+    """Exclusive lock on path's log for a check-then-write; yields False when it could not be taken in time."""
+    fd = os.open(os.path.join(path, ".awt", "events.jsonl"), os.O_RDONLY | os.O_CREAT, 0o644)
+    end, got = time.time() + wait, False
+    try:
+        while not got:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+            except OSError as x:
+                if x.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK) or time.time() >= end:
+                    break
+                time.sleep(0.05)
+        yield got
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def acting(who, node):
+    """Write at node as who (by is stamped as named, not as the child's own name)."""
+    global ROOT, BY, BY_SET
+    old = (ROOT, BY, BY_SET)
+    ROOT, BY, BY_SET = node, who, True
+    try:
+        yield
+    finally:
+        ROOT, BY, BY_SET = old
+
+
+def link_child(path, tid):
+    """L1: the ref tool-call:TID in the child node, once."""
+    target = "tool-call:" + tid
+    with node_flock(path) as got, acting("hook", path):
+        if got and target not in load()["refs"]:
+            emit("ref", target=target, title=node_info(path)["run"], kind="tool-call", access="ok")
+
+
+def finish_child(path, who):
+    """K2, K3: an active child node is done, or paused when it has open questions or effects; the row is signed who."""
+    with acting(who, path):
+        D = load()
+        if D["status"] == "active":
+            emit("status", status="paused" if D["open_q"] or attention(D) else "done")
+    refresh_briefs(path)
+
+
+def launch(ev):
+    """C8 and K2 for one Agent/Task/subagent event under ROOT: make the child node and its link, or finish it."""
+    root = ROOT
+    for run in launch_keys(ev):
+        if ev["phase"] == "before":
+            with acting("hook", root):
+                final, _ = make_child(run)
+            if isinstance(ev["id"], str) and ev["id"]:
+                link_child(final, ev["id"])
+        elif ev["ended"]:
+            final = os.path.join(root, "agents", run)
+            if not os.path.islink(os.path.dirname(final)) and not os.path.islink(final) and node_info(final)["run"] == run:  # never through a symlink (CH-5)
+                finish_child(final, "hook")
+
+
+def guard(ev):
+    """C13: a subagent's awt write without --dir gets a fix line as context. Never denies or changes the call."""
+    if ev["phase"] != "before" or ev["tool"] != "Bash" or not ev.get("agent") or not os.environ.get("AWT_DIR"):
+        return None
+    for seg in shell_segments(ev["input"].get("command")):
+        if os.path.basename(seg[0]) != "awt" or any(t == "--dir" or t.startswith("--dir=") for t in seg):
+            continue
+        rest, i = seg[1:], 0
+        while i < len(rest) and rest[i].split("=", 1)[0] in ("--by", "--model"):
+            i += 1 if "=" in rest[i] else 2
+        if i < len(rest) and rest[i] in GUARDED:
+            return GUARD_FIX
+    return None
+
+
 def cmd_event(a):
-    global ROOT, BY
+    global ROOT, BY, BY_SET
     raw = json.loads(sys.stdin.read())  # one event, or a list of them (the plugin sends a turn's finished calls at once)
     evs = [norm_event(x) for x in (raw if isinstance(raw, list) else [raw])[:500]]
     evs = [e for e in evs if e and isinstance(e["input"], dict)]
@@ -3002,13 +3251,24 @@ def cmd_event(a):
         return
     ROOT = root
     if BY == "agent":
-        BY = "hook"
+        BY, BY_SET = "hook", True
     for ev in evs:
+        if ev["tool"] in LAUNCH_TOOLS and ev["phase"] in ("before", "after"):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()) if a.hook else contextlib.nullcontext():
+                    launch(ev)
+            except (Exception, SystemExit):
+                if not a.hook:
+                    raise
         res = detect_event(ev)
+        warn_ = guard(ev)
+        if warn_:
+            res = res or {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+            res["hookSpecificOutput"]["additionalContext"] = warn_
         if res and a.hook:
             sys.stdout.write(json.dumps(res))
         elif res:
-            out(res["hookSpecificOutput"]["permissionDecisionReason"])
+            out(res["hookSpecificOutput"].get("permissionDecisionReason") or res["hookSpecificOutput"]["additionalContext"])
 
 
 # ---------- doctor and save ----------
@@ -3064,6 +3324,11 @@ def tree_problems(root):
                         probs.append(("warn", "%s has no node row; it is read as a task" % where))
                     if PLURAL.get(i["kind"]) != plural:
                         probs.append(("warn", "%s: a %s sits in %s/, which does not match its node row" % (where, i["kind"], plural)))
+                    if i["run"]:
+                        if i["kind"] != "agent":
+                            probs.append(("warn", "%s: its node row has run %s but it is a %s, not an agent" % (where, i["run"], i["kind"])))
+                        if n != i["run"] or plural != "agents":
+                            probs.append(("fail", "%s: its node row has run %s, so it belongs at agents/%s (it was moved or renamed; a second init --child would make another)" % (where, i["run"], i["run"])))
                     if i["kind"] not in LEGAL.get(pk, ()):
                         probs.append(("fail", "%s: a %s does not belong in a %s" % (where, i["kind"], pk)))
                     elif pk == "root" and i["kind"] == "workspace" and has_projects:
@@ -5089,6 +5354,7 @@ def build():
         return q
     T, F = {}, dict(action="store_true")
     V(sp, "init", opt=[(("--goal",), T), (("--done",), T), (("--kind",), dict(choices=KINDS)), (("--name",), T), (("--key",), T),
+                         (("--child",), T),
                          (("--hooks",), dict(choices=["claude", "codex", "opencode", "pi", "all"])), (("--uninstall",), F)])
     V(sp, "resume", opt=[(("--hook",), F), (("--framed",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
@@ -5134,7 +5400,7 @@ def unknown_verb(word, args):
 
 
 def main(argv):
-    global ROOT, BY, MODEL
+    global ROOT, BY, MODEL, BY_SET
     BY = os.environ.get("AWT_BY") or "agent"
     flag = None
     for f in (sys.stdout, sys.stderr):
@@ -5146,7 +5412,7 @@ def main(argv):
             if x == "--dir":
                 d = argv[i + 1]
             elif x == "--by":
-                BY = argv[i + 1]
+                BY, BY_SET = argv[i + 1], True
             else:
                 flag = argv[i + 1]
             i += 2
@@ -5155,7 +5421,7 @@ def main(argv):
             if x.startswith("--dir="):
                 d = x[6:]
             elif x.startswith("--by="):
-                BY = x[5:]
+                BY, BY_SET = x[5:], True
             else:
                 flag = x[8:]
         else:

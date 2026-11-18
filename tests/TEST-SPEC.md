@@ -153,6 +153,51 @@ Names are scenario ids.
 - PT8 A workspace moved by `rename` under a project: a `ref kind=node` made before the move still resolves, and `init --key` for the workspace returns the moved path.
 - PT9 `--kind project` needs `--name` (exit 2).
 
+## Child nodes (`test_child.py`; chaos `child-*`; spec `docs/spec-child-nodes.md`, SPEC Node tree, Child nodes)
+
+Written before the code. Offline; stdlib; temp dirs; fake hook payloads; no network, no model.
+
+- CN-1 `init --child scan-1` under a task makes `agents/scan-1` with `kind agent, name scan-1, run scan-1`, no key; stdout is exactly `AWT_DIR=<realpath> AWT_BY=sub:scan-1`.
+- CN-2 The same call again exits 0, prints the same line, adds no row, notes `child node agents/scan-1 already exists` on stderr.
+- CN-3 Invalid keys (`Scan`, `../x`, `a/b`, `-x`, 41 characters, empty) exit 2 with the slug fix, even where no parent node resolves; nothing is created.
+- CN-4 Under a `workspace` or `root`: exit 1 with the legal-kinds fix. In a standalone legacy task: works.
+- CN-5 A non-child node, a file, a non-empty plain directory or a symlink at `agents/<key>`: exit 1 `pick another RUN_KEY`. An empty directory is taken over. A symlinked `agents/` is refused.
+- CN-6 `--child` with `--kind`, `--name`, `--key` or `--hooks`: exit 2.
+- CN-7 Two children write `out.md` and `note` with `AWT_DIR` at their own node and the parent's `AWT_BY` in the environment: each `out.md` is intact; the notes carry `sub:a` and `sub:b`.
+- CN-8 `--by hook` and `--by person` in a child node are kept; every verb is stamped `sub:<run>`; outside child nodes `AWT_BY` works as before.
+- CN-9 `doctor` on a parent with two active children has no `fail`; a child directory renamed by hand is a `fail`; a `run` row outside `agents/` is a `fail`, a `run` row that is not an agent is a `warn`.
+- CN-10 `resume` on the parent shows both children; `find --down` returns their notes with the node path.
+- CN-11 The v0.3.1 `awt` reads a child node as an agent: `resume`, `list nodes`, `list notes`, `doctor`, no quarantined row.
+- CL-1 A Claude `PreToolUse` `Agent` (and `Task`) payload with `RUN_KEY` on line 2 and `tool_use_id`: `ingest --event --hook` makes the child and one ref `tool-call:<id>`, prints nothing, writes no effect; a replay changes nothing; a second call under the key adds a second link.
+- CL-2 No `RUN_KEY` line, a `RUN_KEY` on line 7, an invalid, quoted or trailing-text one, a non-string prompt, a `workspace` parent, a tool other than a launch tool: nothing written.
+- CL-3 A pi plugin-shape `before` for `subagent` with `task` makes the same; `action: "status"` is ignored; `action: "resume"` with a `task` counts; each `tasks[].task` with a `RUN_KEY` gets a node linked to the one call id.
+- CL-4 `find --tree <call id>` and `find --tree <RUN_KEY>` both hit the child; records in nodes without the ref are listed as before.
+- CL-5 `PostToolUse` `Agent` with `status: completed`: child `done`; with an open question: `paused`; `isAsync`, other statuses, `PostToolUseFailure` and an async pi call: unchanged; no node: no write; a symlinked `agents/` or slot: the node it points at is unchanged.
+- CL-6 `status done` on the parent turns its active children `done`; open work in a child still refuses it and changes nothing; a non-active child and a plain agent node are left alone; a child of a child node is signed `sub:<parent run>`, not `AWT_BY`.
+- CL-7 `init --hooks claude` adds the two `# awt:child` entries and the `# awt:child-guard` entry once; a rerun changes nothing; `--uninstall` removes only them and keeps a sibling hook in the same matcher; the command is silent without `AWT_DIR` and its prefilter does not start `awt` for a call without `RUN_KEY:`.
+- CL-8 The generated pi extension has the `tool_call` handler and the child-side switch; a node script runs it against a fake pi API and checks the node it made and the `process.env` it sets; nothing happens in a child process, without `AWT_DIR`, or when `awt` fails.
+- CL-9 A Claude `PreToolUse` `Bash` payload `awt note x` with `agent_id` and no `--dir`: `additionalContext` with a `fix:` line, exit 0, no decision. With `--dir`, without `agent_id`, with `AWT_DIR` unset, a read verb or a non-awt command: silent. `--by=X` and `--model=X` before the verb still warn.
+- CL-10 A pi child with a first prompt holding `RUN_KEY` and `MODEL: m1` sets `AWT_MODEL` to `m1`; without a `MODEL:` line, or with one that is not a model id (over 200 characters, non-ASCII, `;`), it is unchanged. A slot that is a symlink to another child node is not adopted.
+- ST-1 A Claude parent transcript with two launch calls (one with the ref, one by its `RUN_KEY` line), their subagent transcripts, a Paseo agent that joins the session to the parent node: after a plain `ingest`, `docs/recipes/child-runs.sql` returns both rows with `link` `ref` and `run_key`, the right `tool_call_id`, `session_id`, `tool_name`, and joins to the Paseo node; a ref plus a `RUN_KEY` line is one row.
+- ST-2 `child_session_id` is the subagent session of each child; `sessions.node_id` and `join_confidence` are as before.
+- ST-3 `--rebuild` is byte-stable with child nodes present; an incremental ingest after a new ref equals a rebuild; the schema version is unchanged.
+- ST-4 A second ingest asks for no rebuild; `records.fields` holds `run` and the link target.
+- CH-1 20 processes race `init --child k`: one node, all exit 0, one line, no `.new-*`.
+- CH-2 Parallel `init --child` for 20 keys plus hook events for the same keys: 20 nodes, one ref each.
+- CH-3 SIGKILL during creation: a `.new-*` leftover or a whole node; a rerun succeeds; `doctor` reports the leftover.
+- CH-4 Garbage hook payloads (not JSON, wrong types, a 9 MiB prompt, lone surrogates, a secret-shaped tail): exit 0, silent, nothing half-written, no secret in a row.
+- CH-5 `agents/` replaced by a symlink to another node: refused, nothing written through it, hook silent.
+- CH-6 A torn last line in the child's log, then a launch hook: the link lands, `doctor` names the quarantined row.
+- CH-7 The parent's log held by another writer for 3 s while `status done` finishes its children: it succeeds and each child has one status row.
+- CH-8 More child nodes than the walk limit: `find --down` and `doctor` report it in the standard words.
+
+Gated (real providers; they spend tokens or need a live daemon; not run by the suite):
+
+- G-1 pi's `bash` tool passes the `process.env` changes an extension makes in `before_agent_start` to its commands (C11). If not, pi falls back to the `awt-node:` brief line.
+- G-2 pi awaits a `tool_call` handler before running the call, and the event's `toolCallId` is the id Paseo shows as the row's `toolCallId`.
+- G-3 Under Paseo a Claude agent's `Agent` call fires the user-level `PreToolUse` hook with the `tool_use_id` Paseo shows.
+- G-4 Two parallel paseo-pi-async-agents children with child nodes write their own `out.md` and notes (that repo's E7 rerun).
+
 ## Active recall (`test_recall.py`)
 
 Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across nodes, Paseo plugin).
@@ -316,7 +361,7 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 | P2 | The plugin block is at most 360 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `awt_find`, `decide`, `ask`; no `state` |
 | P2b | An agent opened through the plugin has `BRIEF.md` in `AWT_DIR` before any tool call, refreshed by an awt write |
 
-## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`)
+## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`, `child`)
 
 Same style as today: seeded, one line per attack, a failure prints the seed and the commands. Quick mode picks small counts of each.
 
