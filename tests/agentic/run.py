@@ -25,8 +25,11 @@ SETTINGS = {
 
 def run_session(prompt, d, settings):
     cmd = ["claude", "-p", prompt, "--model", MODEL, "--output-format", "json", "--max-turns", MAX_TURNS,
-           "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep", "--settings", settings]
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+           "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep", "--settings", settings,
+           # The task's own .claude/settings.json (the hooks `init` writes) loads; the person's
+           # ~/.claude settings, plugins and MCP servers do not.
+           "--setting-sources", "project,local", "--strict-mcp-config"]
+    env = scenarios.clean_env()
     s = {"prompt": prompt, "result": "", "cost": 0.0, "infra": None}
     t0 = time.time()
     p = subprocess.Popen(cmd, cwd=d, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
