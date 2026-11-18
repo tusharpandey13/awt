@@ -2071,12 +2071,13 @@ def passive_scope(anc, top):
     ws = next((p for p, k in zip(real, kinds) if k == "workspace"), None)
     if mode != "workspace":
         proj = next((p for p, k in zip(real, kinds) if k == "project"), None)
-        if proj:
+        if proj and node_info(proj)["key"] != "paseo:project/unassigned":  # Paseo's `unassigned` project holds unrelated workspaces: it is no project
             return [proj]
         if ws:
-            pref = {r["target"] for r in load_at(ws)["refs"].values() if r["target"].startswith("paseo:project/")}
+            prefs = lambda n: {r["target"] for r in load_at(n)["refs"].values() if r.get("kind") == "paseo" and r["target"].startswith("paseo:project/")}
+            pref = prefs(ws)
             if pref:  # the legacy placement: workspaces directly under the root that name the same Paseo project
-                same = [os.path.realpath(c) for c in children(top) if node_info(c)["kind"] == "workspace" and any(r["target"] in pref for r in load_at(c)["refs"].values())]
+                same = [os.path.realpath(c) for c in children(top) if node_info(c)["kind"] == "workspace" and prefs(c) & pref]
                 return same + ([] if ws in same else [ws])
     return [ws or next((p for p, k in reversed(list(zip(real, kinds))) if k != "root"), os.path.realpath(ROOT))]
 

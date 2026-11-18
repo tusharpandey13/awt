@@ -195,6 +195,24 @@ class Triggers(PBase):
         self.note(wb, RARE + " in a sibling", "n-dddd0001")
         self.assertEqual(self.ids(self.hook(node=ag).stdout), ["n-dddd0001"])
 
+    def test_pr7_unassigned_is_not_a_project(self):  # T-PR7a: the Paseo `unassigned` project holds unrelated workspaces
+        root = self.w["root"]
+        un = self.mk("project", "unassigned", root, "--key", "paseo:project/unassigned")
+        wa = self.mk("workspace", "unassigned--a", un)
+        wb = self.mk("workspace", "unassigned--b", un)
+        t = self.mk("task", "t", wa, "--goal", "g", "--done", "d")
+        t2 = self.mk("task", "t2", wa, "--goal", "g2", "--done", "d")
+        ag = self.mk("agent", "a1", t)
+        self.note(wb, RARE + " in another unassigned workspace", "n-dddd0002")
+        self.note(t2, RARE + " in the own workspace", "n-dddd0003")
+        self.assertEqual(self.ids(self.hook(node=ag).stdout), ["n-dddd0003"])
+
+    def test_pr7_only_a_paseo_ref_names_the_project(self):  # T-PR7b: a ref of another kind with the same target is not the project
+        pk3 = self.mk("workspace", "lookalike", self.w["root"])
+        self.ok("ref", "paseo:project/pk", "--title", "pk", "--kind", "other", root=pk3)
+        self.note(pk3, RARE + " lookalike", "n-cccc0002")
+        self.assertEqual(self.ids(self.hook().stdout), ["n-aaaa0001"])
+
     def test_pr8_exclusions(self):  # T-PR8a to e
         a = self.w["agent"]
         self.note(a, RARE + " own", "n-eeee0001")
@@ -501,6 +519,15 @@ class Pi(test_awt.Base):
         self.assertIn("pi note", sec)
         self.assertEqual(res["second"]["awt_recall"], sec, "byte-identical after the first request")
         self.assertNotIn("awt_recall", res["after"])
+
+    def test_pr18b_shadow_sets_nothing(self):  # PR16 on pi: shadow injects nothing, but records the row
+        self.env["AWT_RECALL"] = "shadow"
+        res = self.drive()
+        self.assertEqual((res["first"], res["second"]), ({}, {}))
+        rows = [json.loads(l) for l in test_awt.slurp(os.path.join(self.agent, ".awt", "events.jsonl")).splitlines() if '"type":"recall"' in l]
+        self.assertEqual([(r["trigger"], r["result"]) for r in rows][0], ("prompt", "shadow"))
+        self.assertNotIn("awt_recall", res["after"])
+        self.assertNotIn("Related elsewhere", res["after"].get("awt_record", ""))
 
     def test_pr18b_no_node_sets_nothing(self):
         res = self.drive(awt_dir=False)
