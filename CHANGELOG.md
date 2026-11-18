@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 (18-Nov-2026)
 
 ### Added
 - Paseo agents get a read-only `awt_find` tool (`{ query, limit? }`, runs `awt find --like`), offered and auto-approved wherever `awt_resume` is. The plugin's prompt block and the brief footer (`awt find --like "topic" | awt list`) now tell agents to search before researching or asking, and `help agents` states it once.
