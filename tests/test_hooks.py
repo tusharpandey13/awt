@@ -58,7 +58,7 @@ class Hooks(test_awt.Base):
         st = self.load()
         self.assertEqual(st["model"], "x")
         self.assertEqual(st["permissions"], {"allow": ["Bash(ls)"]})
-        self.assertEqual(st["hooks"]["PreToolUse"], [{"matcher": "Bash", "hooks": []}])
+        self.assertEqual(st["hooks"]["PreToolUse"][0], {"matcher": "Bash", "hooks": []})  # awt's own child-node entries follow it
         self.assertEqual(st["hooks"]["SessionStart"][0], other)
         self.assertEqual(len(self.mine(st)), 1)
 
@@ -544,7 +544,7 @@ class PluginFiles(test_awt.Base):
 
     def test_p3_pi_adds_a_system_section_only_after_a_compaction(self):
         res = self.drive(self.pi_js([]))
-        self.assertEqual(res["names"], ["before_agent_start", "session_compact", "session_start"])
+        self.assertEqual(res["names"], ["before_agent_start", "session_compact", "session_start", "tool_call"])
         self.assertEqual(res["before"], {})
         self.assertEqual(res["resumed"], {})
         sec = res["after"]["awt_record"]

@@ -97,6 +97,8 @@ cd tasks/retry-bug && awt init --kind agent --name chat-1
 awt list tree
 ```
 
+**Subagents your agent launches** (Claude Code's `Agent` tool, pi's `subagent`) share the parent's `AWT_DIR` and `AWT_BY`: two parallel children would overwrite one `out.md` and sign their notes with the parent's name. Give each its own child node with `awt init --child RUN_KEY`. It makes `agents/RUN_KEY` (idempotent, so a retry or a race is safe) and prints `AWT_DIR=... AWT_BY=sub:RUN_KEY` for the child's environment. Notes written in a child node are signed `sub:RUN_KEY` without any flag. `awt init --hooks claude` and `pi` do it for you when the launch text has a `RUN_KEY: <key>` line in its first five lines, and link the node to the launching tool call (`awt find --tree <call id>`); Claude Code cannot give a subagent its own environment, so its brief must carry `awt-node: <path>` and say to pass `--dir` on every call of awt. See `docs/spec-child-nodes.md`.
+
 `resume` in a node shows its ancestors' goals and `rule` decisions, plus a one-line rollup of its children. `awt find --up TERM` and `awt find --down TERM` search ancestors or descendants, and `awt find --tree TERM` searches the whole tree under the nearest root. `awt find --like "a sentence"` ranks related decisions, answers and notes from every workspace, and `decide` and `ask` print up to three `related:` records after they write (`--related N` or `AWT_RELATED` changes the number, 0 turns it off). An agent can run anywhere with `AWT_DIR` set to its node. The full contract is in [SPEC.md](SPEC.md#node-tree).
 
 ## Paseo

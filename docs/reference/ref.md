@@ -10,7 +10,7 @@ awt ref --title TITLE [--why WHY] [--kind KIND] [--no-access] TARGET
 
 | Argument | Meaning |
 |---|---|
-| `TARGET` | URL or path |
+| `TARGET` | URL or path; tool-call:ID links a child node to the call that launched it |
 
 ## Flags
 

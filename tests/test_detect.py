@@ -301,7 +301,7 @@ class Detect(DetectBase):
         s = json.loads(slurp(self.p(".claude", "settings.json")))
         for ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"):
             g = s["hooks"][ev][0]
-            self.assertEqual(g["matcher"], "Bash|mcp__.*")
+            self.assertEqual(g["matcher"], "Bash|mcp__.*|Agent|Task")
             self.assertTrue(g["hooks"][0]["command"].endswith("awt ingest --event --hook"), ev)
             self.assertEqual(g["hooks"][0]["timeout"], 10)
         self.assertIn("SessionEnd", s["hooks"])

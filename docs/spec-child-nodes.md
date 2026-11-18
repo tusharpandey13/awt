@@ -1,6 +1,6 @@
 # Spec: child nodes and the subagent-row link
 
-Status: decisions recorded 18-Nov-2026, ready for review (issues #27 and #28). Nothing here is built. Once approved, the normative parts move into `SPEC.md` (Node tree, Detected effects, store.db) and `tests/TEST-SPEC.md` in the same PR as the code, tests first.
+Status: implemented (issues #27 and #28). The normative parts are in `SPEC.md` (Node tree, Child nodes; Detected effects; store.db) and the tests in `tests/TEST-SPEC.md` (Child nodes). This document keeps the reasoning. Corrections found while building, against the first draft: the paseo-pi-async-agents brief format (Facts, last row), K3 (open work already refuses `status done`) and the recipe's last column (see "Corrections at build time").
 
 ## Problem
 
@@ -22,7 +22,7 @@ The two are one design. A child node named by the `RUN_KEY` can hold the `toolCa
 | The `Agent` tool result's `toolUseResult.agentId` names the child transcript `<session>/subagents/agent-<agentId>.jsonl` | A local transcript, checked 2026-11-18 | The store can attach the child's own session to the child node |
 | pi-subagents 0.88.1 spawns the async runner with `env: {...process.env, ...}` of the parent pi process. A call cannot set env per child | `bundle/chunk-ZJ2BT5TI.js`, `runnerEnv` | The parent cannot hand a pi child its node through env |
 | Ambient pi extensions load in pi-subagents children (pcg's hooks do; paseo-pi-async-agents `docs/SPEC.md` section 3) and the child process has `PI_SUBAGENT_CHILD=1` | paseo-pi-async-agents dev probe | awt's own pi extension (`awt init --hooks pi`) runs inside the child, where it can set its own process env |
-| Every paseo-pi-async-agents brief has `RUN_KEY: <key>` on line 2 (D14); Paseo makes a row only for single `subagent` calls (D13) | paseo-pi-async-agents `docs/SPEC.md` | `RUN_KEY` is a machine-readable name in the launch input, for both providers |
+| Every paseo-pi-async-agents brief holds a line `RUN_KEY: <key>` (its skill, section 5), but at no fixed position: it is one bullet of the brief, and for built-in agents the preamble goes at the end. There is no D14 and no `MODEL:` line; the model is the call's own `model` field. Paseo makes a row only for single `subagent` calls (D13) | paseo-pi-async-agents `skills/async-agents/SKILL.md` section 5, `docs/SPEC.md` 5.5 and 5.6, read 2026-11-18 | `RUN_KEY: <key>` is a machine-readable name in the launch input, for both providers. the hook reads it from the first 5 lines, so paseo-pi-async-agents must put `RUN_KEY:` (and `MODEL:`) there |
 
 ## Interface: one flag
 
@@ -166,3 +166,11 @@ Docs in the same PR: the `init` and `ref` rows of `CLI_HELP`, then `python3 tool
 6. **Joining pi child sessions is future work**, only if cheap; not in v1 (L6).
 7. **`AWT_MODEL` is set for pi children from the brief** (`MODEL:` line, C11, CL-10).
 8. **No schema bump.** `child_runs` is derived from the existing `records` at query time; no store schema 8, no rebuild (L4, ST-3, ST-4).
+
+## Corrections at build time (18-Nov-2026)
+
+- **Brief format.** paseo-pi-async-agents has no D14 and writes no `MODEL:` line; its `RUN_KEY: <key>` line has no fixed position. The hook keeps the strict rule (an exact line among the first 5, so quoted text deep in a brief never makes a node) and the optional `MODEL:` line (C11, decision 7), and paseo-pi-async-agents must change to emit both there (see the report of PR #31). Until it does, a pi child gets no node from the launch hook and the child-side switch changes nothing; the explicit `init --child` of C12 still works.
+- **Records.** `records.fields` holds every row as JSON, so `run` (node row) and the `tool-call:` ref are there as the spec assumed. A child node has no `key`, so its `node_id` is `path:<path from the tree top>`. `ingest` needs no code for it.
+- **K3.** `status done` already refuses while a node below has an open question or effect, a child included. The `paused` arm of K3 is therefore reachable only in a race (a question written between the check and the child write); K2 uses the same rule and reaches it normally.
+- **Recipe.** Besides the six columns of L4 it returns `child_session_id` (L5), as the last column. A subagent file shares its parent's conversation id, so its session already joins to the parent's node (`join_confidence` `session_id`); nothing about `sessions` changes.
+- **Hook guard.** The guard and the launch hook are both in `ingest --event --hook` (no new flag): a `Bash` event with `agent_id` gets the warning, a launch event gets the node. The machine-level entries differ only in their `sh` prefilter and mark.

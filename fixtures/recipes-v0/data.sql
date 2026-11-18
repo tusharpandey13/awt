@@ -30,7 +30,9 @@ INSERT INTO nodes(node_id, kind, name, path, parent_id, project_id, status, goal
  ('ag3', 'agent', 'a3', 'parsekit/lexer/tokenizer/a1/a2/a3', 'ag2', 'proj-a', NULL, NULL),
  ('ag4', 'agent', 'a4', 'parsekit/lexer/lexer-tests/a4', 'task2', 'proj-a', NULL, NULL),
  ('ag5', 'agent', 'a5', 'lexgen/grammar/rules/a5', 'task4', 'proj-b', NULL, NULL),
- ('ag6', 'agent', 'a6', 'scratch/spike/a6', 'task5', 'unassigned', NULL, NULL);
+ ('ag6', 'agent', 'a6', 'scratch/spike/a6', 'task5', 'unassigned', NULL, NULL),
+ ('path:ag1/agents/scan-1', 'agent', 'scan-1', 'parsekit/lexer/tokenizer/a1/agents/scan-1', 'ag1', 'proj-a', 'done', 'scan-1'),
+ ('path:ag1/agents/scan-2', 'agent', 'scan-2', 'parsekit/lexer/tokenizer/a1/agents/scan-2', 'ag1', 'proj-a', 'active', 'scan-2');
 
 INSERT INTO sessions(session_id, provider_name, conversation_id, node_id, join_confidence, cwd, request_model, started_at, ended_at, source, adapter) VALUES
  ('s1', 'claude_code', 'c1', 'ag1', 'cwd', '/work/parsekit', 'claude-a', '2026-11-03T09:00:00Z', '2026-11-03T10:00:00Z', 'claude', 1),
@@ -89,7 +91,9 @@ INSERT INTO tool_calls(tool_call_id, message_id, session_id, tool_name, args, is
  ('tc7', 'm8', 's2', 'Read', '{"file_path":"../out.md"}', 0, '2026-11-04T09:00:02Z', '2026-11-04T09:00:03Z'),
  ('tc8', 'm6', 's1', 'Bash', '{"command":"awt find tokenizer"}', 0, '2026-11-03T09:40:03Z', '2026-11-03T09:40:04Z'),
  ('tc9', 'm14', 's4', 'Bash', '{"command":"awt find --like lexer"}', 0, '2026-11-12T08:00:05Z', '2026-11-12T08:00:06Z'),
- ('tc10', 'm14', 's4', 'Bash', '{"command":"curl -X POST https://example.test/hook"}', 0, '2026-11-12T08:00:05Z', '2026-11-12T08:00:07Z');
+ ('tc10', 'm14', 's4', 'Bash', '{"command":"curl -X POST https://example.test/hook"}', 0, '2026-11-12T08:00:05Z', '2026-11-12T08:00:07Z'),
+ ('toolu_L1', 'm6', 's1', 'Agent', '{"description":"scan","prompt":"Scan the lexer.\nRUN_KEY: scan-1\nDone when listed."}', 0, '2026-11-03T09:41:00Z', '2026-11-03T09:42:00Z'),
+ ('toolu_L2', 'm6', 's1', 'Task', '{"description":"scan","prompt":"Check docs.\nRUN_KEY: scan-2\nDone when listed."}', 0, '2026-11-03T09:43:00Z', '2026-11-03T09:44:00Z');
 
 INSERT INTO usage(usage_id, grain, session_id, conversation_id, provider_name, message_id, turn_id, request_model, response_model, usage_input_tokens, usage_output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, cost_source, latency_ms) VALUES
  ('m:s1:m2', 'message', 's1', NULL, 'claude_code', 'm2', 's1:0', 'claude-a', 'claude-a', 100, 50, 900, 50, NULL, NULL, 2000),
@@ -149,6 +153,12 @@ DELETE FROM fts_ref;
 INSERT INTO fts_ref(kind, ref) SELECT 'record', rowid FROM records;
 INSERT INTO fts_text(rowid, text) SELECT f.id, CASE r.type WHEN 'decision' THEN json_extract(r.fields, '$.choice') || ' ' || json_extract(r.fields, '$.why') ELSE json_extract(r.fields, '$.text') END
 FROM fts_ref f JOIN records r ON r.rowid = f.ref;
+
+-- Child nodes (child-runs): scan-1 is linked by a ref row to its launching call, scan-2 only by the RUN_KEY line of its call. Added after the full-text rows, so the ranks of l7-redecisions stay as they were.
+INSERT INTO records(record_id, node_id, type, ts, by, fields, session_id, origin, model, turn_id) VALUES
+ ('path:ag1/agents/scan-1#0', 'path:ag1/agents/scan-1', 'node', '2026-11-03T09:41:00Z', 'a1', '{"type":"node","kind":"agent","name":"scan-1","run":"scan-1"}', NULL, 'agent', 'claude-a', NULL),
+ ('path:ag1/agents/scan-1#1', 'path:ag1/agents/scan-1', 'ref', '2026-11-03T09:41:01Z', 'hook', '{"type":"ref","target":"tool-call:toolu_L1","title":"scan-1","kind":"tool-call","access":"ok"}', NULL, 'agent', 'claude-a', NULL),
+ ('path:ag1/agents/scan-2#0', 'path:ag1/agents/scan-2', 'node', '2026-11-03T09:43:00Z', 'a1', '{"type":"node","kind":"agent","name":"scan-2","run":"scan-2"}', NULL, 'agent', 'claude-a', NULL);
 
 -- Passive recall rows (l7-recall-use): ag4 was shown d-1 and n-2 and used d-1; ag2's shadow id q-1 was never shown and used unaided; one every row with no ids.
 INSERT INTO records(record_id, node_id, type, ts, by, fields, session_id, origin, model, turn_id) VALUES

@@ -76,7 +76,7 @@ def nomodel(text):
     for pre in ("./", ""):
         for q in ('"', '\\"'):  # plain and JSON-escaped
             text = text.replace(pre + "awt find --like " + q + "topic" + q + " | " + pre + "awt list", pre + "awt list | " + pre + "awt find <term>")  # the brief footer changed after v0.3.1
-    return re.sub(r', "model": "unknown:legacy"', "", text)
+    return re.sub(r', "run": null', "", re.sub(r', "model": "unknown:legacy"', "", text))  # list rows gained `run` (child nodes)
 
 
 class Cli(unittest.TestCase):

@@ -13,7 +13,7 @@ RECIPES = os.path.join(ROOT, "docs", "recipes")
 FX = os.path.join(ROOT, "fixtures", "recipes-v0")
 NOW = "2026-11-16T12:00:00Z"
 PARAMS = {"now": NOW, "retention_days": ""}
-QUESTIONS = 32
+QUESTIONS = 33
 
 
 def headers(path):

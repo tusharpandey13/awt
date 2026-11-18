@@ -80,7 +80,7 @@ class Reads(test_tree.TreeBase):
             if os.path.isdir(os.path.join(dp, ".awt")) and dp != root:
                 walked.append(os.path.relpath(dp, root))
         self.assertEqual(sorted(r["path"] for r in rows), sorted(walked))
-        self.assertEqual(set(rows[0]), {"path", "kind", "name", "key", "status", "goal", "now", "state_ts", "out_ts", "out_bytes", "open_questions", "attention_effects", "depth"})
+        self.assertEqual(set(rows[0]), {"path", "kind", "name", "key", "run", "status", "goal", "now", "state_ts", "out_ts", "out_bytes", "open_questions", "attention_effects", "depth"})
         by = {r["name"]: r for r in rows}
         self.assertEqual(by["chat-1"]["now"], "doing x")
         self.assertEqual(by["sub-1"]["open_questions"], 1)
@@ -353,7 +353,7 @@ class Review(test_tree.TreeBase):
                 self.assertEqual(set(r), {"path", "title"})
         r = json.loads(self.ok("resume", "--json", "--scope", "side", root=n).stdout)
         self.assertEqual(r["state"]["scope"], "side")
-        self.assertEqual(set(r["task"]), {"path", "depth", "kind", "name", "key", "status", "goal", "now", "state_ts", "out_ts", "out_bytes",
+        self.assertEqual(set(r["task"]), {"path", "depth", "kind", "name", "key", "run", "status", "goal", "now", "state_ts", "out_ts", "out_bytes",
                                           "open_questions", "attention_effects", "done_means", "state", "decisions"})
         self.assertEqual(r["task"]["name"], "Fix login")
 
