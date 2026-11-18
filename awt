@@ -124,11 +124,11 @@ export const AwtContext = async () => ({
 '''
 PI_EXT = r'''// awt: puts the awt brief in pi's system prompt after a compaction, and related records at an agent's first prompt (no message, no turn); makes a child node for each subagent launch and points a subagent at its own. Installed by `awt init --hooks pi`; remove with --uninstall.
 import { execFile } from "node:child_process"
-import { closeSync, openSync, readSync } from "node:fs"
+import { closeSync, lstatSync, openSync, readSync } from "node:fs"
 import { join } from "node:path"
 
 const KEY = /^RUN_KEY: ([a-z0-9][a-z0-9-]{0,39})\s*$/
-const MODEL = /^MODEL: (\S+)\s*$/
+const MODEL = /^MODEL: ([A-Za-z0-9][A-Za-z0-9._:\/@+\[\]-]{0,199})\s*$/
 
 export default function (pi: any) {
   let record = ""
@@ -151,6 +151,7 @@ export default function (pi: any) {
     if (!key) return
     const dir = join(process.env.AWT_DIR, "agents", key)
     try {
+      if (lstatSync(join(process.env.AWT_DIR, "agents")).isSymbolicLink() || lstatSync(dir).isSymbolicLink()) return
       const fd = openSync(join(dir, ".awt", "events.jsonl"), "r")
       const buf = Buffer.alloc(4096)
       const n = readSync(fd, buf, 0, 4096, 0)
@@ -1425,6 +1426,8 @@ def init_run(a):
     global ROOT
     if a.kind or a.name or a.key or a.hooks:
         die("--child stands alone", "run it without --kind, --name, --key or --hooks", 2)
+    if not RUN_KEY.fullmatch(a.child):
+        die("RUN_KEY %r is not valid" % a.child[:60], RUN_FIX, 2)
     ROOT = find_root(a.dir)
     if not ROOT:
         die("no parent node", "cd into a node, set AWT_DIR or pass --dir", 4)
@@ -2508,9 +2511,10 @@ def cmd_status(a):
             die("cannot mark done: " + "; ".join(bl), "answer the questions and mark or drop the effects first (a begun effect: ./awt effect mark ID sent|not-sent|unknown)")
     emit("status", status=a.value)
     if a.value == "done":
+        who = writer()  # the caller, as its own status row is signed
         for p in children(ROOT):  # K3: a child node still active goes with its parent (open work in it was refused above)
             if node_info(p)["run"] and load_at(p)["status"] == "active":
-                finish_child(p, BY)
+                finish_child(p, who)
     out("status " + a.value)
 
 
@@ -3218,7 +3222,7 @@ def launch(ev):
                 link_child(final, ev["id"])
         elif ev["ended"]:
             final = os.path.join(root, "agents", run)
-            if node_info(final)["run"] == run:
+            if not os.path.islink(os.path.dirname(final)) and not os.path.islink(final) and node_info(final)["run"] == run:  # never through a symlink (CH-5)
                 finish_child(final, "hook")
 
 
@@ -3230,8 +3234,8 @@ def guard(ev):
         if os.path.basename(seg[0]) != "awt" or any(t == "--dir" or t.startswith("--dir=") for t in seg):
             continue
         rest, i = seg[1:], 0
-        while i < len(rest) and rest[i] in ("--by", "--model"):
-            i += 2
+        while i < len(rest) and rest[i].split("=", 1)[0] in ("--by", "--model"):
+            i += 1 if "=" in rest[i] else 2
         if i < len(rest) and rest[i] in GUARDED:
             return GUARD_FIX
     return None

@@ -159,7 +159,7 @@ Written before the code. Offline; stdlib; temp dirs; fake hook payloads; no netw
 
 - CN-1 `init --child scan-1` under a task makes `agents/scan-1` with `kind agent, name scan-1, run scan-1`, no key; stdout is exactly `AWT_DIR=<realpath> AWT_BY=sub:scan-1`.
 - CN-2 The same call again exits 0, prints the same line, adds no row, notes `child node agents/scan-1 already exists` on stderr.
-- CN-3 Invalid keys (`Scan`, `../x`, `a/b`, `-x`, 41 characters, empty) exit 2 with the slug fix; nothing is created.
+- CN-3 Invalid keys (`Scan`, `../x`, `a/b`, `-x`, 41 characters, empty) exit 2 with the slug fix, even where no parent node resolves; nothing is created.
 - CN-4 Under a `workspace` or `root`: exit 1 with the legal-kinds fix. In a standalone legacy task: works.
 - CN-5 A non-child node, a file, a non-empty plain directory or a symlink at `agents/<key>`: exit 1 `pick another RUN_KEY`. An empty directory is taken over. A symlinked `agents/` is refused.
 - CN-6 `--child` with `--kind`, `--name`, `--key` or `--hooks`: exit 2.
@@ -172,12 +172,12 @@ Written before the code. Offline; stdlib; temp dirs; fake hook payloads; no netw
 - CL-2 No `RUN_KEY` line, a `RUN_KEY` on line 7, an invalid, quoted or trailing-text one, a non-string prompt, a `workspace` parent, a tool other than a launch tool: nothing written.
 - CL-3 A pi plugin-shape `before` for `subagent` with `task` makes the same; `action: "status"` is ignored; `action: "resume"` with a `task` counts; each `tasks[].task` with a `RUN_KEY` gets a node linked to the one call id.
 - CL-4 `find --tree <call id>` and `find --tree <RUN_KEY>` both hit the child; records in nodes without the ref are listed as before.
-- CL-5 `PostToolUse` `Agent` with `status: completed`: child `done`; with an open question: `paused`; `isAsync`, other statuses, `PostToolUseFailure` and an async pi call: unchanged; no node: no write.
-- CL-6 `status done` on the parent turns its active children `done`; open work in a child still refuses it and changes nothing; a non-active child and a plain agent node are left alone.
+- CL-5 `PostToolUse` `Agent` with `status: completed`: child `done`; with an open question: `paused`; `isAsync`, other statuses, `PostToolUseFailure` and an async pi call: unchanged; no node: no write; a symlinked `agents/` or slot: the node it points at is unchanged.
+- CL-6 `status done` on the parent turns its active children `done`; open work in a child still refuses it and changes nothing; a non-active child and a plain agent node are left alone; a child of a child node is signed `sub:<parent run>`, not `AWT_BY`.
 - CL-7 `init --hooks claude` adds the two `# awt:child` entries and the `# awt:child-guard` entry once; a rerun changes nothing; `--uninstall` removes only them and keeps a sibling hook in the same matcher; the command is silent without `AWT_DIR` and its prefilter does not start `awt` for a call without `RUN_KEY:`.
 - CL-8 The generated pi extension has the `tool_call` handler and the child-side switch; a node script runs it against a fake pi API and checks the node it made and the `process.env` it sets; nothing happens in a child process, without `AWT_DIR`, or when `awt` fails.
-- CL-9 A Claude `PreToolUse` `Bash` payload `awt note x` with `agent_id` and no `--dir`: `additionalContext` with a `fix:` line, exit 0, no decision. With `--dir`, without `agent_id`, with `AWT_DIR` unset, a read verb or a non-awt command: silent.
-- CL-10 A pi child with a first prompt holding `RUN_KEY` and `MODEL: m1` sets `AWT_MODEL` to `m1`; without a `MODEL:` line it is unchanged.
+- CL-9 A Claude `PreToolUse` `Bash` payload `awt note x` with `agent_id` and no `--dir`: `additionalContext` with a `fix:` line, exit 0, no decision. With `--dir`, without `agent_id`, with `AWT_DIR` unset, a read verb or a non-awt command: silent. `--by=X` and `--model=X` before the verb still warn.
+- CL-10 A pi child with a first prompt holding `RUN_KEY` and `MODEL: m1` sets `AWT_MODEL` to `m1`; without a `MODEL:` line, or with one that is not a model id (over 200 characters, non-ASCII, `;`), it is unchanged. A slot that is a symlink to another child node is not adopted.
 - ST-1 A Claude parent transcript with two launch calls (one with the ref, one by its `RUN_KEY` line), their subagent transcripts, a Paseo agent that joins the session to the parent node: after a plain `ingest`, `docs/recipes/child-runs.sql` returns both rows with `link` `ref` and `run_key`, the right `tool_call_id`, `session_id`, `tool_name`, and joins to the Paseo node; a ref plus a `RUN_KEY` line is one row.
 - ST-2 `child_session_id` is the subagent session of each child; `sessions.node_id` and `join_confidence` are as before.
 - ST-3 `--rebuild` is byte-stable with child nodes present; an incremental ingest after a new ref equals a rebuild; the schema version is unchanged.

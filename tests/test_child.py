@@ -94,6 +94,8 @@ class Create(Child):
                 self.assertIn("fix: use lowercase letters, digits and -", r.stderr)
         self.assertEqual(sorted(os.listdir(os.path.join(self.task, "agents"))), ["chat-1"])
         self.ok("init", "--child", "a" * 40, root=self.task)
+        r = self.bad("init", "--child", "../x", root="", code=2)  # a bad key is a usage error even with no parent node
+        self.assertIn("fix: use lowercase letters, digits and -", r.stderr)
 
     def test_cn4_parent_kinds(self):
         for node in (self.root_, self.ws):
@@ -351,6 +353,22 @@ class Hooked(Child):
         self.post()
         self.assertFalse(os.path.exists(self.cpath()))
 
+    def test_cl5_never_finishes_through_a_symlink(self):
+        other = os.path.join(self.tmp, "other")
+        os.mkdir(other)
+        self.ok("init", "--goal", "g", "--done", "d", root=other)
+        self.child(parent=other)
+        foreign = self.cpath(parent=other)
+        shutil.rmtree(os.path.join(self.task, "agents"))
+        os.symlink(os.path.join(other, "agents"), os.path.join(self.task, "agents"))  # agents/ itself (CH-5)
+        self.post()
+        self.assertEqual(self.status(foreign), "active")
+        os.remove(os.path.join(self.task, "agents"))
+        os.mkdir(os.path.join(self.task, "agents"))
+        os.symlink(foreign, self.cpath())  # the slot
+        self.post()
+        self.assertEqual(self.status(foreign), "active")
+
     def test_cl6_done_with_the_parent(self):
         self.child("a-1")
         self.child("b-1")
@@ -372,6 +390,12 @@ class Hooked(Child):
         self.ok("status", "done", root=self.task)
         self.assertEqual(self.status(self.cpath("a-1")), "paused")  # not active: left as it was
         self.assertEqual(self.status(self.agent), "active")  # a plain agent node is not a child node
+
+    def test_cl6_a_child_parent_signs_as_itself(self):
+        self.child("a-1")
+        self.child("g-1", self.cpath("a-1"))
+        self.ok("status", "done", root=self.cpath("a-1"), env=dict(self.env, AWT_BY="paseo:agent/parent"))
+        self.assertEqual(self.rows_of(self.cpath("g-1", self.cpath("a-1")), "status")[-1]["by"], "sub:a-1")
 
 
 class Install(test_awt.Base):
@@ -460,6 +484,8 @@ class Guard(Child):
         self.assertNotIn("permissionDecision", h)
         for verb in ("note", "ask", "decide", "ref", "effect"):
             self.assertIn("additionalContext", self.bash("cd x && awt %s a" % verb, agent_id="a1"))
+        for cmd in ("awt --by=sub:k note a", "awt --model=m1 note a", "awt --by x --model=m note a"):
+            self.assertIn("additionalContext", self.bash(cmd, agent_id="a1"), cmd)
 
     def test_cl9_silent_cases(self):
         self.assertEqual(self.bash("awt note x --dir /p/agents/k", agent_id="a1"), "")
@@ -548,6 +574,19 @@ class PiExt(Child):
         self.assertEqual((res["dir"], res["model"]), (self.cpath("pi-1"), "amazon-bedrock/m1"))
         res = self.child_side("RUN_KEY: pi-1\nDo it.\n")
         self.assertEqual(res["model"], "parent-model")
+        self.assertEqual(self.child_side("RUN_KEY: pi-1\nMODEL: us.anthropic.claude-sonnet-4-5@x:0[1m]\n")["model"], "us.anthropic.claude-sonnet-4-5@x:0[1m]")
+        for bad in ("m" * 201, "m1é", "m1;rm"):  # every row the child writes carries it: a model id, not brief text
+            with self.subTest(model=bad[:20]):
+                self.assertEqual(self.child_side("RUN_KEY: pi-1\nMODEL: %s\n" % bad)["model"], "parent-model")
+
+    def test_cl8_child_side_never_follows_a_symlink(self):
+        other = os.path.join(self.tmp, "other")
+        os.mkdir(other)
+        self.ok("init", "--goal", "g", "--done", "d", root=other)
+        self.child("pi-1", other)
+        os.symlink(self.cpath("pi-1", other), self.cpath("pi-1"))
+        res = self.child_side(brief("pi-1"))
+        self.assertEqual((res["dir"], res["by"]), (self.task, "parent"))
 
     def test_cl8_child_side_changes_nothing_otherwise(self):
         self.child("pi-1")
