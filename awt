@@ -37,13 +37,15 @@ REQ = {
     "decision": ["id", "choice", "why"], "question": ["id", "text"], "answer": ["ref", "text"],
     "ref": ["target", "title", "kind", "access"], "capture": ["path", "from", "title", "sha"],
     "doc": ["path", "action", "by_doc"], "effect": ["id", "step"], "node": ["kind", "name"],
+    "recall": ["trigger", "result", "ids", "chars"],
 }
 KINDS = ("root", "project", "workspace", "task", "agent")
 LEGAL = {"root": ("project", "workspace"), "project": ("workspace",), "workspace": ("task",), "task": ("task", "agent"), "agent": ("agent",)}
 PLURAL = {"project": "projects", "workspace": "workspaces", "task": "tasks", "agent": "agents"}
 NODE_DIRS = {"root": (), "project": ("context", "docs", "misc"), "workspace": ("context", "docs", "misc"), "task": ("context", "docs", "outbox", "misc", "scratch"), "agent": ("scratch",)}
 ENUM = {"node.kind": KINDS, "status.status": ("active", "paused", "done"), "ref.access": ("ok", "none"), "doc.action": ("supersede",),
-        "effect.step": ("planned", "begun", "claimed", "sent", "unknown", "dropped")}
+        "effect.step": ("planned", "begun", "claimed", "sent", "unknown", "dropped"),
+        "recall.trigger": ("prompt", "compact", "every"), "recall.result": ("hits", "none", "stopped", "error", "shadow")}
 LIMIT = "tree exceeds depth %d / %d nodes; deeper nodes are not covered" % (K["depth"], K["nodes"])
 SECTIONS = ["refs", "context", "docs", "outbox", "misc", "decisions", "questions", "effects", "notes", "state"]
 LISTS = SECTIONS + ["nodes", "tree"]
@@ -118,29 +120,47 @@ export const AwtContext = async () => ({
   },
 })
 '''
-PI_EXT = r'''// awt: puts the awt brief in pi's system prompt after a compaction (no message, no turn). Installed by `awt init --hooks pi`; remove with --uninstall.
+PI_EXT = r'''// awt: puts the awt brief in pi's system prompt after a compaction, and related records at an agent's first prompt (no message, no turn). Installed by `awt init --hooks pi`; remove with --uninstall.
 import { execFile } from "node:child_process"
 
 export default function (pi: any) {
   let record = ""
-  const load = () => new Promise<string>((done) => {
+  let recall = ""
+  let first = true
+  const run = (args: string[], input: string) => new Promise<string>((done) => {
     if (!process.env.AWT_DIR) return done("")
-    const p = execFile(__AWT_BIN__, ["resume", "--hook", "--framed"], { encoding: "utf8", timeout: 5000, env: { ...process.env, AWT_NO_BRIEF: "1" } }, (_err, stdout) => {
-      const t = String(stdout || "")
-      done(t.startsWith("awt record for this task") ? t : "")
-    })
-    p.stdin?.end()
+    try {
+      const p = execFile(__AWT_BIN__, args, { encoding: "utf8", timeout: 5000, env: { ...process.env, AWT_NO_BRIEF: "1" } }, (_err, stdout) => done(String(stdout || "")))
+      p.stdin?.end(input)
+    } catch { done("") }
   })
+  const load = async () => {
+    const t = await run(["resume", "--hook", "--framed"], "")
+    return t.startsWith("awt record for this task") ? t : ""
+  }
   pi.on("session_start", async (_e: any, ctx: any) => {
     record = ""
+    recall = ""
     try {
-      if (ctx.sessionManager.getBranch().some((x: any) => x.type === "compaction")) record = await load()
+      const branch = ctx.sessionManager.getBranch()
+      first = !branch.some((x: any) => x.type === "message")
+      if (branch.some((x: any) => x.type === "compaction")) record = await load()
     } catch {}
   })
-  pi.on("session_compact", async () => { record = await load() })
-  pi.on("before_agent_start", (event: any) => {
+  pi.on("session_compact", async () => { recall = ""; record = await load() })
+  pi.on("before_agent_start", async (event: any) => {
     const sections = event?.systemPromptOptions?.sections
-    if (record && sections) sections.awt_record = record
+    if (first) {
+      first = false
+      try {
+        const t = await run(["find", "--like", "-", "--hook"], String(event?.prompt ?? ""))
+        if (t.startsWith("awt: earlier records")) recall = t
+      } catch {}
+    }
+    if (sections) {
+      if (record) sections.awt_record = record
+      if (recall) sections.awt_recall = recall
+    }
   })
 }
 '''
@@ -271,7 +291,7 @@ CLI_HELP = {
         "--goal": "what this task is for (250 characters)", "--done": "what finished looks like (250 characters)",
         "--kind": "make a node of this kind under the nearest enclosing node (see SPEC.md, Node tree)",
         "--name": "directory name of the new node", "--key": "stable key of the new node, such as paseo:agent/ID",
-        "--hooks": "person only, ask first: install the after-compaction context hook for claude, codex, opencode, pi or all (edits that provider's own config)",
+        "--hooks": "person only, ask first: install the context hooks (after compaction and /clear, and at the first prompt on claude and pi) for claude, codex, opencode, pi or all (edits that provider's own config)",
         "--uninstall": "with --hooks: remove the hook again"}),
     "resume": ("Print the brief: goal, state, open questions and effects, what changed since the last handoff.", {
         "--hook": "print nothing and exit 0 when there is no task or on any error (for a session-start hook)",
@@ -284,7 +304,8 @@ CLI_HELP = {
     "find": ("Search records and files; --like ranks related records from the whole tree.", {
         "term": "text to look for (case-insensitive, literal)", "--up": "search ancestors", "--down": "search descendants",
         "--tree": "search the whole tree under the nearest root", "--like": "rank related decisions, answers and notes from every workspace in the tree for this sentence",
-        "--limit": "most results to print", "--sessions": "also search ingested session text (needs store.db)"}),
+        "--limit": "most results to print", "--sessions": "also search ingested session text (needs store.db)",
+        "--hook": "with --like -: the first-prompt recall for a hook (reads the prompt on stdin; prints nothing and exits 0 unless an agent node gets related records)"}),
     "state": ("Leave the handoff: where things stand and what comes next.", {
         "--now": "where things stand", "--next": "what the next session should do", "--scope": "name of a sub-unit of work"}),
     "note": ("Record a small fact for later.", {"text": "the fact"}),
@@ -596,9 +617,9 @@ def valid(r):
     if not isinstance(r, dict):
         return False
     for k, v in r.items():
-        if k in ("v", "attempt", "pid", "timeout"):
+        if k in ("v", "attempt", "pid", "timeout", "chars"):
             ok = type(v) is int
-        elif k in ("tags", "after"):
+        elif k in ("tags", "after", "ids"):
             ok = isinstance(v, list) and all(isinstance(x, str) for x in v)
         else:
             ok = isinstance(v, str)
@@ -1319,9 +1340,10 @@ def awt_path():
     return me
 
 
-def hook_command():
+def hook_command(prompt=False):
+    """The Claude hook command line. Exit 0 whatever happens: a UserPromptSubmit hook that exits 2 would block the person's prompt (PR13)."""
     me = awt_path()
-    return '[ -n "$AWT_DIR" ] || exit 0; %s resume --hook --framed 2>/dev/null; exit 0 # %s' % (shlex.quote(me), HOOK_MARK)
+    return '[ -n "$AWT_DIR" ] || exit 0; %s %s 2>/dev/null; exit 0 # %s' % (shlex.quote(me), "find --like - --hook" if prompt else "resume --hook --framed", HOOK_MARK)
 
 
 def is_awt_hook(entry):
@@ -1360,18 +1382,22 @@ def dir_lock(d):
         os.close(fd)
 
 
-def merge_claude_settings(path, uninstall):
+def merge_claude_settings(path, uninstall, prov="claude"):
     path = os.path.realpath(path)
     if uninstall and not os.path.isdir(os.path.dirname(path)):
         return "absent"  # a provider that is not there: create nothing
     with dir_lock(os.path.dirname(path)):
-        return merge_claude_settings_locked(path, uninstall)
+        return merge_claude_settings_locked(path, uninstall, prov)
 
 
-def merge_claude_settings_locked(path, uninstall):
-    """Add or remove the SessionStart `compact` hook. Returns what happened; every other key and every other hook stays as it was,
-    even in an entry that also holds awt's hook. A symlinked settings file is followed: the target is written."""
+def merge_claude_settings_locked(path, uninstall, prov="claude"):
+    """Add or remove awt's two Claude hooks: SessionStart `compact|clear` (the framed brief and recall) and UserPromptSubmit (the first-prompt recall). Returns what happened;
+    every other key and every other hook stays as it was, even in an entry that also holds awt's hook. A symlinked settings file is followed: the target is written."""
     path = os.path.realpath(path)
+    ours = lambda h: isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))
+    want = {"SessionStart": ("compact|clear" if prov == "claude" else "compact", {"type": "command", "timeout": 10, "command": hook_command()})}
+    if prov == "claude":  # Codex keeps its one compaction hook
+        want["UserPromptSubmit"] = (None, {"type": "command", "timeout": 5, "command": hook_command(True)})
     for attempt in range(3):
         try:
             with open(path, encoding="utf-8") as g:
@@ -1383,34 +1409,35 @@ def merge_claude_settings_locked(path, uninstall):
             raw, sig, st = None, None, {}
         except ValueError:
             die("%s is not valid JSON; awt will not touch it" % path, "fix the file by hand, then run this again")
-        if not isinstance(st, dict) or not isinstance(st.get("hooks", {}), dict) or not isinstance(st.get("hooks", {}).get("SessionStart", []), list):
-            die("%s has an unexpected hooks shape; awt will not touch it" % path, "make hooks.SessionStart a list, then run this again")
+        if not isinstance(st, dict) or not isinstance(st.get("hooks", {}), dict) or any(not isinstance(st.get("hooks", {}).get(ev, []), list) for ev in want):
+            die("%s has an unexpected hooks shape; awt will not touch it" % path, "make hooks.SessionStart and hooks.UserPromptSubmit lists, then run this again")
         hooks = st.setdefault("hooks", {})
-        ss = hooks.setdefault("SessionStart", [])
-        ours = lambda h: isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))
-        mine = [h for e in ss if isinstance(e, dict) for h in (e.get("hooks") or []) if ours(h)]
-        entry = {"matcher": "compact", "hooks": [{"type": "command", "timeout": 10, "command": hook_command()}]}
+        same, anyone = True, False
+        for ev, (matcher, hook) in want.items():
+            lst = hooks.setdefault(ev, [])
+            mine = [h for e in lst if isinstance(e, dict) for h in (e.get("hooks") or []) if ours(h)]
+            anyone = anyone or bool(mine)
+            same = same and len(mine) == 1 and mine[0] == hook and any(isinstance(e, dict) and e.get("matcher") == matcher and mine[0] in (e.get("hooks") or []) for e in lst)
+            kept = []
+            for e in lst:
+                if isinstance(e, dict) and isinstance(e.get("hooks"), list) and any(ours(h) for h in e["hooks"]):
+                    e["hooks"] = [h for h in e["hooks"] if not ours(h)]
+                    if not e["hooks"]:
+                        continue
+                kept.append(e)
+            lst[:] = kept + ([] if uninstall else [dict({"matcher": matcher} if matcher else {}, hooks=[hook])])
+            if uninstall and not lst:
+                del hooks[ev]
         if uninstall:
-            if not mine:
+            if not anyone:
                 return "absent"
             res = "removed"
-        else:
-            if len(mine) == 1 and mine[0] == entry["hooks"][0] and any(isinstance(e, dict) and e.get("matcher") == "compact" and mine[0] in (e.get("hooks") or []) for e in ss):
-                return "unchanged"
-            res = "updated" if mine else "installed"
-        kept = []
-        for e in ss:
-            if isinstance(e, dict) and isinstance(e.get("hooks"), list) and any(ours(h) for h in e["hooks"]):
-                e["hooks"] = [h for h in e["hooks"] if not ours(h)]
-                if not e["hooks"]:
-                    continue
-            kept.append(e)
-        ss[:] = kept + ([] if uninstall else [entry])
-        if uninstall:
-            if not ss:
-                del hooks["SessionStart"]
             if not hooks:
                 del st["hooks"]
+        else:
+            if same:
+                return "unchanged"
+            res = "updated" if anyone else "installed"
         mode = os.stat(path).st_mode & 0o777 if raw is not None else 0o600
         if raw is not None:
             bak = "%s.awt-bak-%s-%d" % (path, datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f"), os.getpid())
@@ -1467,7 +1494,7 @@ def cmd_hooks(a):
     for prov in want:
         p = paths[prov]
         if prov in JSON_HOOKS:
-            res = merge_claude_settings(p, a.uninstall)
+            res = merge_claude_settings(p, a.uninstall, prov)
             if prov == "codex" and not a.uninstall and codex_inline_hooks(p):
                 out("warn %s has an inline [hooks] table; Codex merges it with hooks.json and warns at every start; move those hooks into hooks.json or remove one of the two" % os.path.join(os.path.dirname(p), "config.toml"))
         else:
@@ -1490,7 +1517,7 @@ def hook_state(prov):
         with open(p, encoding="utf-8") as g:
             txt = g.read()
         if prov in JSON_HOOKS:
-            hs = [h for e in json.loads(txt)["hooks"]["SessionStart"] if isinstance(e, dict) and e.get("matcher") == "compact"
+            hs = [h for e in json.loads(txt)["hooks"]["SessionStart"] if isinstance(e, dict) and "compact" in str(e.get("matcher"))
                   for h in e.get("hooks") or [] if isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))]
             if not hs:
                 return "missing", None
@@ -1506,6 +1533,14 @@ def hook_state(prov):
     return ("installed" if os.path.isfile(pin) and os.access(pin, os.X_OK) else "stale"), pin
 
 
+def prompt_hook_present(path):
+    try:
+        with open(path, encoding="utf-8") as g:
+            return any(is_awt_hook(e) for e in json.load(g)["hooks"]["UserPromptSubmit"])
+    except Exception:
+        return False
+
+
 def hook_checks(line):
     """doctor: one line per detected provider; warns when the compaction hook is missing or pins an awt that is gone. Reads only; never fails."""
     for prov, p in hook_paths().items():
@@ -1515,6 +1550,8 @@ def hook_checks(line):
         st, pin = hook_state(prov)
         if st == "installed":
             line("ok", "%s compaction hook installed" % prov)
+            if prov == "claude" and not prompt_hook_present(p):
+                line("warn", "claude UserPromptSubmit hook missing; the first prompt gets no related records (ask the person to re-run: awt init --hooks claude; agents do not run it)")
         elif st == "stale":
             line("warn", "%s compaction hook pins %s, which is missing or not executable; after a compaction the agent will not get the awt record (ask the person to re-run: awt init --hooks %s)" % (prov, pin, prov))
         else:
@@ -1623,7 +1660,8 @@ def cmd_resume(a):
                 globals()["ROOT"] = r
                 set_cmd()
                 globals()["FRAMED"] = bool(a.framed)
-                sys.stdout.write((FRAME + "\n" if a.framed else "") + brief())
+                text = (FRAME + "\n" if a.framed else "") + brief()
+                sys.stdout.write(text + (passive_section() if a.framed else ""))
                 sys.stdout.flush()
                 if not a.framed and not os.environ.get("AWT_NO_BRIEF"):
                     write_brief(r)
@@ -1661,6 +1699,7 @@ def since_rows(a):
             if epoch(r["ts"]) >= t:
                 row = {k: r.get(k) for k in ("type", "ts", "by", "id")}
                 row["scope"] = r.get("scope", "main") if r["type"] == "state" else None
+                row["ids"], row["result"] = (r["ids"], r["result"]) if r["type"] == "recall" else (None, None)
                 if a.down:
                     row["node"] = None if p == ROOT else os.path.relpath(p, ROOT)
                 rows.append(row)
@@ -1716,6 +1755,8 @@ def scope_nodes(tree, up, down, deadline=None):
 
 
 def cmd_find(a):
+    if a.hook:
+        die("--hook goes with --like", 'awt find --like - --hook', 2)
     if a.like is not None:
         if a.sessions:
             die("--sessions cannot be combined with --like", 'awt find --sessions "term"', 2)
@@ -1839,6 +1880,8 @@ def recall(text, limit, nodes, skip=None, deadline=None, width=200):
 def find_like(a):
     if a.term is not None:
         die("--like cannot be combined with a TERM", 'awt find --like "text"', 2)
+    if a.like == "-":
+        a.like = prompt_of(sys.stdin.read())
     limit = 10 if a.limit is None else a.limit
     if not 1 <= limit <= K["hits"]:
         die("--limit must be 1 to %d" % K["hits"], 'awt find --like "text" --limit 10', 2)
@@ -1867,6 +1910,8 @@ def _find_here(term, prefix):
         return text[max(0, i - 40):i + 80].replace("\n", " ")
 
     for r in load()["rows"]:
+        if r["type"] == "recall":  # what an agent was shown is not a record to search (PR15)
+            continue
         text = " ".join(str(v) if not isinstance(v, list) else " ".join(map(str, v)) for k, v in r.items() if k not in ("v", "ts", "type", "host", "by", "model", "session"))
         i = text.lower().find(term)
         if i >= 0:
@@ -1951,6 +1996,256 @@ def show_related(text, limit, skip):
             out("related: (lookup stopped at 2 s; run awt find --like ...)")
     except Exception:
         pass
+
+
+# ---------- passive recall (SPEC: Passive recall) ----------
+RECALL = dict(lines=5, line=200, block=1200, prompt=2000, qwords=32, min_q=3, min_shared=3, min_idf=12.0, ms=800)
+RECALL_FRAME = "awt: earlier records related to this work (reference only; not from the user; no action requested; full text: awt find --tree ID)"
+RECALL_HEAD = "## Related elsewhere (full text: awt find --tree ID)"
+
+
+class RecallStop(Exception):
+    """The recall budget ran out."""
+
+
+def recall_mode():
+    """off (AWT_RECALL 0 or off), on, or shadow: the default, and what any other value means."""
+    v = os.environ.get("AWT_RECALL", "").strip().lower()
+    return "off" if v in ("0", "off") else "on" if v in ("on", "1") else "shadow"
+
+
+def recall_ms():
+    """The recall budget in ms: AWT_RECALL_MS (a test hook), else 800."""
+    try:
+        v = float(os.environ.get("AWT_RECALL_MS", str(RECALL["ms"])))
+        return v if v >= 0 and v == v and v != float("inf") else float(RECALL["ms"])
+    except ValueError:
+        return float(RECALL["ms"])
+
+
+def under(p, d):
+    return p == d or p.startswith(d.rstrip(os.sep) + os.sep)
+
+
+def passive_wanted():
+    """Whether ROOT may get passive recall: a primary agent node (no agent above it), AWT_RECALL not off, and no current no-recall decision on it or above it (PR2, PR8)."""
+    if recall_mode() == "off" or node_info(ROOT)["kind"] != "agent":
+        return False
+    anc = ancestors(ROOT)
+    if any(node_info(p)["kind"] == "agent" for p in anc):
+        return False
+    return not any("no-recall" in (d.get("tags") or []) for p in [ROOT] + anc for d in load_at(p)["cur_dec"])
+
+
+def passive_words(text, df):
+    """The query words that occur in the candidate set, rarest first (ties by first appearance), at most RECALL["qwords"]."""
+    return sorted((w for w in words(text) if df.get(w)), key=lambda w: df[w])[:RECALL["qwords"]]
+
+
+def recall_where(p):
+    """Workspace name, then / and the task name when the record is in a task or below one."""
+    chain = [os.path.realpath(p)] + ancestors(p)
+    kinds = [(node_info(x)["kind"], node_info(x)["name"]) for x in chain]
+    ws = next((n for k, n in kinds if k == "workspace"), None)
+    task = next((n for k, n in kinds if k == "task"), None)
+    return re.sub(r"\s+", "-", "/".join(x for x in ((ws, task) if ws else (kinds[0][1],)) if x).strip()) or "node"
+
+
+def recall_age(ts):
+    s = max(0, int(time.time() - epoch(ts)))
+    return "now" if s < 60 else "%dm" % (s // 60) if s < 3600 else "%dh" % (s // 3600) if s < 86400 else "%dd" % (s // 86400)
+
+
+def recall_text(s):
+    s = " ".join(re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(s)).split())
+    return "\\" + s if s.startswith("#") else s
+
+
+def passive_scope(anc, top):
+    """The real paths whose subtrees are the scope, or None for the whole tree (AWT_RECALL_SCOPE: project, workspace, tree)."""
+    mode = os.environ.get("AWT_RECALL_SCOPE", "").strip().lower()
+    if mode == "tree":
+        return None
+    real = [os.path.realpath(p) for p in anc]
+    kinds = [node_info(p)["kind"] for p in anc]
+    ws = next((p for p, k in zip(real, kinds) if k == "workspace"), None)
+    if mode != "workspace":
+        proj = next((p for p, k in zip(real, kinds) if k == "project"), None)
+        if proj:
+            return [proj]
+        if ws:
+            pref = {r["target"] for r in load_at(ws)["refs"].values() if r["target"].startswith("paseo:project/")}
+            if pref:  # the legacy placement: workspaces directly under the root that name the same Paseo project
+                same = [os.path.realpath(c) for c in children(top) if node_info(c)["kind"] == "workspace" and any(r["target"] in pref for r in load_at(c)["refs"].values())]
+                return same + ([] if ws in same else [ws])
+    return [ws or next((p for p, k in reversed(list(zip(real, kinds))) if k != "root"), os.path.realpath(ROOT))]
+
+
+def passive_find(qtext, deadline):
+    """(ids, lines): the records most related to qtext for the agent node ROOT, gated and scoped (PR5 to PR10). Raises RecallStop at the deadline."""
+    def tick():
+        if time.time() >= deadline:
+            raise RecallStop()
+    tick()
+    if os.environ.get("AWT_TEST_RECALL_FAULT"):  # a test hook: an error here must print nothing and exit 0
+        raise RuntimeError("injected recall fault")
+    if len(words(qtext)) < RECALL["min_q"]:
+        return [], []
+    me, anc = os.path.realpath(ROOT), ancestors(ROOT)
+    top = tree_top(ROOT)
+    seen, nodes = set(), []
+    for p in scope_nodes(True, False, False, deadline)[0]:
+        if os.path.realpath(p) not in seen:
+            seen.add(os.path.realpath(p))
+            nodes.append(os.path.realpath(p))
+    shown_ids, none = set(), []
+    tp = task_of(anc)
+    if tp:
+        TD = load_at(tp)
+        shown_ids |= {d["id"] for d in task_decisions(TD)} | {q["id"] for q in TD["open_q"]}
+    for p in anc:
+        shown_ids |= {d["id"] for d in load_at(p)["cur_dec"] if "rule" in (d.get("tags") or [])}
+    cands = []  # (node, id, kind, ts, word set, indexed text, line text, rule)
+    for p in nodes:
+        tick()
+        try:
+            D = load_at(p)
+        except Exception:
+            continue
+        if any("no-recall" in (d.get("tags") or []) for d in D["cur_dec"]):
+            none.append(p)
+        for d in D["cur_dec"]:
+            rule = "rule" in (d.get("tags") or [])
+            t = d["choice"] + " " + d["why"]
+            cands.append((p, d["id"], "rule" if rule else "decision", d["ts"], set(words(d["id"] + " " + t)), d["id"] + " " + t, "%s (why: %s)" % (d["choice"], d["why"]), rule))
+        for i, q in D["q"].items():
+            ans = D["ans"].get(i)
+            t = q["text"] + (" " + ans["text"] if ans else "")
+            cands.append((p, i, "question", q["ts"], set(words(i + " " + t)), i + " " + t, q["text"] + (" -> " + ans["text"] if ans else ""), False))
+        for n in D["notes"]:
+            cands.append((p, n["id"], "note", n["ts"], set(words(n["id"] + " " + n["text"])), n["id"] + " " + n["text"], n["text"], False))
+    tick()
+    N, df = len(cands), {}
+    for c in cands:
+        for w in c[4]:
+            df[w] = df.get(w, 0) + 1
+    qw = passive_words(qtext, df)
+    scope = passive_scope(anc, top)
+    elig = [c for c in cands if not under(c[0], me) and c[1] not in shown_ids and not any(under(c[0], x) for x in none)
+            and (scope is None or any(under(c[0], x) for x in scope))]
+    idf = {w: math.log(N / df[w]) for w in qw}
+    hit = [c for c in elig if sum(w in c[4] for w in qw) >= RECALL["min_shared"] and sum(idf[w] for w in qw if w in c[4]) >= RECALL["min_idf"]]
+    if not hit:
+        return [], []
+    tick()
+    sc = bm25_scores([c[5] for c in elig], qw)
+    at = {id(c): i for i, c in enumerate(elig)}
+    ranked = sorted(hit, key=lambda c: c[3], reverse=True)  # ties go to the newest
+    ranked.sort(key=lambda c: sc.get(at[id(c)], 0) * (1.5 if c[7] else 1), reverse=True)
+    ids, lines, texts = [], [], set()
+    for c in ranked:
+        t = recall_text(c[6])
+        if t in texts:
+            continue
+        texts.add(t)
+        line = recall_text("%s %s %s %s: %s" % (c[1], c[2], recall_age(c[3]), recall_where(c[0]), t))
+        ids.append(c[1])
+        lines.append(line if len(line) <= RECALL["line"] else line[:RECALL["line"] - 1] + "~")
+        if len(ids) == RECALL["lines"]:
+            break
+    return ids, lines
+
+
+def passive_block(head, lines):
+    """(how many lines fit, the text): head and whole lines within the block budget, none when no line fits."""
+    n, k = len(head) + 1, 0
+    for l in lines:
+        if n + len(l) + 1 > RECALL["block"]:
+            break
+        n += len(l) + 1
+        k += 1
+    return k, "".join(x + "\n" for x in [head] + lines[:k]) if k else ""
+
+
+def passive_goals():
+    """The agent's goal and its task's goal."""
+    D, tp = load(), task_of(ancestors(ROOT))
+    return [(D["task"] or {}).get("goal", "")] + [(load_at(tp)["task"] or {}).get("goal", "")] * bool(tp)
+
+
+def passive_round(qtext, trigger, head, mode):
+    """Find, write the recall row, and return the text to print ('' for nothing). The row comes before any output (PR4); an every row is written only when a result exists (PR24)."""
+    ids, lines, result, text = [], [], "none", ""
+    try:
+        ids, lines = passive_find(qtext, time.time() + recall_ms() / 1000)
+    except RecallStop:
+        result = "stopped"
+    except Exception:
+        result = "error"
+    if result in ("stopped", "error"):
+        ids = []
+        if trigger == "every":
+            return ""
+    elif trigger == "every":
+        emit("recall", trigger=trigger, result="shadow", ids=ids, chars=0)
+        return ""
+    else:
+        k, text = passive_block(head, lines)
+        ids = ids[:k]
+        result = "none" if not ids else "shadow" if mode == "shadow" else "hits"
+        text = text if result == "hits" else ""
+    emit("recall", trigger=trigger, result=result, ids=ids, chars=len(text))
+    return text
+
+
+def prompt_of(raw):
+    """The `prompt` string of a JSON object, else the raw text."""
+    try:
+        j = json.loads(raw)
+    except (ValueError, RecursionError):
+        return raw
+    return j["prompt"] if isinstance(j, dict) and isinstance(j.get("prompt"), str) else raw
+
+
+def find_hook(a):
+    """find --like TEXT --hook: the first-prompt recall (A). Prints at most one block, never fails, never exits non-zero."""
+    global ROOT
+    try:
+        raw = sys.stdin.read() if a.like == "-" else a.like
+        mode = recall_mode()
+        if mode == "off" or not (a.dir or os.environ.get("AWT_DIR")):
+            return
+        ROOT = find_root(a.dir)
+        if not ROOT or not passive_wanted():
+            return
+        prompt = prompt_of(raw)
+        if prompt.lstrip().startswith("[awt]"):
+            return
+        prior = any(r["type"] == "recall" and r["trigger"] in ("prompt", "compact") for r in load()["rows"])
+        if prior and mode != "shadow":
+            return
+        text = passive_round(" ".join([prompt[:RECALL["prompt"]]] + passive_goals()), "every" if prior else "prompt", RECALL_FRAME, mode)
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BaseException as x:
+        if isinstance(x, KeyboardInterrupt):
+            raise
+
+
+def passive_section():
+    """The `## Related elsewhere` section of a framed brief (B), '' for nothing. Never raises."""
+    try:
+        mode = recall_mode()
+        if mode == "off" or not passive_wanted():
+            return ""
+        D = load()
+        st = lambda sc, *k: [D["states"][sc][x] for x in k if sc in D["states"]]
+        q = " ".join(passive_goals() + st("main", "now", "next") + st("auto", "now"))
+        return passive_round(q, "compact", RECALL_HEAD, mode)
+    except BaseException as x:
+        if isinstance(x, KeyboardInterrupt):
+            raise
+        return ""
 
 
 def cmd_decide(a):
@@ -2955,7 +3250,7 @@ def cmd_doctor(a):
     line("ok" if has else "fail", "AGENTS.md has the awt block" if has else "AGENTS.md lacks the awt block (./awt init)")
     try:
         r = subprocess.run([sys.executable, os.path.realpath(__file__), "--dir", ROOT, "resume", "--hook"], capture_output=True, text=True, timeout=30,
-                           env=dict(os.environ, AWT_NO_BRIEF="1"))  # a check must not write
+                           env=dict(os.environ, AWT_NO_BRIEF="1", AWT_RECALL="0"))  # a check must not write
         line("ok" if r.returncode == 0 and r.stdout.strip() else "fail", "resume --hook prints a brief")
     except Exception as x:
         line("fail", "resume --hook did not run: %s" % x)
@@ -4796,7 +5091,7 @@ def build():
                          (("--hooks",), dict(choices=["claude", "codex", "opencode", "pi", "all"])), (("--uninstall",), F)])
     V(sp, "resume", opt=[(("--hook",), F), (("--framed",), F), (("--scope",), {}), (("--json",), F)])
     V(sp, "list", [("section", dict(nargs="?", choices=LISTS))], [(("--all",), F), (("--json",), F), (("--since",), T), (("--down",), F)])
-    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F)])
+    V(sp, "find", [("term", dict(nargs="?"))], [(("--up",), F), (("--down",), F), (("--tree",), F), (("--like",), T), (("--limit",), dict(type=int)), (("--sessions",), F), (("--hook",), F)])
     V(sp, "state", opt=[(("--now",), dict(required=True)), (("--next",), dict(required=True)), (("--scope",), T)])
     V(sp, "note", [("text", T)])
     V(sp, "decide", [("choice", T)], [(("--why",), dict(required=True)), (("--supersedes",), T), (("--tag",), dict(action="append")), (("--related",), dict(type=int))])
@@ -4900,6 +5195,10 @@ def main(argv):
         return cmd_ui(a)
     if a.verb == "doctor" and a.staged:
         return doctor_staged(a)
+    if a.verb == "find" and a.hook:
+        if a.like is None or a.term is not None or a.sessions:
+            die("--hook goes with --like TEXT only", 'awt find --like - --hook', 2)
+        return find_hook(a)
     ROOT = find_root(d)
     set_cmd()
     if not ROOT:

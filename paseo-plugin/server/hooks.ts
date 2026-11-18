@@ -453,7 +453,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       const model = await models.of({ id: request.agentId, provider: request.provider, cwd: request.cwd, title: request.title }, ctx, request.reason !== "create");
       const node = await withModel(model, () => agentNode({ id: request.agentId, workspaceId: request.workspaceId, cwd: request.cwd, title: request.title, provider: request.provider, labels: request.labels }, ctx));
       withDir.add(request.agentId);
-      const env = { ...request.env, AWT_DIR: node, AWT_BY: request.agentId, AWT_MODEL: model, ...(cfg.related ? { AWT_RELATED: cfg.related } : {}) };
+      const env = { ...request.env, AWT_DIR: node, AWT_BY: request.agentId, AWT_MODEL: model, ...(cfg.related ? { AWT_RELATED: cfg.related } : {}), ...(cfg.recall ? { AWT_RECALL: cfg.recall } : {}), ...(cfg.recallScope ? { AWT_RECALL_SCOPE: cfg.recallScope } : {}) };
       return { ...request, env, tools: [...request.tools.filter((t) => t.name !== "awt_resume" && t.name !== "awt_find"), awtResume, awtFind] };
     });
   }));
@@ -554,7 +554,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
       if (cfg.receipt === "off" || started === undefined || !(await tracked(agent.id))) return;
       const node = await tree.find(`paseo:agent/${agent.id}`);
       const data = node ? await readReceipt(cfg, node, new Date(started), agent.id) : null;
-      if (!data || (cfg.receipt === "changes" && (data.empty || (data.auto && data.counts.state === 1 && Object.keys(data.counts).length === 1)))) return;
+      if (!data || (cfg.receipt === "changes" && !data.recalled?.length && (data.empty || (data.auto && data.counts.state === 1 && Object.keys(data.counts).length === 1)))) return;
       await ctx.paseo.agents.ref(agent.id).timeline.append({ type: "plugin", id: `${RECEIPT_KIND}.${turnId ?? started}`, kind: RECEIPT_KIND, version: RECEIPT_VERSION, data });
     }));
   }));

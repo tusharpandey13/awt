@@ -103,8 +103,12 @@ test("P6b awt_find runs awt find --like, passes limit, fails soft", async () => 
   const cx = { agent: agentPayload("agt_1"), paseo: {}, signal: new AbortController().signal };
   const dir = open.env.AWT_DIR;
   r.awt(dir, "decide", "use-sqlite-zq41", "--why", "local storage");
-  const hit = await find.execute({ query: "sqlite storage zq41" }, cx);
+  // Words are whole tokens: `use-sqlite-zq41` is one word, so the query must repeat it. find --like does not exclude the caller's own node.
+  const hit = await find.execute({ query: "use-sqlite-zq41 local storage" }, cx);
   assert.ok(!hit.isError, hit.text);
+  assert.match(hit.text, /use-sqlite-zq41/);
+  const miss = await find.execute({ query: "sqlite storage zq41" }, cx); // only one whole word shared: below the gate of 2
+  assert.equal(miss.text, "no related records");
   // The query is the value of --like, never a flag: awt's global --dir/--by scan must not see it.
   for (const q of ["--dir=/nonexistent-awt", "--by=person", "--dir"]) {
     const inj = await find.execute({ query: q }, cx);

@@ -42,7 +42,7 @@ directory name of the new node
 stable key of the new node, such as paseo:agent/ID
 .TP
 .B \-\-hooks HOOKS
-person only, ask first: install the after\-compaction context hook for claude, codex, opencode, pi or all (edits that provider's own config)
+person only, ask first: install the context hooks (after compaction and /clear, and at the first prompt on claude and pi) for claude, codex, opencode, pi or all (edits that provider's own config)
 .TP
 .B \-\-uninstall
 with \-\-hooks: remove the hook again
@@ -84,7 +84,7 @@ include the nodes below this one
 .SS find
 Search records and files; \-\-like ranks related records from the whole tree.
 .PP
-.B awt find [\-\-up] [\-\-down] [\-\-tree] [\-\-like LIKE] [\-\-limit LIMIT] [\-\-sessions] TERM
+.B awt find [\-\-up] [\-\-down] [\-\-tree] [\-\-like LIKE] [\-\-limit LIMIT] [\-\-sessions] [\-\-hook] TERM
 .TP
 .B TERM
 text to look for (case\-insensitive, literal)
@@ -106,6 +106,9 @@ most results to print
 .TP
 .B \-\-sessions
 also search ingested session text (needs store.db)
+.TP
+.B \-\-hook
+with \-\-like \-: the first\-prompt recall for a hook (reads the prompt on stdin; prints nothing and exits 0 unless an agent node gets related records)
 .SS state
 Leave the handoff: where things stand and what comes next.
 .PP

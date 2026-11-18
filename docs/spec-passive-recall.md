@@ -1,6 +1,6 @@
 # Spec: passive recall
 
-Status: draft for review; owner decisions of 18-Nov-2026 are recorded in Decisions. No code yet. Once approved, the normative parts move into `SPEC.md` and `tests/TEST-SPEC.md` in the same PR as the code, with the tests written first.
+Status: built (unreleased). The normative parts are in `SPEC.md` (Passive recall) and `tests/TEST-SPEC.md`; this document keeps the rationale, calibration and decisions. Owner decisions of 18-Nov-2026 are recorded in Decisions. Deviations from this text are listed in the pull request.
 
 Builds on `docs/spec-active-recall.md` (built and released in v0.3.x) and on two open branches: `feat/find-tool` (the `awt_find` agent tool and a search clause in `AWT_BLOCK`) and `fix/unknown-verb` (the unknown verb `crossref` and similar words map to `awt find --like`). Those make search easy to call. This spec is the next step: related records are pushed to the agent at the start of a context window, so it never has to search.
 
