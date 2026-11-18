@@ -6,7 +6,8 @@ Every new agent session starts cold. It doesn't know what was decided yesterday,
 
 - **One file, no dependencies.** A single Python 3.9 script. No server, no database, no account.
 - **Works with any agent** that reads `AGENTS.md` and runs shell commands: Claude Code, Codex, opencode and others.
-- **Safe outbound work.** Messages, comments and updates can be declared before they go out, are claimed only once, and are never silently retried. It keeps the ledger and never runs the command itself.
+- **Safe outbound work.** Messages, comments and updates can be declared before they go out, are claimed only once, and are never silently retried. Pushes, `gh` writes and `curl` posts are also noticed and recorded for you, with nothing for the agent to do. It keeps the ledger and never runs the command itself.
+- **Knows which model did what.** Every record names the model that wrote it, and the history of your Claude Code, pi, opencode and Paseo sessions can be searched, queried and browsed.
 - **Scales with the task.** A small brief for a small task, and a tree of workspaces, tasks and agents for a big one.
 - **Plugs into Paseo.** One plugin gives every Paseo workspace and agent its own place in the tree, automatically.
 
@@ -42,7 +43,7 @@ You mostly talk to your agent. The commands you'll use yourself:
 ./awt effect mark e-1a2b3c4d sent   # you sent something that was planned
 ```
 
-`./awt help` lists every verb. [docs/guide.md](docs/guide.md) walks through a full task, sending messages, and troubleshooting.
+`awt --help` lists every verb and `awt VERB --help` its flags; there is a man page ([docs/awt.1](docs/awt.1)) and a [reference page per verb](docs/reference/index.md), all generated from the same table. [docs/concepts.md](docs/concepts.md) is a one-page glossary. [docs/guide.md](docs/guide.md) walks through a full task, sending messages, and troubleshooting.
 
 ## What goes where
 
@@ -65,6 +66,24 @@ Links beat copies. `./awt ref <url> --title "..."` records a link, and `--no-acc
 - **The brief has a fixed size.** It stays under 4,400 characters however large the task grows (5,200 for a node in a tree). Everything else is one `./awt find` away.
 - **Outbound work can be declared before it is sent.** Each effect is claimed once (`begin`). A send that was begun and never marked stays `begun`, and one marked `unknown` is never retried automatically, because it may have gone through. The tool never executes the command: the sender uses their own tools, so the host's permission system sees the real command.
 - **Parallel agents are safe.** Every write is a single atomic append, with no locks to go stale.
+
+## Sending things once: declared and detected effects
+
+Two ways an outbound send reaches the ledger:
+
+- **Declared.** `./awt effect plan`, `begin`, send it yourself, `mark sent`. Good for a message you want to review first.
+- **Detected.** With the Claude Code hooks that `init` writes, or the Paseo plugin, it notices outbound tool calls (`git push`, `gh pr comment`, `curl -X POST`, `ssh`, MCP tools that write) and records them itself. If the exact same risky send already went out, the host asks you before it goes out twice. This is labelling, not a permission system: it never blocks a call, and it can miss one. Secrets in the command are redacted before they are stored.
+
+## Models, history and the UI
+
+Every record carries the model that wrote it: pass `--model ID` or set `AWT_MODEL` (the Paseo plugin does this for every agent). Without either, the record says `unknown:unset`.
+
+`./awt ingest` copies your agents' own transcripts into a private store, outside the task tree, and builds a SQLite database from them. Sources: `--source claude` (the default), `pi`, `opencode`, `paseo`, `ccusage` for usage totals, or `all`. Sources are only read, never changed, and nothing leaves your machine. The database joins sessions, turns, tool calls and cost to your projects, tasks and agents, so you can ask which model a task cost most on, or what an agent did in a session. Ready-made queries are in [docs/recipes/](docs/recipes/) and the tables in [docs/schema.md](docs/schema.md).
+
+```sh
+./awt ingest --source all
+./awt ui                     # read-only browser at http://127.0.0.1:8777; needs: pipx install 'datasette<1'
+```
 
 ## Big work: the node tree
 
@@ -135,6 +154,8 @@ If you have a `wt` tracker or task directory, convert it with the one-off `migra
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tests/chaos.py
 ```
+
+Help text lives in one table in `awt`; run `python3 tools/gen_docs.py` after changing it, to regenerate the man page and the reference.
 
 ## License
 

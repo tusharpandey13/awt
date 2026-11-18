@@ -1,0 +1,309 @@
+.TH AWT 1 "" "awt 0.3.0" "User Commands"
+.SH NAME
+awt \- a memory for AI agents that lives in plain files
+.SH SYNOPSIS
+.B awt
+[global flags] VERB [ARGS]
+.SH DESCRIPTION
+awt records decisions, questions, links and handoffs for an agent task in plain files, and recalls them in the next session.
+It never runs a command it is asked to track. See SPEC.md and docs/concepts.md in the repository.
+.SH GLOBAL FLAGS
+.TP
+.B \-\-dir PATH
+use the node at PATH instead of the current directory
+.TP
+.B \-\-by NAME
+who is writing (default $AWT_BY, else agent)
+.TP
+.B \-\-model ID
+model that produced this write (default $AWT_MODEL, else unknown:unset)
+.TP
+.B \-\-version
+print the version
+.SH VERBS
+.SS init
+Create a task directory, or a node of the tree with \-\-kind.
+.PP
+.B awt init [\-\-goal GOAL] [\-\-done DONE] [\-\-kind KIND] [\-\-name NAME] [\-\-key KEY] [\-\-hooks HOOKS] [\-\-uninstall]
+.TP
+.B \-\-goal GOAL
+what this task is for (250 characters)
+.TP
+.B \-\-done DONE
+what finished looks like (250 characters)
+.TP
+.B \-\-kind KIND
+make a node of this kind under the nearest enclosing node (see SPEC.md, Node tree)
+.TP
+.B \-\-name NAME
+directory name of the new node
+.TP
+.B \-\-key KEY
+stable key of the new node, such as paseo:agent/ID
+.TP
+.B \-\-hooks HOOKS
+person only, ask first: install the after\-compaction context hook for claude, codex, opencode, pi or all (edits that provider's own config)
+.TP
+.B \-\-uninstall
+with \-\-hooks: remove the hook again
+.SS resume
+Print the brief: goal, state, open questions and effects, what changed since the last handoff.
+.PP
+.B awt resume [\-\-hook] [\-\-framed] [\-\-scope SCOPE] [\-\-json]
+.TP
+.B \-\-hook
+print nothing and exit 0 when there is no task or on any error (for a session\-start hook)
+.TP
+.B \-\-framed
+with \-\-hook: put the one\-line reference\-only frame above the brief (prints nothing unless \-\-dir or AWT_DIR names a node; the hooks from init \-\-hooks set this up)
+.TP
+.B \-\-scope SCOPE
+show the state of this scope only
+.TP
+.B \-\-json
+machine\-readable output
+.SS list
+List what is known about the task, one section or all.
+.PP
+.B awt list [\-\-all] [\-\-json] [\-\-since SINCE] [\-\-down] SECTION
+.TP
+.B SECTION
+one section: refs, context, docs, outbox, misc, decisions, questions, effects, notes, state, nodes or tree
+.TP
+.B \-\-all
+include superseded, answered and finished items
+.TP
+.B \-\-json
+machine\-readable output
+.TP
+.B \-\-since SINCE
+only records after this ISO 8601 time
+.TP
+.B \-\-down
+include the nodes below this one
+.SS find
+Search records and files; \-\-like ranks related records from the whole tree.
+.PP
+.B awt find [\-\-up] [\-\-down] [\-\-tree] [\-\-like LIKE] [\-\-limit LIMIT] [\-\-sessions] TERM
+.TP
+.B TERM
+text to look for (case\-insensitive, literal)
+.TP
+.B \-\-up
+search ancestors
+.TP
+.B \-\-down
+search descendants
+.TP
+.B \-\-tree
+search the whole tree under the nearest root
+.TP
+.B \-\-like LIKE
+rank related decisions, answers and notes for this sentence
+.TP
+.B \-\-limit LIMIT
+most results to print
+.TP
+.B \-\-sessions
+also search ingested session text (needs store.db)
+.SS state
+Leave the handoff: where things stand and what comes next.
+.PP
+.B awt state \-\-now NOW \-\-next NEXT [\-\-scope SCOPE]
+.TP
+.B \-\-now NOW
+where things stand
+.TP
+.B \-\-next NEXT
+what the next session should do
+.TP
+.B \-\-scope SCOPE
+name of a sub\-unit of work
+.SS note
+Record a small fact for later.
+.PP
+.B awt note TEXT
+.TP
+.B TEXT
+the fact
+.SS decide
+Record a choice and its reason.
+.PP
+.B awt decide \-\-why WHY [\-\-supersedes SUPERSEDES] [\-\-tag TAG] [\-\-related RELATED] CHOICE
+.TP
+.B CHOICE
+the choice
+.TP
+.B \-\-why WHY
+the reason (required)
+.TP
+.B \-\-supersedes SUPERSEDES
+id of the earlier decision this replaces
+.TP
+.B \-\-tag TAG
+tag the decision; `rule` binds every later agent (repeatable)
+.TP
+.B \-\-related RELATED
+related records to print after writing (0 turns it off)
+.SS ask
+Record a question for a person.
+.PP
+.B awt ask [\-\-related RELATED] TEXT
+.TP
+.B TEXT
+the question
+.TP
+.B \-\-related RELATED
+related records to print after writing (0 turns it off)
+.SS answer
+Answer a question.
+.PP
+.B awt answer ID TEXT
+.TP
+.B ID
+question id, such as q\-1a2b3c4d
+.TP
+.B TEXT
+the answer
+.SS ref
+Record a link instead of copying its content.
+.PP
+.B awt ref \-\-title TITLE [\-\-why WHY] [\-\-kind KIND] [\-\-no\-access] TARGET
+.TP
+.B TARGET
+URL or path
+.TP
+.B \-\-title TITLE
+short title (required)
+.TP
+.B \-\-why WHY
+why it matters
+.TP
+.B \-\-kind KIND
+override the guessed kind
+.TP
+.B \-\-no\-access
+mark a link the agent cannot open, so it asks a person to paste it
+.SS capture
+Save pasted text that cannot be linked into context/.
+.PP
+.B awt capture \-\-from FROM \-\-title TITLE [\-\-ref REF] FILE
+.TP
+.B FILE
+file to read; stdin when absent or \-
+.TP
+.B \-\-from FROM
+where it came from, such as slack (required)
+.TP
+.B \-\-title TITLE
+short title (required)
+.TP
+.B \-\-ref REF
+URL of the original
+.SS status
+Set the task status; done is refused while questions or effects are open.
+.PP
+.B awt status active|paused|done
+.TP
+.B VALUE
+active, paused or done
+.SS doctor
+Check the task: layout, git, disk, settings, store. Prints ok, warn or fail per check.
+.PP
+.B awt doctor [\-\-staged]
+.TP
+.B \-\-staged
+scan staged git changes for secrets (for .git/hooks/pre\-commit)
+.SS ingest
+Copy agent transcripts into the store and update store.db; with \-\-event, record one tool call.
+.PP
+.B awt ingest [\-\-source SOURCE] [\-\-hook] [\-\-rebuild] [\-\-stdin] [\-\-event]
+.TP
+.B \-\-source SOURCE
+claude, pi, opencode, paseo, ccusage (usage totals) or all; default claude
+.TP
+.B \-\-hook
+silent, exit 0 on any error (for a hook)
+.TP
+.B \-\-rebuild
+delete store.db and build it again from the stored logs
+.TP
+.B \-\-stdin
+read plugin events from stdin (with \-\-source paseo)
+.TP
+.B \-\-event
+read one tool\-call event on stdin and record a detected effect
+.SS ui
+Browse store.db in a read\-only web page (needs datasette).
+.PP
+.B awt ui [\-\-port PORT] [\-\-print\-metadata]
+.TP
+.B \-\-port PORT
+port on 127.0.0.1 (default 8777)
+.TP
+.B \-\-print\-metadata
+print the page metadata and exit
+.SS help
+Print this summary; help agents prints the agent reference.
+.PP
+.B awt help
+.SS effect
+Declare an outbound send so it is made once: plan, begin, mark, show.
+.PP
+.B awt effect
+.SS effect plan
+Declare a send before it happens.
+.PP
+.B awt effect plan \-\-target TARGET [\-\-body BODY] [\-\-how HOW] [\-\-after AFTER] [\-\-again] [\-\-why WHY]
+.TP
+.B \-\-target TARGET
+where it goes, such as slack:#eng (required)
+.TP
+.B \-\-body BODY
+file holding the text to send
+.TP
+.B \-\-how HOW
+the command you will run (text only; awt never runs it)
+.TP
+.B \-\-after AFTER
+id of an effect that must be sent first (repeatable)
+.TP
+.B \-\-again
+plan a send of something already sent
+.TP
+.B \-\-why WHY
+the reason
+.SS effect begin
+Claim a planned send; send it yourself after this.
+.PP
+.B awt effect begin ID
+.TP
+.B ID
+effect id, such as e\-3c91d0aa
+.SS effect show
+Print one effect: state, attempts, how, body.
+.PP
+.B awt effect show ID
+.TP
+.B ID
+effect id
+.SS effect mark
+Record how a send ended.
+.PP
+.B awt effect mark [\-\-ref REF] [\-\-why WHY] ID TO
+.TP
+.B ID
+effect id
+.TP
+.B TO
+sent, not\-sent (needs \-\-why), unknown (needs \-\-why) or dropped
+.TP
+.B \-\-ref REF
+link to the sent item
+.TP
+.B \-\-why WHY
+the reason
+.SH EXIT STATUS
+0 ok, 1 refused, 2 usage error, 3 permission denied, 4 no task or id.
+.SH SEE ALSO
+docs/reference/ in the repository, one page per verb; `awt help agents`.

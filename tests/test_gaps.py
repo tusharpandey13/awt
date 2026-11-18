@@ -136,10 +136,10 @@ class PreTreeBrief(Base):
             txt = re.sub(r'"ts": ?"[^"]*"', '"ts":"%s"' % past, f.read())
         with open(p, "w") as f:
             f.write(txt)
-        gi = self.p(".gitignore")  # the old release's .gitignore has no BRIEF.md line; a write would add it and move the file's mtime
+        gi = self.p(".gitignore")  # the old release's .gitignore has no BRIEF.md or .awt/*.tmp line; a write would add them and move the file's mtime
         st = os.stat(gi)
         with open(gi, "a") as f:
-            f.write("BRIEF.md\n")
+            f.write("BRIEF.md\n.awt/*.tmp\n")
         os.utime(gi, ns=(st.st_atime_ns, st.st_mtime_ns))
         for args in (("resume",), ("resume", "--hook"), ("resume", "--scope", "main")):
             self.assertEqual(run(AWT, *args), run(old, *args), args)
