@@ -11,6 +11,7 @@
 ### Changed
 - `l7-awt-verb-use`, `rec-records-by-origin`, `rec-records-per-session` and `l6-prompt-to-first-record` no longer count `recall` rows (a hook writes them, not the agent).
 - `list --since --json` rows carry `ids` and `result` (`null` except on `recall` rows). `awt find TERM` and `awt list` never show `recall` rows. An older `awt` quarantines `recall` rows as an unknown type until it is upgraded.
+- `tests/agentic/` catches up with v2. The harness drops the caller's `AWT_*` and Claude session variables (a run from inside an awt agent no longer hits "is a agent node") and loads only the task's own settings and hooks, not the person's `~/.claude` or MCP servers. `ship` and `unknown` set up through `effect plan --how`, `begin` and `mark` (the removed `--run`/`apply` broke them). Checkers fail only on what the AGENTS block asks for or on a hazard (a leaked secret, a resend, a false "sent", a made-up answer); `ref --no-access`, `capture`, `note` and declared effects, which the agent text no longer asks for (ADR 0007), are NOTEs.
 
 ## 0.3.2 (18-Nov-2026)
 
