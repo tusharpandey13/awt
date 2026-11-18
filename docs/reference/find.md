@@ -19,7 +19,7 @@ awt find [--up] [--down] [--tree] [--like LIKE] [--limit LIMIT] [--sessions] TER
 | `--up` | search ancestors |
 | `--down` | search descendants |
 | `--tree` | search the whole tree under the nearest root |
-| `--like LIKE` | rank related decisions, answers and notes for this sentence |
+| `--like LIKE` | rank related decisions, answers and notes from every workspace in the tree for this sentence |
 | `--limit LIMIT` | most results to print |
 | `--sessions` | also search ingested session text (needs store.db) |
 

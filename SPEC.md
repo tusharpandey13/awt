@@ -105,6 +105,8 @@ Latest `state` per `scope` is current. Latest `task` row is the goal. Latest `st
 | `doctor [--staged]` | Below. |
 | `ingest [--source claude\|pi\|opencode\|paseo\|ccusage\|all] [--hook] [--stdin] [--rebuild]` | Below. |
 
+An unknown first word is an intent, not a verb. `awt X ...` with X not a verb prints `error: awt: no verb 'X'` and one `fix:` line, exits 2, runs nothing and writes nothing. The fix is a small table in `awt` (`VERB_INTENT`): crossref, xref, related, similar, recall, context, lookup, search, grep give `awt find --like "REST OF ARGS"` (`TOPIC` when none) and mention `awt find TERM` for exact text; handoff, brief, load, show give `awt resume`; checkpoint, handoff-save give `awt state --now ... --next ...`; anything else gives `awt help`. `save` keeps its own removed-verb message. Aliases are not added: the word stays unknown.
+
 `help` and `--help` print usage and do not count as verbs. `awt --help` and `awt VERB --help` come from one table in `awt` (`CLI_HELP`), and `tools/gen_docs.py` generates `docs/awt.1` and `docs/reference/` from it; `tests/test_docs.py` fails when they disagree. `help agents` prints the embedded agent reference. `--version` prints the version. `save` and `supersede` were removed (the cap above): each prints one `fix:` line naming the host-native replacement (`git commit` after `awt doctor --staged`; `mv docs/old.md docs/_superseded/` plus `awt note`) and exits 2. Listing still hides `docs/_superseded/`, and old `doc` rows still read.
 
 ## Context after compaction

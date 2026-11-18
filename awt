@@ -283,7 +283,7 @@ CLI_HELP = {
         "--since": "only records after this ISO 8601 time", "--down": "include the nodes below this one"}),
     "find": ("Search records and files; --like ranks related records from the whole tree.", {
         "term": "text to look for (case-insensitive, literal)", "--up": "search ancestors", "--down": "search descendants",
-        "--tree": "search the whole tree under the nearest root", "--like": "rank related decisions, answers and notes for this sentence",
+        "--tree": "search the whole tree under the nearest root", "--like": "rank related decisions, answers and notes from every workspace in the tree for this sentence",
         "--limit": "most results to print", "--sessions": "also search ingested session text (needs store.db)"}),
     "state": ("Leave the handoff: where things stand and what comes next.", {
         "--now": "where things stand", "--next": "what the next session should do", "--scope": "name of a sub-unit of work"}),
@@ -4821,6 +4821,22 @@ def build():
     return p
 
 
+# An unknown first word is an intent, not a verb: name the right command and exit 2 (SPEC, Unknown verb). Nothing is run or written.
+FIND_LIKE = 'awt find --like "%s"   (awt find TERM for exact text)'
+VERB_INTENT = {**dict.fromkeys("crossref xref related similar recall context lookup search grep".split(), FIND_LIKE),
+               **dict.fromkeys("handoff brief load show".split(), "awt resume"),
+               **dict.fromkeys("checkpoint handoff-save".split(), 'awt state --now "WHERE THINGS STAND" --next "WHAT COMES NEXT"')}
+
+
+def unknown_verb(word, args):
+    fix = VERB_INTENT.get(word, "awt help")
+    if "%s" in fix:
+        fix = fix % (" ".join(args) or "TOPIC").replace('"', "'")
+    print("error: awt: no verb '%s'" % word, file=sys.stderr)
+    print("fix: " + c(fix), file=sys.stderr)
+    sys.exit(2)
+
+
 def main(argv):
     global ROOT, BY, MODEL
     BY = os.environ.get("AWT_BY") or "agent"
@@ -4863,6 +4879,8 @@ def main(argv):
     if rest[:1] == ["save"]:
         die("save was removed: git does the commit, and doctor --staged does the secret check",
             "git add -A && awt doctor --staged && git commit -m MESSAGE   (put awt doctor --staged in .git/hooks/pre-commit to run it on every commit)", 2)
+    if not rest[0].startswith("-") and rest[0] not in [k for k in CLI_HELP if " " not in k] + ["effect"]:
+        unknown_verb(rest[0], rest[1:])
     a = build().parse_args(rest)
     if a.verb == "effect" and (a.eop == "apply" or getattr(a, "gone", None) is not None):
         die("effect apply, --run, --snapshot, --verify, --class and --timeout were removed: awt never runs commands",

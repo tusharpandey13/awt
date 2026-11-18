@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- An unknown verb such as `awt crossref foo` prints `error: awt: no verb 'crossref'` and a `fix:` line naming the right command (`awt find --like "foo"`, `awt resume`, `awt state --now ... --next ...` or `awt help`), exits 2, and runs nothing. No aliases were added.
+- `awt find --like` help says it ranks related records across every workspace in the tree.
+
 ## 0.3.1 (18-Nov-2026)
 
 ### Added
