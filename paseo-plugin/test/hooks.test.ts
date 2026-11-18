@@ -105,6 +105,11 @@ test("P6b awt_find runs awt find --like, passes limit, fails soft", async () => 
   r.awt(dir, "decide", "use-sqlite-zq41", "--why", "local storage");
   const hit = await find.execute({ query: "sqlite storage zq41" }, cx);
   assert.ok(!hit.isError, hit.text);
+  // The query is the value of --like, never a flag: awt's global --dir/--by scan must not see it.
+  for (const q of ["--dir=/nonexistent-awt", "--by=person", "--dir"]) {
+    const inj = await find.execute({ query: q }, cx);
+    assert.ok(!inj.isError, `${q}: ${inj.text}`);
+  }
   const lim = await find.execute({ query: "sqlite storage zq41", limit: 1 }, cx);
   assert.ok(!lim.isError, lim.text);
   const bad = await find.execute({ query: "x", limit: 99999 }, cx);

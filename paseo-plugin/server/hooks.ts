@@ -407,6 +407,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     },
   });
 
+  // `--like=QUERY` keeps the query one value: a separate element such as `--dir=X` or `--by=X` would be taken by awt's global flag scan.
   const awtFind = defineAgentTool({
     name: "awt_find",
     title: "awt find",
@@ -415,7 +416,7 @@ export function registerHooks(server: Pick<PluginServerContext, "addHook">, env:
     async execute(input, context) {
       const fail = (m: string) => ({ text: `awt find failed: ${m.trim().split("\n")[0] || "no output"}`.slice(0, 300), isError: true });
       const r = await tree.onNode(`paseo:agent/${context.agent.id}`, (node) =>
-        awt(cfg, node, ["find", "--like", input.query, ...(input.limit ? ["--limit", String(input.limit)] : [])], context.agent.id));
+        awt(cfg, node, ["find", `--like=${input.query}`, ...(input.limit ? ["--limit", String(input.limit)] : [])], context.agent.id));
       if (!r) return fail("no awt node for this agent yet");
       return r.code === 0 ? { text: r.stdout.trim() || "No related records." } : fail(r.stderr || `exit ${r.code}`);
     },
