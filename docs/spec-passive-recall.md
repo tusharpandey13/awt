@@ -179,7 +179,7 @@ No new verb. `store.db` already has `records` (with `node_id`), `sessions.node_i
 - **M3 control:** the same use measure for `shadow` ids. The agent never saw them, so their use rate is how often agents find those records unaided. Passive recall helps when M2 is well above M3.
 - **M4 duplicates:** `docs/recipes/l7-redecisions.sql` pairs, widened from one node to one project, in context windows with and without recall hits. Still needs a person's judgment of meaning (the recipe is `partial`).
 - **M5 per prompt:** from the `every` rows, the share of later prompts that would have had hits, and the use rate of their ids (M2 measure), to decide later whether a per-prompt trigger D is worth building. No model tokens are spent.
-- One new recipe, `docs/recipes/l7-recall-use.sql` (M1 to M3, M5), and a cross-node variant of `l7-redecisions.sql` (M4). Both run in `awt ui`.
+- One new recipe, `docs/recipes/l7-recall-use.sql` (M1 to M3, M5), which runs in `awt ui`. The recipes that count work records (`l7-awt-verb-use`, `rec-records-by-origin`, `rec-records-per-session`, `l6-prompt-to-first-record`) leave `recall` rows out: a hook writes them, not the agent. The cross-node variant of `l7-redecisions.sql` (M4) is deferred to the release that turns the default `on`: in shadow no window has hits, so there is nothing to compare.
 
 ## Rules
 
@@ -228,7 +228,7 @@ Each rule has a test (Test plan). Constants live in one `RECALL` table in `awt`:
 | `awt` `doctor` | `AWT_RECALL=0` in the hook check; warn on a missing `UserPromptSubmit` entry |
 | `awt` `CLI_HELP` | `find --hook` text; `tools/gen_docs.py` regenerates the man page and reference |
 | `store.db` | `records.type = 'recall'`; `docs/schema.md` lists it |
-| `docs/recipes/` | `l7-recall-use.sql` (new); `l7-redecisions.sql` cross-node variant |
+| `docs/recipes/` | `l7-recall-use.sql` (new); work-record recipes skip `recall` rows; `l7-redecisions.sql` cross-node variant deferred to the `on` release |
 | Plugin `agent.open.before` | Forward `AWT_RECALL`, `AWT_RECALL_SCOPE` |
 | Plugin receipt (`server/receipt.ts`, `shared/receipt.ts`, `client/receipt.tsx`) | Optional `recalled` (`{id, text}`), `shadow`; text fetched with `awt find --tree ID`; line text; `changes` rule |
 | Plugin `AWT_BLOCK` | Unchanged. Passive recall adds no prompt text |

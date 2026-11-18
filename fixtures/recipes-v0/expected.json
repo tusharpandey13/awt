@@ -477,6 +477,44 @@
    null
   ]
  ],
+ "l7-recall-use": [
+  [
+   "trigger",
+   "result",
+   "recall_rows",
+   "agents",
+   "chars",
+   "ids",
+   "used_ids"
+  ],
+  [
+   "every",
+   "shadow",
+   1,
+   1,
+   0,
+   0,
+   0
+  ],
+  [
+   "prompt",
+   "hits",
+   1,
+   1,
+   240,
+   2,
+   1
+  ],
+  [
+   "prompt",
+   "shadow",
+   1,
+   1,
+   0,
+   1,
+   1
+  ]
+ ],
  "l7-redecisions": [
   [
    "type",

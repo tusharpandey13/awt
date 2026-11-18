@@ -115,11 +115,11 @@ Per (`session_id`, `provider_name`, `response_model`): the `usage_cc` rows, plus
 
 ## Queries
 
-`docs/recipes/*.sql` has one recipe per question in ARCHITECTURE-v2 section 11 (31). The header comments are `-- question:`, `-- level:`, `-- tables:`, `-- status:` and `-- notes:`, plus `-- param:` for named parameters (`:now`, `:retention_days`; blank means the default) and `-- needs:` when data is missing. **`real`** answers the question on the stored data. **`partial`** answers part of it and returns the other part as the text `needs data`. **`stub`** answers nothing: it returns one row, `needs data`, naming what no phase provides yet. A stub is never a guess. `tests/test_recipes.py` runs every recipe on `fixtures/recipes-v0` and compares rows. `parquet.sql` is a DuckDB export, not a question.
+`docs/recipes/*.sql` has one recipe per question in ARCHITECTURE-v2 section 11 (31), plus `l7-recall-use` for passive recall (`docs/spec-passive-recall.md`, Measurement). The header comments are `-- question:`, `-- level:`, `-- tables:`, `-- status:` and `-- notes:`, plus `-- param:` for named parameters (`:now`, `:retention_days`; blank means the default) and `-- needs:` when data is missing. **`real`** answers the question on the stored data. **`partial`** answers part of it and returns the other part as the text `needs data`. **`stub`** answers nothing: it returns one row, `needs data`, naming what no phase provides yet. A stub is never a guess. `tests/test_recipes.py` runs every recipe on `fixtures/recipes-v0` and compares rows. `parquet.sql` is a DuckDB export, not a question.
 
 | status | recipes |
 |---|---|
 | partial | `l6-rework` (exact repeats only), `l7-effects-by-rule` (no stored outcome of a PreToolUse ask), `l7-redecisions` (candidate pairs by shared words; a person judges meaning), `l8-failed-turn-cost` (no per-message price for Claude; ccusage cost is pro-rated), `l8-latency-percentiles` (no time to first token), `rec-records-by-origin` (phase 8 judgments) |
-| real | the other 25 |
+| real | the other 26 |
 
 `awt ui` serves them as canned queries (`docs/adr/0005-datasette-for-ui.md`); `sqlite3 -readonly "$AWT_STORE/store.db" < docs/recipes/NAME.sql` runs one by hand (pass `:now` with `-cmd ".param set :now '2026-11-16T12:00:00Z'"`).
