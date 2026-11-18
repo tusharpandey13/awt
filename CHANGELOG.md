@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (17-Nov-2026)
 
 ### Upgrade
 - **Install this awt everywhere first, then rebuild.** Every awt that ingests into the store (`~/.local/bin/awt` on `PATH`, and the one the Paseo plugin runs: `AWT_BIN`, else `awt` from the daemon's `PATH`) must be this version before you run `awt ingest --rebuild`. Update the Paseo plugin, check `awt --version` and `command -v awt`, and check that the Paseo daemon resolves the same binary (its `PATH`, or `AWT_BIN`; restart it after a change). An older awt (schema 5 or 6) does not know the new guard: it would rebuild the schema 7 store back to its own schema, unbounded, from the next Paseo turn, and `awt ingest --rebuild` on `PATH` would run that old binary. Only awt from this version on leaves a store of a newer schema alone.

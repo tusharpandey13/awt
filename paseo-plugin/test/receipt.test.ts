@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test, afterEach } from "node:test";
 import { agentPayload, openReq, rig, type Rig } from "./harness.js";
+import { RESEND_KIND } from "../shared/resend.js";
 import { RECEIPT_KIND, RECEIPT_VERSION, parseReceipt, receiptLine } from "../shared/receipt.js";
 
 const rigs: Rig[] = [];
@@ -200,7 +201,8 @@ test("P21 after a plugin restart, an agent whose node exists gets the auto hando
   assert.equal(r.appended.length, before);
 });
 
-test("receipt kind is a valid Paseo renderer kind", () => {
-  // Paseo's client rejects any renderer kind outside this pattern and then loads none of the plugin's client code.
-  assert.match(RECEIPT_KIND, /^[a-z][a-z0-9-]*$/);
+test("every timeline kind is a valid Paseo renderer kind", () => {
+  // Paseo's client rejects any renderer kind outside this pattern and then loads none of the plugin's client code,
+  // so every awt row shows "Plugin timeline item unavailable".
+  for (const kind of [RECEIPT_KIND, RESEND_KIND]) assert.match(kind, /^[a-z][a-z0-9-]*$/);
 });
