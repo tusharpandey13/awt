@@ -4825,7 +4825,7 @@ def build():
 FIND_LIKE = 'awt find --like "%s"   (awt find TERM for exact text)'
 VERB_INTENT = {**dict.fromkeys("crossref xref related similar recall context lookup search grep".split(), FIND_LIKE),
                **dict.fromkeys("handoff brief load show".split(), "awt resume"),
-               **dict.fromkeys("save checkpoint handoff-save".split(), 'awt state --now "WHERE THINGS STAND" --next "WHAT COMES NEXT"')}
+               **dict.fromkeys("checkpoint handoff-save".split(), 'awt state --now "WHERE THINGS STAND" --next "WHAT COMES NEXT"')}
 
 
 def unknown_verb(word, args):
