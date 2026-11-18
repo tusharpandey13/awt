@@ -16,6 +16,8 @@ Companion to `SPEC.md`. It covers the node tree, the Paseo plugin and `migrate-p
 |---|---|---|
 | `tests/test_tree.py` | Node tree: init, resolution, reads, status, doctor | always |
 | `tests/test_recall.py` | Active recall: `find --like`, related lines on `decide`/`ask`, `list --since`, the template and prompt pointers | always |
+| `tests/test_passive_recall.py` | Passive recall: the first-prompt hook, the framed brief's section, the `recall` row, scope, gate, budget, shadow, the Claude hook entries, the pi extension | always |
+| `paseo-plugin/test/recall.test.ts` | Passive recall in the plugin: env forwarding, receipt `recalled` and `shadow` | always |
 | `tests/test_migrate_paseo.py` | `migrate-paseo` against snapshots | always |
 | `tests/test_detect.py` | Detected effects: rules, keys, resend `ask`, declared matching, secrets, silence | always |
 | `tests/test_hooks.py` | Compaction context: settings merge, `AWT_DIR` gate, framing line, doctor, the opencode plugin and pi extension loaded by node against fake hosts | always (the node part needs Node) |
@@ -176,6 +178,30 @@ Spec: `docs/spec-active-recall.md`; normative text in `SPEC.md` (Reading across 
 - T-R3b The plugin block is at most 360 characters and names `BRIEF.md`, `awt_resume` and `awt_find`. T-R3c The brief footer is `./awt find --like "topic" | ./awt list`; `help agents` states search-first once.
 - T-R4a `list --since` returns exactly the rows at or after the timestamp with the fixed keys, `node` (null for the own node) with `--down`; usage errors exit 2.
 - T-R5a The `init` `SessionStart` hook has no matcher, so it covers `compact`.
+
+## Passive recall (`test_passive_recall.py`, `paseo-plugin/test/recall.test.ts`, chaos `recall-*`)
+
+Spec: `docs/spec-passive-recall.md`; normative text in `SPEC.md` (Passive recall). Fixtures: fictional `parsekit` and `ledgerline` workspaces, made-up ids, filler notes so the idf gate has a corpus (the gate counts `N` over all candidates). Rules PR1 to PR24 of the spec; each has a test, written first.
+
+Core (`test_passive_recall.py`):
+- T-PR1 Only `find --like - --hook` and `resume --hook --framed` print recall lines; `decide`, `ask` and plain `find --like` write no `recall` row.
+- T-PR2 No `AWT_DIR`, a task node, `AWT_RECALL=0` and `off`, a subagent: nothing printed, no row; the parent still gets recall.
+- T-PR3 The first call prints and writes a `prompt` row; the second prints nothing and writes nothing, also after `every` rows; a framed brief writes a `compact` row and the next prompt prints nothing.
+- T-PR4 A read-only log: nothing printed, exit 0.
+- T-PR5 JSON `prompt`, raw text and malformed JSON; words after char 2,000 never match; two words give `result: none`; an `[awt]` prompt writes no row; B's query uses the `auto` state.
+- T-PR6 Refs, states and superseded decisions never appear. T-PR7 Scope: project (project node, the `unassigned` project is not one, and the legacy fallback through `paseo` refs to `paseo:project/*` only), `workspace`, `tree`, an unknown value is `project`. T-PR8 Own node, subagent, an id in the brief, `no-recall` (and its undoing, and `find --like` ignoring it), identical text once.
+- T-PR9 Two shared words, and three common words, are not shown; three rare words are; no hit prints nothing. T-PR10 12 qualifying records give 5 lines, the `rule` first, at most 1,200 chars. T-PR11 Frame and line shape, a forged heading, frame and control characters, B's heading after the brief and no second frame.
+- T-PR12 `AWT_RECALL_MS=0`: `stopped`, used up. T-PR13 `AWT_TEST_RECALL_FAULT`: nothing, exit 0, `error` row; the hook command strings end `2>/dev/null; exit 0 # awt:context`. T-PR14 `AWT_STORE` that is a file is never touched.
+- T-PR15 Row fields, quarantine of a bad `ids`, `BRIEF.md` untouched, hidden from `list`, `find`, `resume`, present in `list --since --json`. T-PR16 Shadow is the default: row `shadow`, nothing printed. T-PR17 Plain `resume` unchanged. T-PR22 `ingest --rebuild` puts the rows in `records`; `l7-recall-use` returns the hand-worked M1 to M3 and M5 counts on `fixtures/recipes-v0` (one shown id used, one not, one shadow id used unaided), and the work-record recipes do not count `recall` rows.
+- T-PR18 `init --hooks claude`: `UserPromptSubmit` entry and `compact|clear` matcher, a foreign `clear` hook untouched, idempotent, `--uninstall` removes only awt's; the fake pi sets `awt_recall` at the first prompt, repeats it byte-identically and drops it at `session_compact`; in shadow it sets nothing. T-PR19 `doctor` writes no row and warns on a missing `UserPromptSubmit`. T-PR23 The installed `SessionStart` command prints the framed brief.
+- T-PR24 Shadow: one `prompt` row then `every` rows, ids equal to `on`'s, no text, nothing written at `AWT_RECALL_MS=0`; `on` writes no later row.
+
+Plugin (`recall.test.ts`, named PRP1 to PRP7 so they do not clash with the pipe tests PP1 to PP9):
+- PRP1 `AWT_RECALL` and `AWT_RECALL_SCOPE` reach the agent env, unset stays unset. PRP2 A receipt has `recalled`, no `recall` in `counts`, `empty` true. PRP3 `AWT_RECEIPT=changes` shows a recall-only receipt. PRP4 Shadow and `every` rows: `would recall ... (shadow)`. PRP5 Old receipts render, new keys strip under the old schema. PRP6 The prompt block says nothing about recall. PRP7 `{id, text}` with text at most 80 chars, never stored; a failing fetch leaves the id.
+
+Chaos (`recall-*`): `recall-2000` (a big tree: a valid block or `stopped`), `recall-corrupt` (corrupt, symlinked and `.new-*` nodes), `recall-readonly`, `recall-forge` (frame, headings, 4 KB lines, control characters), `recall-shadow-volume`, `recall-race`, `recall-old-awt` (v0.3.2 reads a log with `recall` rows), `recall-hook-exit` (a missing awt and an awt that exits 2: the hook command exits 0).
+
+Not run here: D-PR1 to D-PR3 (live Paseo daemon) and E-PR1 to E-PR5 (spend tokens; owner approval per batch), as in the spec.
 
 ## Compaction context (`test_hooks.py`; SPEC, Context after compaction)
 

@@ -36,7 +36,7 @@ class Hooks(test_awt.Base):
         r = self.install("claude")
         self.assertIn("installed", r.stdout)
         (e,) = self.mine(self.load())
-        self.assertEqual(e["matcher"], "compact")
+        self.assertEqual(e["matcher"], "compact|clear")
         cmd = e["hooks"][0]["command"]
         self.assertTrue(cmd.startswith('[ -n "$AWT_DIR" ] || exit 0;'), cmd)
         self.assertIn("resume --hook --framed", cmd)

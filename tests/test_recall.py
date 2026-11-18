@@ -304,7 +304,7 @@ class Pointers(RecallBase):
 
 
 class Since(RecallBase):
-    KEYS = {"type", "ts", "by", "id", "scope"}
+    KEYS = {"type", "ts", "by", "id", "scope", "ids", "result"}
 
     def since(self, ts, *extra, root):
         return json.loads(self.ok("list", "--since", ts, *extra, "--json", root=root).stdout)

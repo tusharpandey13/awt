@@ -17,6 +17,10 @@ export const receiptSchema = z.object({
   auto: z.boolean(),
   /** True when nothing was stored. */
   empty: z.boolean(),
+  /** At most 5 records passive recall showed (or, with `shadow`, would have shown) this turn. `text` is local only and may be missing. Absent on a receipt without recall. */
+  recalled: z.array(z.object({ id: z.string(), text: z.string().max(80).optional() })).max(5).optional(),
+  /** True when the recalled records were not shown to the agent (AWT_RECALL=shadow). */
+  shadow: z.boolean().optional(),
 });
 export type Receipt = z.infer<typeof receiptSchema>;
 
@@ -44,8 +48,12 @@ const WORD: Record<string, [string, string]> = {
 
 /** One muted line, for example `awt · 1 decision d-9e01b2c3 · 1 note · handoff`. */
 export function receiptLine(data: Receipt): string {
-  if (data.empty) return "awt · nothing stored this turn";
   const parts: string[] = [];
+  if (data.recalled?.length) {
+    const list = data.recalled.map((r) => (r.text ? `${r.id} "${r.text}"` : r.id)).join(", ");
+    parts.push(data.shadow ? `would recall ${list} (shadow)` : `recalled ${list}`);
+  }
+  if (data.empty) return ["awt", ...parts, "nothing stored this turn"].join(" · ");
   for (const type of RECEIPT_TYPES) {
     const n = data.counts[type] ?? 0;
     if (!n) continue;

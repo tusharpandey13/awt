@@ -15,7 +15,7 @@ awt init [--goal GOAL] [--done DONE] [--kind KIND] [--name NAME] [--key KEY] [--
 | `--kind KIND` | make a node of this kind under the nearest enclosing node (see SPEC.md, Node tree) |
 | `--name NAME` | directory name of the new node |
 | `--key KEY` | stable key of the new node, such as paseo:agent/ID |
-| `--hooks HOOKS` | person only, ask first: install the after-compaction context hook for claude, codex, opencode, pi or all (edits that provider's own config) |
+| `--hooks HOOKS` | person only, ask first: install the context hooks (after compaction and /clear, and at the first prompt on claude and pi) for claude, codex, opencode, pi or all (edits that provider's own config) |
 | `--uninstall` | with --hooks: remove the hook again |
 
 Global flags `--dir`, `--by` and `--model` work with every verb. Exit codes: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id.

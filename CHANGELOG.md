@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Passive recall (spec: `docs/spec-passive-recall.md`, contract: `SPEC.md` Passive recall). At an agent's first prompt (Claude `UserPromptSubmit`; pi's system prompt before the first request) and in the framed brief after a compaction or `/clear` (a `## Related elsewhere` section), up to 5 related records (at most 1,200 chars) are put in front of the agent with no call. Only decisions, questions and notes of the same project qualify, with at least 3 shared words and an idf sum of at least 12; nothing is printed when nothing does. New flag `awt find --like - --hook` (no new verb), new event type `recall` (ids only), `AWT_RECALL` (default `shadow`: computes and logs, never injects; `on`; `0`/`off`), `AWT_RECALL_SCOPE` (`project`, `workspace`, `tree`) and the `no-recall` decision tag. The hook stops at 800 ms, never reads `store.db`, and always exits 0.
+- `awt init --hooks claude` also installs the `UserPromptSubmit` hook and widens the `SessionStart` matcher to `compact|clear`, so `/clear` gets the brief back; run it again to upgrade. `awt doctor` warns when the `UserPromptSubmit` hook is missing.
+- The Paseo plugin forwards `AWT_RECALL` and `AWT_RECALL_SCOPE` to agents. The turn receipt gains `recalled` (ids and a short local text) and `shadow`: `awt · recalled d-7f3a9c21 "Retry with jitter" · nothing stored this turn`.
+- New recipe `docs/recipes/l7-recall-use.sql`: recall rows per trigger and result, and how many shown (or shadow) ids were used afterwards.
+
+### Changed
+- `l7-awt-verb-use`, `rec-records-by-origin`, `rec-records-per-session` and `l6-prompt-to-first-record` no longer count `recall` rows (a hook writes them, not the agent).
+- `list --since --json` rows carry `ids` and `result` (`null` except on `recall` rows). `awt find TERM` and `awt list` never show `recall` rows. An older `awt` quarantines `recall` rows as an unknown type until it is upgraded.
+
 ## 0.3.2 (18-Nov-2026)
 
 ### Added
