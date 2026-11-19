@@ -18,11 +18,12 @@ MODEL = "unknown:unset"
 A = "./awt"
 ROWMAX = 4096
 TOTAL = 4400
-BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=500, decisions=800, inventory=200, lineage=300, children=500,
+BUDGET = dict(goal=600, state=1200, questions=600, effects=500, changes=300, decisions=800, inventory=400, lineage=300, children=500,
               notes=300, task_goal=400, task_state=600, task_questions=300, task_effects=250, task_decisions=250)
 
 FRAMED_BUDGET = dict(changes=200)  # framed mode makes room for the newest notes (notes=300) inside the same 4,400 total
 NOTES_SHOWN, NOTE_CUT = 5, 100
+RULES = "Rules: send only what you declared and began. STOP on a secret match or an `unknown` effect and ask a person. Never mark `sent`/`dropped` to pass `status done`. More: awt help agents"
 
 K = dict(depth=8, nodes=2000, hits=40, big=2000000, head=4096, title=60, line=160, newer=8, walk=20000)
 CAPS = {
@@ -391,7 +392,7 @@ def usage():
     w = max(len(v) for v, _ in rows)
     lines = [USAGE_HEAD, ""] + ["  %-*s  %s" % (w, v, t) for v, t in rows]
     lines += ["", "global:"] + ["  %-*s  %s" % (w + 6, f, t) for f, t in GLOBAL_HELP]
-    lines += ["", "`awt VERB --help` lists a verb's flags.", EXIT_HELP, "agent reference: awt help agents"]
+    lines += ["", "`awt VERB --help` lists a verb's flags.", EXIT_HELP, "start: awt resume    lookups: awt help agents"]
     return "\n".join(lines)
 
 
@@ -1059,7 +1060,7 @@ def brief(scope=None, git_section=True):
         "%d %s" % (len(section_files(s, False)), s) for s in ("context", "docs", "outbox", "misc"))
     if D["bad"]:
         inv += "; %d quarantined rows" % D["bad"]
-    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c('./awt find --like "topic" | ./awt list')]) + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % one(D["unread"])] if D["unread"] else []), "inventory", "state"))
+    o.append(fit("## More", [cut(inv, 140)] + ([] if FRAMED else [c('./awt find --like "topic" | ./awt list')]) + [RULES] + (["WARNING: .awt/events.jsonl is unreadable (%s); showing nothing from it" % one(D["unread"])] if D["unread"] else []), "inventory", "state"))
     if not sts and not FRAMED:
         o.append(c('No handoff yet. Before stopping: ./awt state --now "..." --next "..."\n'))
     return "".join(o)
@@ -3538,13 +3539,23 @@ def cmd_doctor(a):
     cm = find_claude_md(ROOT)
     line("warn" if cm else "ok", "CLAUDE.md at %s may hide AGENTS.md (add @AGENTS.md)" % cm if cm else "no CLAUDE.md in the way")
     if not intree:
+        cmd = None
         try:
             with open(P(".claude", "settings.json"), encoding="utf-8") as g:
-                st = g.read()
-            good = "awt resume --hook" in st
-        except OSError:
-            good = False
-        line("ok" if good else "warn", "settings has the awt hook" if good else ".claude/settings.json lacks the awt hook")
+                for grp in json.load(g)["hooks"]["SessionStart"]:
+                    for h in grp.get("hooks", []):
+                        if "awt resume --hook" in h.get("command", ""):
+                            cmd = h["command"]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        if cmd is None:
+            line("warn", ".claude/settings.json lacks the awt hook")
+        elif cmd.strip() == json.loads(SETTINGS)["hooks"]["SessionStart"][0]["hooks"][0]["command"]:
+            # the hook init writes runs ./awt; check it statically (never run settings text: it may be hostile)
+            hx = os.path.isfile(P("awt")) and os.access(P("awt"), os.X_OK)
+            line("ok" if hx else "fail", "settings hook runs ./awt" if hx else "settings hook runs ./awt, which is missing or not executable here (copy awt to ./awt, or fix the hook)")
+        else:
+            line("ok", "settings has a custom awt hook (not checked)")
         x = os.access(P("awt"), os.X_OK)
         line("ok" if x else "warn", "awt is executable" if x else "awt is not executable here (chmod +x awt)")
     if intree or children(ROOT):

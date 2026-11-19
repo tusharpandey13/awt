@@ -76,6 +76,8 @@ def nomodel(text):
     for pre in ("./", ""):
         for q in ('"', '\\"'):  # plain and JSON-escaped
             text = text.replace(pre + "awt find --like " + q + "topic" + q + " | " + pre + "awt list", pre + "awt list | " + pre + "awt find <term>")  # the brief footer changed after v0.3.1
+    text = re.sub(r"^Rules: .*\n", "", text, flags=re.M)  # the brief gained a fixed rules line
+    text = re.sub(r'Rules: [^"\\\n]*\\n', "", text)  # the same line inside a JSON string
     return re.sub(r', "run": null', "", re.sub(r', "model": "unknown:legacy"', "", text))  # list rows gained `run` (child nodes)
 
 
@@ -658,7 +660,7 @@ class ER20(Cli):
         targets = list(nodes.values()) + [R, solo]
         cmds = [("resume",), ("resume", "--json"), ("list", "nodes", "--all", "--json")] + [("list", s, "--json") for s in SECTIONS] \
             + [("find", "--tree", "quillwort"), ("doctor",)]
-        jobs = [(n, c) for n in targets for c in cmds]
+        jobs = [(n, c) for n in targets for c in cmds if not (n == solo and c == ("doctor",))]  # doctor now fails solo: its settings hook needs ./awt
         def both(job):
             n, c = job
             a = self.run_awt(*c, dir=n, awt=pre, expect=None)

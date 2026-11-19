@@ -44,6 +44,10 @@ class Base(unittest.TestCase):
     def init(self, goal=True):
         return self.ok(*(["init", "--goal", "g", "--done", "d"] if goal else ["init"]))
 
+    def install_awt(self, root=None):
+        """what a person does after init: the settings hook runs ./awt, so doctor needs it there"""
+        shutil.copy2(AWT, os.path.join(root or self.root, "awt"))
+
     def p(self, *a):
         return os.path.join(self.root, *a)
 
@@ -514,6 +518,7 @@ class TestEffects(Base):
         self.raw_append(dict(type="effect", id=u, step="dropped", attempt=1))  # unknown -> dropped
         self.assertEqual(self.state_of(d), "dropped")
         self.assertEqual(self.state_of(u), "unknown")
+        self.install_awt()
         self.assertIn("6 quarantined", self.ok("doctor").stdout)
 
     def test_init_writes_no_ask_rule_and_no_outbox_paragraph(self):
