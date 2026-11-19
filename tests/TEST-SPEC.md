@@ -242,7 +242,7 @@ Core (`test_passive_recall.py`):
 - T-PR24 Shadow: one `prompt` row then `every` rows, ids equal to `on`'s, no text, nothing written at `AWT_RECALL_MS=0`; `on` writes no later row.
 
 Plugin (`recall.test.ts`, named PRP1 to PRP7 so they do not clash with the pipe tests PP1 to PP9):
-- PRP1 `AWT_RECALL` and `AWT_RECALL_SCOPE` reach the agent env, unset stays unset. PRP2 A receipt has `recalled`, no `recall` in `counts`, `empty` true. PRP3 `AWT_RECEIPT=changes` shows a recall-only receipt. PRP4 Shadow and `every` rows: `would recall ... (shadow)`. PRP5 Old receipts render, new keys strip under the old schema. PRP6 The prompt block says nothing about recall. PRP7 `{id, text}` with text at most 80 chars, never stored; a failing fetch leaves the id.
+- PRP1 `AWT_RECALL` and `AWT_RECALL_SCOPE` reach the agent env, unset stays unset. PRP2 A receipt has `recalled`, no `recall` in `counts`, `empty` true. PRP3 `AWT_RECEIPT=changes` shows a recall-only receipt. PRP4 Shadow and `every` rows: `shadow` true, not mentioned in the line. PRP5 Old receipts render, new keys strip under the old schema. PRP6 The prompt block says nothing about recall. PRP7 `{id, text}` with text at most 80 chars, never stored; a failing fetch leaves the id.
 
 Chaos (`recall-*`): `recall-2000` (a big tree: a valid block or `stopped`), `recall-corrupt` (corrupt, symlinked and `.new-*` nodes), `recall-readonly`, `recall-forge` (frame, headings, 4 KB lines, control characters), `recall-shadow-volume`, `recall-race`, `recall-old-awt` (v0.3.2 reads a log with `recall` rows), `recall-hook-exit` (a missing awt and an awt that exits 2: the hook command exits 0).
 

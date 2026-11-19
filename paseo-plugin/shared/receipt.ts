@@ -46,26 +46,36 @@ const WORD: Record<string, [string, string]> = {
   capture: ["capture", "captures"],
 };
 
-/** One muted line, for example `awt · 1 decision d-9e01b2c3 · 1 note · handoff`. */
+function plural(n: number, [one, many]: [string, string]): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function andList(items: string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * One plain muted line, for example `awt saved 1 decision and 1 note`, `awt saved an automatic handoff`,
+ * `awt recalled 2 earlier records and saved 1 note`, or `awt saved nothing this turn`.
+ * Ids are left out; shadow recall (never shown to the agent) is not mentioned.
+ */
 export function receiptLine(data: Receipt): string {
-  const parts: string[] = [];
-  if (data.recalled?.length) {
-    const list = data.recalled.map((r) => (r.text ? `${r.id} "${r.text}"` : r.id)).join(", ");
-    parts.push(data.shadow ? `would recall ${list} (shadow)` : `recalled ${list}`);
-  }
-  if (data.empty) return ["awt", ...parts, "nothing stored this turn"].join(" · ");
-  for (const type of RECEIPT_TYPES) {
-    const n = data.counts[type] ?? 0;
-    if (!n) continue;
-    if (type === "state") {
-      // The stand-in handoff is the plugin's, not the agent's: show it apart from handoffs the agent wrote.
-      const own = data.auto ? n - 1 : n;
-      if (own > 0) parts.push(data.auto ? `${own} handoff${own > 1 ? "s" : ""}` : n > 1 ? `${n} handoffs` : "handoff");
-      if (data.auto) parts.push("handoff [auto]");
-      continue;
+  const saved: string[] = [];
+  if (!data.empty) {
+    for (const type of RECEIPT_TYPES) {
+      const n = data.counts[type] ?? 0;
+      if (!n) continue;
+      if (type === "state") {
+        // The stand-in handoff is the plugin's, not the agent's: name it apart from handoffs the agent wrote.
+        const own = data.auto ? n - 1 : n;
+        if (own > 0) saved.push(plural(own, ["handoff", "handoffs"]));
+        if (data.auto) saved.push("an automatic handoff");
+        continue;
+      }
+      saved.push(plural(n, WORD[type]));
     }
-    const id = n === 1 && (type === "decision" || type === "question") ? data.ids.find((i) => i.startsWith(type[0] + "-")) : undefined;
-    parts.push(`${n} ${WORD[type][n === 1 ? 0 : 1]}${id ? " " + id : ""}`);
   }
-  return ["awt", ...parts].join(" · ");
+  const recalled = !data.shadow && data.recalled?.length ? `recalled ${plural(data.recalled.length, ["earlier record", "earlier records"])}` : "";
+  if (recalled) return saved.length ? `awt ${recalled} and saved ${andList(saved)}` : `awt ${recalled}`;
+  return saved.length ? `awt saved ${andList(saved)}` : "awt saved nothing this turn";
 }

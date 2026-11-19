@@ -104,10 +104,11 @@ After every turn of an agent that has a node (subagents included), the plugin ap
   - `auto`: true when the stand-in handoff was written this turn (the agent may also have written its own handoffs);
   - `empty`: true when nothing was stored.
 - **The renderer** is a client contribution (`addTimelineRenderer`) that shows one muted line:
-  - `awt · 1 decision d-9e01b2c3 · 1 note · handoff`
-  - `awt · handoff [auto]`
-  - `awt · 1 handoff · handoff [auto]` (the stand-in is always shown apart from the agent's own handoffs)
-  - `awt · nothing stored this turn`
+  - `awt saved 1 decision, 1 note and 1 handoff`
+  - `awt saved an automatic handoff`
+  - `awt saved 1 handoff and an automatic handoff` (the stand-in is always named apart from the agent's own handoffs)
+  - `awt saved nothing this turn`
+  - (0.4.2: plain words, no ids; earlier releases showed `awt · 1 decision d-... · handoff [auto]`.)
 - **Setting:** `AWT_RECEIPT` defaults to on. `0` or `off` turns receipts off, and `changes` shows them only when something was stored.
 - **Not seen by the model.** Plugin timeline items are UI-only and are not sent to the provider. The gated tier-2 test confirms this. If it turns out to be false, receipts default to off and this spec is revised.
 - **Errors:** an append failure is logged and does nothing else. The plugin never fails a turn.

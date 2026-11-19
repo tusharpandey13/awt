@@ -164,7 +164,7 @@ New event type `recall`, written by `emit()` like any row, in the agent's own no
 ### Visibility
 
 - The receipt row is reused. `data` gets two optional keys: `recalled` (this turn's `recall` rows with `result` `hits` or `shadow` and non-empty `ids`, own node only: a list of at most 5 `{id, text}`, where `text` is a short form of the record, at most 80 chars, fetched by the plugin with `awt find --tree ID`) and `shadow` (true when they were not shown). A version 1 renderer ignores unknown keys (zod strips them), so the version stays 1.
-- The line gains a leading part: `awt · recalled d-7f3a9c21 "Retry with jitter", n-44aa01bc "CI retries flaky tests twice" · 1 decision d-9e01b2c3`, or `awt · would recall d-7f3a9c21 "Retry with jitter" (shadow) · nothing stored this turn`.
+- The line counts shown records only (0.4.2): `awt recalled 2 earlier records and saved 1 decision`. A shadow recall is not mentioned in the line.
 - The text is local only: it is fetched at render time from the node logs, kept in the receipt row (UI-only), never written to a `recall` row or `store.db`, and never sent to the provider. A fetch that fails or is slow (about 0.1 s per id, 1 s in all) leaves the id without text.
 - `recall` rows are not counted as stored: they are not in `counts`, and alone they leave `empty` true. `AWT_RECEIPT=changes` still shows a receipt that has `recalled`.
 - A receipt is UI-only and not sent to the provider (tier-2 checked for v1 receipts), so showing would-recall ids and text in shadow mode does not leak them to the agent.
@@ -324,7 +324,7 @@ Plugin:
 - **PP1** `AWT_RECALL` and `AWT_RECALL_SCOPE` in the daemon env reach the agent env from `agent.open.before`; unset stays unset.
 - **PP2** A turn with a `prompt` recall row gives a receipt with `recalled` and no `recall` in `counts`; `empty` stays true when nothing else was written.
 - **PP3** `AWT_RECEIPT=changes` shows a recall-only receipt; a turn with neither recall nor writes shows none.
-- **PP4** Shadow row: `shadow: true`, line `would recall ... (shadow)`; an `every` row shows the same way.
+- **PP4** Shadow row: `shadow: true`, not mentioned in the line; an `every` row behaves the same way.
 - **PP7** `recalled` entries carry `{id, text}` with text at most 80 chars from `awt find --tree ID`; a failing fetch leaves the id without text; the text appears in no `recall` row and no `store.db` record.
 - **PP5** A version 1 receipt without the new keys still renders; a receipt with them parses under the old schema (keys stripped).
 - **PP6** `AWT_BLOCK` byte-identical to `main` (passive recall adds no prompt text).

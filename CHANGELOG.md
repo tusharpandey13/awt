@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The Paseo turn receipt is one plain sentence without ids: `awt saved 1 decision and 1 note`, `awt saved an automatic handoff`, `awt recalled 2 earlier records and saved 1 note`, `awt saved nothing this turn`. A shadow recall (never shown to the agent) is no longer mentioned in the line. The receipt data is unchanged (version 1).
+
 ## 0.4.1 (19-Nov-2026)
 
 ### Changed
