@@ -41,7 +41,7 @@ Long tool output is cut. Temporary paths and the hostname were replaced.
     ./awt list | ./awt find <term>
     # awt agent reference
 
-    Lookup only. Search for the refusal text or the verb. Commands run from the task root as `./awt`.
+    Lookup only. Search for the refusal text or the verb. Commands run from the task root as `./awt`. In a tree node (`AWT_DIR` is set) there is no `./awt`: run `awt`, the same program, which finds the node through `AWT_DIR`.
 
     ## Which command
 
