@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (19-Nov-2026)
 
 ### Changed
 - `awt help agents` says that in a tree node (`AWT_DIR` set) there is no `./awt` and `awt` is the same program, found through `AWT_DIR` (#1 item 4).
