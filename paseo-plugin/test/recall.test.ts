@@ -57,7 +57,7 @@ test("PRP2 a turn with a prompt recall row has a receipt with recalled, no recal
   assert.ok(!("recall" in data.counts));
   assert.equal(data.empty, true);
   assert.equal(data.shadow, undefined);
-  assert.match(receiptLine(data), new RegExp(`^awt · recalled ${id} "[^"]+" · nothing stored this turn$`));
+  assert.match(receiptLine(data), /^awt recalled 1 earlier record$/);
 });
 
 test("PRP3 AWT_RECEIPT=changes shows a recall-only receipt; a turn with neither recall nor writes shows none", async () => {
@@ -70,7 +70,7 @@ test("PRP3 AWT_RECEIPT=changes shows a recall-only receipt; a turn with neither 
   assert.equal(r.appended.length, 1);
 });
 
-test("PRP4 a shadow row (and an every row) shows as would recall, with shadow true", async () => {
+test("PRP4 a shadow row (and an every row) has shadow true and is not mentioned in the line", async () => {
   const { r, dir, id } = await world({ AWT_RECALL: "shadow" });
   r.awt(dir, "find", "--like", PROMPT, "--hook");
   r.awt(dir, "find", "--like", PROMPT, "--hook"); // an every row
@@ -79,16 +79,16 @@ test("PRP4 a shadow row (and an every row) shows as would recall, with shadow tr
   const data = r.appended[0].item.data;
   assert.equal(data.shadow, true);
   assert.deepEqual(data.recalled.map((x: any) => x.id), [id]);
-  assert.match(receiptLine(data), new RegExp(`^awt · would recall ${id} "[^"]+" \\(shadow\\) · nothing stored this turn$`));
+  assert.match(receiptLine(data), /^awt saved nothing this turn$/);
 });
 
 test("PRP5 a version 1 receipt without the new keys still renders, and one with them parses under the old schema", () => {
   const old = { node: "chat-1", counts: { note: 1 }, ids: [], auto: false, empty: false };
-  assert.equal(receiptLine(parseReceipt({ version: RECEIPT_VERSION, data: old })!), "awt · 1 note");
+  assert.equal(receiptLine(parseReceipt({ version: RECEIPT_VERSION, data: old })!), "awt saved 1 note");
   const withNew = parseReceipt({ version: RECEIPT_VERSION, data: { ...old, recalled: [{ id: "d-7f3a9c21", text: "x" }], shadow: true, extra: 1 } });
   assert.ok(withNew);
-  assert.equal(receiptLine({ ...old, recalled: [{ id: "d-7f3a9c21", text: "Retry with jitter" }] }), 'awt · recalled d-7f3a9c21 "Retry with jitter" · 1 note');
-  assert.equal(receiptLine({ ...old, recalled: [{ id: "d-7f3a9c21" }] }), "awt · recalled d-7f3a9c21 · 1 note");
+  assert.equal(receiptLine({ ...old, recalled: [{ id: "d-7f3a9c21", text: "Retry with jitter" }] }), "awt recalled 1 earlier record and saved 1 note");
+  assert.equal(receiptLine({ ...old, recalled: [{ id: "d-7f3a9c21" }] }), "awt recalled 1 earlier record and saved 1 note");
 });
 
 test("PRP6 the prompt block says nothing about recall", () => {

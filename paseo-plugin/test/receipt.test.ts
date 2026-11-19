@@ -36,7 +36,7 @@ test("P15 a turn that wrote a decision and a note appends one receipt with match
   assert.deepEqual([...item.data.ids].sort(), [d, n].sort());
   assert.equal(item.data.auto, false);
   assert.equal(item.data.empty, false);
-  assert.match(receiptLine(item.data), new RegExp(`^awt · 1 decision ${d} · 1 note$`));
+  assert.equal(receiptLine(item.data), "awt saved 1 decision and 1 note");
   // rows written before the turn began are not counted
   await begin(r, "agt_1", "t2");
   await end(r, "agt_1", "t2");
@@ -77,7 +77,7 @@ test("P16 a turn that wrote nothing says so; AWT_RECEIPT=changes and =0 append n
   await end(on, "agt_1", "t1");
   assert.equal(on.appended.length, 1);
   assert.deepEqual(on.appended[0].item.data, { node: on.appended[0].item.data.node, counts: {}, ids: [], auto: false, empty: true });
-  assert.equal(receiptLine(on.appended[0].item.data), "awt · nothing stored this turn");
+  assert.equal(receiptLine(on.appended[0].item.data), "awt saved nothing this turn");
 
   for (const mode of ["changes", "0", "off"]) {
     const r = mk({ AWT_RECEIPT: mode }, WS);
@@ -119,7 +119,7 @@ test("P17 the receipt comes after the stand-in handoff and marks it auto", async
   assert.equal(data.auto, true);
   assert.equal(data.empty, false);
   assert.deepEqual(data.counts, { state: 1 });
-  assert.equal(receiptLine(data), "awt · handoff [auto]");
+  assert.equal(receiptLine(data), "awt saved an automatic handoff");
 });
 
 test("P17 a handoff the agent wrote is not marked auto", async () => {
@@ -129,7 +129,7 @@ test("P17 a handoff the agent wrote is not marked auto", async () => {
   r.awt(open.env.AWT_DIR, "state", "--now", "did x", "--next", "do y");
   await end(r, "agt_1", "t1");
   assert.equal(r.appended[0].item.data.auto, false);
-  assert.equal(receiptLine(r.appended[0].item.data), "awt · handoff");
+  assert.equal(receiptLine(r.appended[0].item.data), "awt saved 1 handoff");
 });
 
 test("P18 an append that throws is logged and the turn is unaffected", async () => {
@@ -158,11 +158,11 @@ test("P19 AWT_RELATED in the daemon env reaches the agent env", async () => {
 
 test("P20 the auto handoff renders apart from handoffs the agent wrote", () => {
   const base = { node: "chat-1", counts: { state: 2 }, ids: [], auto: true, empty: false };
-  assert.equal(receiptLine(base), "awt · 1 handoff · handoff [auto]");
-  assert.equal(receiptLine({ ...base, counts: { state: 3 } }), "awt · 2 handoffs · handoff [auto]");
-  assert.equal(receiptLine({ ...base, counts: { state: 1 } }), "awt · handoff [auto]");
-  assert.equal(receiptLine({ ...base, counts: { state: 1 }, auto: false }), "awt · handoff");
-  assert.equal(receiptLine({ ...base, counts: { state: 2 }, auto: false }), "awt · 2 handoffs");
+  assert.equal(receiptLine(base), "awt saved 1 handoff and an automatic handoff");
+  assert.equal(receiptLine({ ...base, counts: { state: 3 } }), "awt saved 2 handoffs and an automatic handoff");
+  assert.equal(receiptLine({ ...base, counts: { state: 1 } }), "awt saved an automatic handoff");
+  assert.equal(receiptLine({ ...base, counts: { state: 1 }, auto: false }), "awt saved 1 handoff");
+  assert.equal(receiptLine({ ...base, counts: { state: 2 }, auto: false }), "awt saved 2 handoffs");
 });
 
 test("P20 the renderer schema rejects an unknown version or bad data without throwing", () => {
@@ -173,8 +173,8 @@ test("P20 the renderer schema rejects an unknown version or bad data without thr
     assert.equal(parseReceipt({ ...good, data }), null);
   }
   assert.equal(parseReceipt(undefined), null);
-  assert.equal(receiptLine(good.data), "awt · 1 decision d-9e01b2c3");
-  assert.equal(receiptLine({ ...good.data, counts: { decision: 2, note: 1, state: 1 }, ids: ["d-1", "d-2", "n-1"], auto: true }), "awt · 2 decisions · 1 note · handoff [auto]");
+  assert.equal(receiptLine(good.data), "awt saved 1 decision");
+  assert.equal(receiptLine({ ...good.data, counts: { decision: 2, note: 1, state: 1 }, ids: ["d-1", "d-2", "n-1"], auto: true }), "awt saved 2 decisions, 1 note and an automatic handoff");
 });
 
 test("P21 after a plugin restart, an agent whose node exists gets the auto handoff and a receipt; one with no node gets neither", async () => {

@@ -290,7 +290,7 @@ test("E-R14 receipts for canceled and failed turns", { skip: !ON }, async () => 
 });
 
 test("E-R15 receipts are not in the provider's input (ACP)", { skip: !ON }, async () => {
-  const pat = /awt\.receipt|awt ·|nothing stored this turn/;
+  const pat = /awt\.receipt|awt ·|awt saved|awt recalled|nothing this turn/;
   // A fresh agent on the current plugin process (receipts of agents opened before a restart are lost, see report).
   const id = run("rec2", 'RUN: awt note "ctl"');
   assert.equal((await waitReceipts(id, 1)).length, 1, "positive control: a receipt exists in the timeline");
