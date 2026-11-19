@@ -444,6 +444,7 @@ class Hooks(test_awt.Base):
         p = self.settings()
         self.ok("init", "--hooks", "claude", root="")
         self.init()
+        self.install_awt()
         lines = self.ok("doctor").stdout
         self.assertNotIn("UserPromptSubmit", lines)
         st = self.load(p)

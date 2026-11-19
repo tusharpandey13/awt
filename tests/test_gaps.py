@@ -22,6 +22,7 @@ class Doctor(Base):
     def test_clean_standalone_is_all_ok(self):
         self.init()
         os.chmod(self.p(".."), 0o755)
+        self.install_awt()
         r = self.ok("doctor")
         self.assertNotIn("fail", levels(r.stdout), r.stdout)
         self.assertEqual(line_with(r.stdout, "O_APPEND"), "ok")
@@ -66,14 +67,15 @@ class Doctor(Base):
         root = os.path.join(self.tmp, "iCloud", "task")
         os.makedirs(root)
         self.ok("init", "--goal", "g", "--done", "d", root=root)
+        self.install_awt(root)
         self.assertEqual(line_with(self.ok("doctor", root=root).stdout, "sync folder"), "warn")
 
     def test_executable_awt_and_settings_are_ok(self):
         self.init()
-        shutil.copy2(AWT, self.p("awt"))
+        self.install_awt()
         r = self.ok("doctor")
         self.assertEqual(line_with(r.stdout, "awt is executable"), "ok")
-        self.assertEqual(line_with(r.stdout, "settings has"), "ok")
+        self.assertEqual(line_with(r.stdout, "settings hook"), "ok")
 
 
 class DoctorAskRule(Base):
@@ -92,16 +94,18 @@ class DoctorAskRule(Base):
     def test_old_ask_rule_warns_with_the_exact_line_and_is_never_edited(self):
         self.init()
         self.write(".claude/settings.json", self.OLD)
+        self.install_awt()
         r = self.ok("doctor")  # warning only: exit 0
         warn = [l for l in r.stdout.splitlines() if "ask rule" in l]
         self.assertEqual(len(warn), 1, r.stdout)
         self.assertTrue(warn[0].startswith("warn"))
         self.assertIn('line 8: "ask": [ "Bash(./awt effect apply *)", "Bash(awt effect apply *)" ]', warn[0])
         self.assertEqual(slurp(self.p(".claude", "settings.json")), self.OLD)
-        self.assertEqual(line_with(r.stdout, "settings has"), "ok")
+        self.assertEqual(line_with(r.stdout, "settings hook"), "ok")
 
     def test_fresh_init_has_no_ask_rule_to_warn_about(self):
         self.init()
+        self.install_awt()
         self.assertNotIn("ask rule", self.ok("doctor").stdout)
 
 
@@ -142,7 +146,7 @@ class PreTreeBrief(Base):
             f.write("BRIEF.md\n.awt/*.tmp\n")
         os.utime(gi, ns=(st.st_atime_ns, st.st_mtime_ns))
         for args in (("resume",), ("resume", "--hook"), ("resume", "--scope", "main")):
-            new = run(AWT, *args).replace('./awt find --like "topic" | ./awt list', "./awt list | ./awt find <term>")  # the footer changed after the pre-tree release
+            new = re.sub(r"^Rules: .*\n", "", run(AWT, *args), flags=re.M).replace('./awt find --like "topic" | ./awt list', "./awt list | ./awt find <term>")  # the footer changed after the pre-tree release
             self.assertEqual(new, run(old, *args), args)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `awt --help` now ends with `start: awt resume    lookups: awt help agents`, so an agent reads `resume` as the first step and not `help agents` as the whole manual.
+- `resume` ends its `## More` section with one fixed `Rules:` line (declare sends, stop on a secret match or an `unknown` effect, never mark `sent`/`dropped` to pass `status done`). The 4,400 total is unchanged: the inventory budget grows from 200 to 400 and the changes budget shrinks from 500 to 300.
+- `doctor` fails when a standalone task's `SessionStart` hook (the one `init` writes) points at a `./awt` that is missing or not executable, where before it only checked the settings text. It checks the path and never runs the command, since settings text in a cloned task may be hostile.
+
 ## 0.4.0 (19-Nov-2026)
 
 ### Added

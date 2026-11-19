@@ -73,6 +73,7 @@ class TestCli(Base):
         self.ok("note", "one")
         self.raw_append(dict(type="note", id="n-00000002", text="legacy"))
         self.ok("note", "named", "--model", "claude-sonnet-5-5")
+        self.install_awt()
         r = self.ok("doctor")
         line = [x for x in r.stdout.splitlines() if "unknown model" in x]
         self.assertEqual(len(line), 1, r.stdout)
@@ -85,6 +86,7 @@ class TestDoctorOk(Base):
         env = dict(self.env, AWT_MODEL="claude-sonnet-5-5")
         self.ok("init", "--goal", "g", "--done", "d", env=env)
         self.ok("note", "x", env=env)
+        self.install_awt()
         r = self.ok("doctor", env=env)
         self.assertIn("ok every row names a model", r.stdout)
 
