@@ -116,7 +116,7 @@ If you use Paseo, the `awt` plugin builds and maintains the tree for you:
 Put `awt` on the daemon's `PATH`, then (Paseo 0.15.4 or later):
 
 ```sh
-paseo plugin install git:tusharpandey13/awt:paseo-plugin --ref v0.2.0
+paseo plugin install git:tusharpandey13/awt:paseo-plugin --ref v0.4.0
 ```
 
 The tree lives at `${XDG_DATA_HOME:-~/.local/share}/awt`. Set `AWT_ROOT` in the daemon's environment to move it. To bring in your existing Paseo history, see [Import Paseo history](AGENTS.md#import-paseo-history). Plugin details: [paseo-plugin/OVERVIEW.md](paseo-plugin/OVERVIEW.md).

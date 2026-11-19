@@ -126,7 +126,7 @@ Install, on the machine running the Paseo daemon (Paseo 0.15.4 or later):
 2. Install the plugin. This trusts and runs its code inside the daemon, so ask the person first:
 
    ```sh
-   paseo plugin install git:tusharpandey13/awt:paseo-plugin --ref v0.2.0
+   paseo plugin install git:tusharpandey13/awt:paseo-plugin --ref v0.4.0
    ```
 
 3. Check it: `paseo plugin ls` should show `awt`, and `paseo plugin logs awt` should end with `Plugin ready`.

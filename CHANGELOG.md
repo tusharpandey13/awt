@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (19-Nov-2026)
 
 ### Added
 - Child nodes (spec: `docs/spec-child-nodes.md`, contract: `SPEC.md` Node tree, Child nodes). `awt init --child RUN_KEY` makes the `agent` node `agents/RUN_KEY` for a subagent that its parent launched with a provider's own tool, and prints `AWT_DIR=... AWT_BY=sub:RUN_KEY`. It is idempotent and needs no lock; the node row carries the new optional field `run` (no store schema change; an older `awt` reads the node as a plain agent). In a child node a write without `--by` is stamped `sub:RUN_KEY` and `AWT_BY` is ignored, so two parallel children no longer share one `by`. Verbs are still 16.
