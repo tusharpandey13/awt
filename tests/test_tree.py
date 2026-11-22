@@ -220,7 +220,7 @@ class Projects(TreeBase):
         root, prj, ws, task, agent = self.chain_in_project()
         self.ok("status", "paused", root=prj)
         with open(os.path.join(prj, ".awt", "events.jsonl"), "a", encoding="utf-8") as g:
-            g.write(json.dumps(dict(type="status", status="done", ts="2026-01-01T00:00:00.000Z", by="t")) + "\n")
+            g.write(json.dumps(dict(v=2, type="status", status="done", ts=test_awt.ts(), host="h", by="t", model="m")) + "\n")  # a v 2 row, later than the paused one
         self.assertRegex(self.ok("doctor", root=root).stdout, r"warn projects/parsekit is done but .*workspaces/main is still active")
 
     def test_p7_project_in_wrong_dir_is_a_warning(self):

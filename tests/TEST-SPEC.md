@@ -449,6 +449,8 @@ Unit and integration tests in `tests/test_sync.py` use the stdlib, temp dirs, `g
 
 Differences from the plan above, all in how a test is built, not what it asserts: T-HS8 compares `resume`, `list SECTION --all --json` for each ledger section and `list --all` with v0.4.1's output (`list --all --json` without a section is a usage error); T-HS17 runs 30 rounds, not 100 (C59 runs the race with the full count in `chaos-full`); T-HS35 and T-HS37 compare the store with a rebuild by `H.logical`, which leaves out rowids and the `ingest_sources` snapshot (it holds the run time); `AWT_TEST_SYNC_WAIT_S` sets the 10 s write wait and caps the 2 s waits, so one value serves a write test (1 s) and a hook test (at most 2 s).
 
+Three older tests changed with the contract and nothing else: `test_awt` `raw_append` and `test_torn_and_garbage_lines` expect `v: 2` rows, and `test_tree` `test_p6_doctor_flags_done_project_with_active_workspace` appends a `v: 2` status row, because a hand-made legacy row after a `v: 2` row now reads before it (SPEC, Reading).
+
 **Invariants** (checked by the journeys and by every `sync` chaos case):
 
 | ID | Invariant |

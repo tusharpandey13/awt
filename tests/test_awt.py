@@ -66,7 +66,7 @@ class Base(unittest.TestCase):
 
     def raw_append(self, row):
         with open(self.p(".awt", "events.jsonl"), "ab") as g:
-            g.write((json.dumps(dict(v=1, ts=ts(), host=socket.gethostname(), by="t", **row)) + "\n").encode())
+            g.write((json.dumps(dict(v=2, ts=ts(), host=socket.gethostname(), by="t", **row)) + "\n").encode())  # v 2: a legacy row would read before every v 2 row (SPEC, Reading)
 
     def plan(self, *args, target="slack:#eng"):
         r = self.ok("effect", "plan", "--target", target, *args)
@@ -252,7 +252,7 @@ class TestBasics(Base):
         self.ok("note", "after tear")
         lines = self.events().split(b"\n")
         self.assertEqual(lines[-1], b"")
-        self.assertTrue(lines[-2].startswith(b'{"v":1,"ts":"') and b"after tear" in lines[-2])
+        self.assertTrue(lines[-2].startswith(b'{"v":2,"ts":"') and b"after tear" in lines[-2])
         self.assertIn("after tear", self.ok("list", "notes").stdout)
         self.assertIn("4 quarantined", self.ok("resume").stdout)  # torn piece stays its own bad line
         self.assertIn("warn 4 quarantined", self.awt("doctor").stdout)
