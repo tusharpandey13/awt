@@ -1,6 +1,6 @@
 # Spec: one task tree on two hosts (ledger order, sync lock, private remote, profiles)
 
-Status: draft, 22-Nov-2026. Spec only; the implementation follows on its own branch and PR. The owner approved `awt` spec, code and test changes for this on 22-Nov-2026 (homelab `docs/paseo-box/SPEC-paseo-box.md` section 12, Q12-3 and Q12-4). The normative text moves into `SPEC.md` and `tests/TEST-SPEC.md` in the implementation PR ("Docs to update"). The end-to-end and chaos rubric is `docs/e2e-two-host-sync.md`.
+Status: implemented in v0.5.0 (22-Nov-2026); this file is the design record, and the normative text is in `SPEC.md` (Two hosts, Project profiles, Reading, doctor). The owner approved `awt` spec, code and test changes for this on 22-Nov-2026 (homelab `docs/paseo-box/SPEC-paseo-box.md` section 12, Q12-3 and Q12-4). The normative text moves into `SPEC.md` and `tests/TEST-SPEC.md` in the implementation PR ("Docs to update"). The end-to-end and chaos rubric is `docs/e2e-two-host-sync.md`.
 
 Requirement ids: **HS1-HS62**. Unit and integration tests: **T-HS1-T-HS44**. End-to-end journeys: **E-HS1-E-HS15**. Chaos cases: **C50-C59**. Invariants: **IS1-IS7**. `[unverified]` marks a claim not checked against awt's code or a run.
 
@@ -22,7 +22,7 @@ One task tree is used from two hosts, a Mac and an always-on Linux box. The tree
 | Union merge keeps an identical line added on both sides **twice**. It joins the hunks as ours, then theirs. | Scratch run, git on this Mac, 22-Nov | Reads must ignore duplicate rows (HS3). |
 | A row written through an fd opened before `git pull` is **lost**: git replaces the file with a new one, so the write goes into the unlinked inode. | Scratch run, 22-Nov | Writes and work-tree-changing git steps need mutual exclusion (HS10). |
 | A committed torn tail (`TORN` with no newline) that is later completed on the other host comes back twice after a union merge. | Scratch run, 22-Nov | Never commit a ledger that does not end in a newline (HS21). |
-| `flock(LOCK_SH)` on a directory fd blocks `LOCK_EX` from another fd, on macOS. | Scratch run with Python `fcntl`, 22-Nov. On Linux: [unverified] | The lock can be the tree top's `.awt/` directory, with no lock file (Rule 5). |
+| `flock(LOCK_SH)` on a directory fd blocks `LOCK_EX` from another fd, on macOS. | Scratch run with Python `fcntl`, 22-Nov; again by `tests/test_sync.py` T-HS16 and T-HS20 (verified, implementation run 22-Nov). On Linux: [unverified], to be checked in the box rollout | The lock can be the tree top's `.awt/` directory, with no lock file (Rule 5). |
 | macOS has no `flock(1)`. | `which flock` on this Mac | Ship a sync script that locks through Python `fcntl` (HS14). |
 | `doctor` checks remotes only when the node **is** the git top level (`rev-parse --show-toplevel == ROOT`). It prints the first remote's name. | `awt` `cmd_doctor` | With the tree top as the repo root, one node warns, not every node. Homelab AW-6 overstates this. |
 | `ref --kind` is free text (cap 40). `ref --kind sync` already works. | `awt` `cmd_ref`, `CAPS` | Declaring a remote needs no new flag. |
@@ -109,7 +109,7 @@ Each requirement ends with its acceptance tests.
 - **HS9. Clock skew.** HS2 keeps causal order whatever the skew: a row written after a pull sorts after every row the pull brought.
   - Concurrent rows, with neither host having seen the other's, are ordered by `ts`. A host whose clock runs ahead wins those ties.
   - `doctor` warns when any row in the node has a `ts` more than 300 s ahead of this host's clock: `rows up to S s ahead of this clock (host H): check NTP on both hosts`.
-  - Brief ages are never negative. A future `ts` reads as age 0 [unverified: what the brief prints today for a future `ts`].
+  - Brief ages are never negative. A future `ts` reads as age 0 (verified 22-Nov: `ago()` clamps at 0, so the brief prints `just now`; T-HS15).
   
   Accept: T-HS15, E-HS4, C52.
 
@@ -181,7 +181,7 @@ Each requirement ends with its acceptance tests.
     - remove a trailing `/` and `.git`;
     - for `github.com`, also lowercase the path.
   - A local path or `file://` URL normalises to its real path.
-  - A remote is **declared** when every URL of it, fetch and push (`git remote get-url --all NAME` and `--push --all`, which apply `insteadOf` [unverified that both list every URL]), normalises to a declared target.
+  - A remote is **declared** when every URL of it, fetch and push (`git remote get-url --all NAME` and `--push --all`, which apply `insteadOf` and `pushInsteadOf`; verified on git 2.54, 22-Nov: `--all` lists every fetch URL, `--push --all` every push URL, so the union covers all of them), normalises to a declared target.
   
   Accept: T-HS32.
 - **HS32. Doctor lines.** These run at the git top-level node only, as today. One line per remote, naming the remote by name, never by URL:
@@ -412,3 +412,14 @@ Existing suites stay green: unittest, `tests/chaos.py`, `cd paseo-plugin && npm 
 | AT-03, AT-04, AT-05 | E-HS2, E-HS3 and E-HS4, C51 |
 | AT-06 | E-HS12, E-HS13, C50 |
 | AT-08, AT-09 | E-HS10, C53, C55 |
+
+## Implementation notes (v0.5.0)
+
+Where the code differs from the text above, on purpose:
+
+- **HS9.** The "rows ahead of this clock" warning ignores rows written by this host itself. After a pull, HS2 raises a host's own rows past a fast peer's, so they are ahead of its clock by causality, not by its clock. The warning names the other host (E-HS4).
+- **HS10.** `ingest` holds the shared sync lock from its first ledger access to exit, not only while it reads node logs. A long rebuild therefore delays `awt-sync` (it waits 30 s, then skips the run).
+- **HS11.** `AWT_TEST_SYNC_WAIT_S` sets the write wait and caps the 2 s waits at its value, so one setting serves a write test and a hook test (E-HS12).
+- **HS51.** The profile error of a hook run over budget is kept in `ingest/profiles.offsets.json` (`errors["profiles"]`), the file `doctor` already reads for the other sources.
+- **HS53.** A head is the first word, plus a subcommand for tools that have them (`cargo`, `go`, `npm`, `pnpm`, `yarn`, `bun`, `swift`, `xcrun`, `xcodebuild`, `docker`, `git`, `uv`, `pip`, `brew`, `apt`, `apt-get`, `pod`, `bundle`, `vite`, `gh`, `kubectl`, `make`) and `python -m MODULE`, so `tee log` is `tee` (T-HS39).
+- **Tests.** `list --all --json` without a section is a usage error, so the legacy comparisons (T-HS8, E-HS7) use `list SECTION --all --json`. T-HS17 runs 30 rounds, not 100. The store is compared with a rebuild without rowids and without the `ingest_sources` snapshot, which holds the run time.

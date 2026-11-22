@@ -361,7 +361,7 @@ Fictional `parsekit` transcripts and a temp `AWT_STORE`, as in Ingest. Nothing r
 | P2 | The plugin block is at most 360 chars, names `$AWT_DIR/BRIEF.md`, `awt_resume`, `awt_find`, `decide`, `ask`; no `state` |
 | P2b | An agent opened through the plugin has `BRIEF.md` in `AWT_DIR` before any tool call, refreshed by an awt write |
 
-## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`, `child`)
+## Chaos (`tests/chaos.py`, groups `tree`, `migrate`, `plugin`, `child`, `sync`)
 
 Same style as today: seeded, one line per attack, a failure prints the seed and the commands. Quick mode picks small counts of each.
 
@@ -395,6 +395,85 @@ Same style as today: seeded, one line per attack, a failure prints the seed and 
 - C38 *Cancel.* An aborted hook signal kills the running `awt` children.
 - C39 *Env.* The harness environment reaches every `awt` child.
 - C40 *Moved node.* A node moved or broken while the daemon runs is found again.
+
+## Two hosts (`test_sync.py`, `test_sync_e2e.py`; chaos group `sync`; spec `docs/spec-two-host-sync.md`, e2e rubric `docs/e2e-two-host-sync.md`, SPEC Two hosts)
+
+Unit and integration tests in `tests/test_sync.py` use the stdlib, temp dirs, `git` (the classes skip when `git` is absent) and a local bare repo; the public probe (HS33) runs against a local `http.server`, never the real GitHub. The fixture H2 (two hosts, one bare remote) is `tests/synchelp.py`. The end-to-end journeys E-HS1 to E-HS15 are `tests/test_sync_e2e.py`, in the `unit` CI job. Tests T-HS2, T-HS8, E-HS7 and E-HS14 compare with v0.4.1's `awt` (`git show v0.4.1:awt`) and skip when the tag is missing.
+
+| Id | Test |
+|---|---|
+| T-HS1 | `emit` writes `v: 2`. A hand-made `v: 2` row with `ts` `2026-11-22T10:00:00Z` (no microseconds) is quarantined. The same row as `v: 1` is not. |
+| T-HS2 | v0.4.1 `awt` (from `git show v0.4.1:awt`) reads a log holding `v: 2` rows with 0 quarantined. |
+| T-HS3 | With `AWT_TEST_CLOCK_SKEW_S=-3600` and a log whose greatest `ts` is now: the new row's `ts` is greatest + 1 µs. With `+3600`: the wall clock is used. |
+| T-HS4 | `effect begin` computes `ts` under the log lock. 20 concurrent `effect` steps on one effect fold with no quarantine. |
+| T-HS5 | A log with each of 50 lines doubled reads the same `rows` as the undoubled log. `dups` is 50, `bad` is 0. |
+| T-HS6 | The lines of a two-host log, shuffled 100 times (legacy prefix fixed): `rows`, `states`, `task`, `status`, `refs`, `ans`, `eff` and the brief (ages masked) are identical. |
+| T-HS7 | `(ts, host, bytes)` tie-break: two `v: 2` rows with equal `ts` order by `host`, then by bytes. |
+| T-HS8 | Every fixture log in `tests/fixtures` and every log made by the existing suites: `rows` equals the v0.4.1 order. The brief and `list --all --json` are byte-identical with v0.4.1 (I8). |
+| T-HS9 | A `v: 1` row after `v: 2` rows reads before them, and `doctor` warns with the line number. |
+| T-HS10 | `AWT_HOST=box-1` stamps `host` `box-1`. `AWT_HOST='a b'` warns once and uses the hostname. |
+| T-HS11 | Two hosts set `state` on one scope concurrently. The one with the greater `ts` is current on both. `list state --all` has both. |
+| T-HS12 | Two decisions supersede `d-x`: both current, and the `doctor` warning names both. |
+| T-HS13 | Two answers to `q-x`: the first by HS4 wins, and `doctor` warns. |
+| T-HS14 | Effect `begun` on host A, then `sent` on B after a pull: state `sent`, no quarantine. `begun` on both for attempt 1: one quarantined, and `doctor` prints the cross-host line. |
+| T-HS15 | A row 600 s ahead of the clock: `doctor` warns with the host. The brief age is not negative. |
+| T-HS16 | With `LOCK_EX` held on `TOP/.awt` by the test: `note` blocks, then exits 1 after 10 s with the fix (`AWT_TEST_SYNC_WAIT_S` shortens the wait); `resume --hook` returns within 2.5 s, exit 0; `list` prints the partial note. After release, a write succeeds at once. |
+| T-HS17 | No deadlock: `effect begin` (log lock, then sync lock) racing an `awt-sync` (sync lock only) 100 times completes every time. |
+| T-HS18 | `ingest --event --hook` with the sync lock held drops the row silently, exit 0, within 2.5 s. |
+| T-HS19 | `awt-sync` on two clones of a bare repo, the whole HS12 sequence: commit, merge and push happen, and the summary line is right. |
+| T-HS20 | `awt-sync` with the lock held by another process exits 0, skipped, with a stderr note. |
+| T-HS21 | `awt-sync` heals a torn tail before staging. The commit passes HS21. |
+| T-HS22 | `awt-sync` after a rejected push: exit 0, `push rejected`, and the next run converges. It never runs `--force` (checked by a fake `git` wrapper that logs its argv). |
+| T-HS23 | HS15: remove `BRIEF.md` from the top `.gitignore`: `doctor` warns, naming the line. |
+| T-HS24 | HS16: no union attribute: warn. `events.jsonl merge=union`: ok. |
+| T-HS25 | HS17: hook absent, not executable, or without `awt doctor --staged`: warn. `core.hooksPath` is honoured. |
+| T-HS26 | `doctor --staged` with a staged ledger with no final newline: exit 1 and the HS21 fix. |
+| T-HS27 | A staged ledger with a changed middle byte, or with the last row removed: exit 1 (HS22). A new file (no HEAD blob): no prefix check. |
+| T-HS28 | Staged conflict markers: exit 1 (HS23). |
+| T-HS29 | A staged torn fragment followed by a healed row: warn with the line number, exit 0. No row text in the output. |
+| T-HS30 | Truncate the working ledger: `doctor` fails (HS25). During a merge with `MERGE_HEAD`: no fail. |
+| T-HS31 | `ref URL --kind sync` declares. A later `ref URL --kind link` withdraws. A URL with a token-shaped userinfo (built at runtime) is refused by the secret scan. |
+| T-HS32 | Normalisation table: `git@github.com:Owner/Repo.git`, `ssh://git@github.com/owner/repo`, `https://github.com/owner/repo/`, `git+ssh://…` are equal. A different host or owner is not. Local paths compare by real path. |
+| T-HS33 | `doctor` lines for a declared remote, an undeclared remote, a declared target with no remote, and a remote with one undeclared push URL. Output never holds a URL with userinfo. |
+| T-HS34 | Probe against a local server: 200 fail, 404 no line, 500 warn, refused connection warn, 5 s timeout respected (server sleeps 6 s). No request carries `Authorization` or `Cookie`. `doctor --staged` makes no request. |
+| T-HS35 | Store: host A's canonical files copied into host B's store, then a plain `ingest` on B: A's sessions are in B's `store.db`. A `.dump` equals that of `ingest --rebuild` (rowids masked). |
+| T-HS36 | Re-import: the same pull twice and the same rsync twice: `build_state` and every table unchanged. Ingest prints 0 rows. |
+| T-HS37 | Partial copy: a canonical file cut mid-line. `ingest` gives no error count, then the full file plus `ingest` equals a rebuild. |
+| T-HS38 | Profiles are written after `ingest` with mode 600, written by rename, refreshed when over 24 h old, and kept on a hook timeout with `errors["profiles"]`. A store with another schema writes none. |
+| T-HS39 | Head extraction: `FOO=1 sudo env cargo test --all && cd x \| tee log` gives heads `cargo test` and `tee`. Secrets and paths in arguments never reach the file. |
+| T-HS40 | Class table: one case per row of HS53, plus `other`. |
+| T-HS41 | Class rules in order: override beats observed, which beats manifest, which beats default. Thresholds at 2/3 device+media calls and at 4/5 and 9%/10% build calls. |
+| T-HS42 | A repo path missing on this host is not in `repos`, but its sessions still count for the project. An unassigned session cwd gives a `project: null` entry. |
+| T-HS43 | `decide --tag profile:heavy` is refused with the fix. `profile:build-heavy` is accepted and becomes `source: override`. A superseding decision with `profile:light` wins. |
+| T-HS44 | Shape: sorted keys, `v` 1, `heads` at most 10, no command text (a grep for a fixture argument finds nothing). |
+
+Differences from the plan above, all in how a test is built, not what it asserts: T-HS8 compares `resume`, `list SECTION --all --json` for each ledger section and `list --all` with v0.4.1's output (`list --all --json` without a section is a usage error); T-HS17 runs 30 rounds, not 100 (C59 runs the race with the full count in `chaos-full`); T-HS35 and T-HS37 compare the store with a rebuild by `H.logical`, which leaves out rowids and the `ingest_sources` snapshot (it holds the run time); `AWT_TEST_SYNC_WAIT_S` sets the 10 s write wait and caps the 2 s waits, so one value serves a write test (1 s) and a hook test (at most 2 s).
+
+**Invariants** (checked by the journeys and by every `sync` chaos case):
+
+| ID | Invariant |
+|---|---|
+| IS1 | **Convergence.** After `cutover` with no writes in flight, for every node, both hosts have the same multiset of ledger lines. `list --all --json` and the masked `resume` are byte-identical on A and B. |
+| IS2 | **No lost row.** Every row whose `emit` exited 0 (the test logs the printed id and `ts`) is in both hosts' ledgers after convergence, and is read exactly once. |
+| IS3 | **Causality.** A row that a host wrote after a sync that brought row R sorts after R, on both hosts. |
+| IS4 | **Clean commits.** Every `.awt/events.jsonl` blob in every commit of `remote.git` ends with `\n`. Its first parent's blob is a byte prefix of it, or, for a merge commit, contains both parents' lines. `git fsck --strict` passes. |
+| IS5 | **Store equals rebuild.** After any sequence of pulls, rsyncs and incremental ingests on a host, `sqlite3 store.db .dump` (rowids masked) equals the dump after `ingest --rebuild` of the same inputs on that host. |
+| IS6 | **Legacy unchanged.** A ledger with no `v: 2` row produces byte-identical `resume`, `list --all --json` and `doctor` output under this awt and under v0.4.1 (`git show v0.4.1:awt`), apart from new doctor lines that HS15-HS17 and HS32 add only at a declared sync top. |
+| IS7 | **No force.** The fake-`git` argv log (when used) never contains `--force`, `-f` on push, `--force-with-lease`, `reset --hard` or `push +`. |
+
+**Journeys** (E-HS1 to E-HS15, `docs/e2e-two-host-sync.md` section 1): bootstrap and a clean doctor; disjoint nodes; one node interleaved under faked clocks; causality under heavy skew; effects across hosts; concurrent supersede and answer; legacy ledgers needing no migration; the commit check; remotes; the store after a pull and an rsync; profiles on two hosts; a sync in flight; a conflicting push; an older awt on one host; a full disk.
+
+**Chaos group `sync`** (`python3 tests/chaos.py --only sync`; quick counts in brackets, full counts in `chaos-full`; every case runs on H2 and ends with a convergence, IS1, IS2 and IS4):
+- C50 *Kill mid-sync.* Writers on both hosts while `awt-sync` is SIGKILLed at random moments, 200 times [30]. Every later sync completes (a reported `.git/index.lock` is removed as a person would), no lock is left, IS1, IS2, IS4 hold.
+- C51 *Kill mid-write.* Writers SIGKILLed at random, and short writes, 300 times [40], while each host runs `awt-sync` every 200 ms. No commit holds a blob without a final newline; both hosts agree on the quarantined rows.
+- C52 *Clock skew.* Random `AWT_TEST_CLOCK_SKEW_S` per host in [-7200, 7200], sometimes stepped back, 50 rounds [8]: causal pairs stay ordered (IS3), no negative age, `doctor` warns exactly when a row from another host is over 300 s ahead.
+- C53 *Divergent `log/` file.* The same canonical file name with different content on both stores: no crash, each host derives its own copy, IS5; then a copy that grows so the other is a prefix converges.
+- C54 *Conflicting push storm.* Both hosts write and sync in tight loops for 60 s [10 s] with a logging `git` wrapper: only rejections, never a force or a rebase (IS7); the hosts converge.
+- C55 *Partial rsync.* Random prefixes (cut mid-line half the time) of A's canonical files copied to B and ingested, 100 times [15]: exit 0, no error for an unterminated tail, B's own sessions unchanged, IS5 after the full copy.
+- C56 *Disk full.* (a) short writes at random byte counts fail with `fix:` and heal at the next write; (b) `AWT_TEST_FREE_BYTES` low during `ingest`: the store is stale but readable and the next ingest is fresh; (c) the working ledger truncated at a random byte: `doctor` fails, the pre-commit refuses, `git checkout` restores it. (d) manual-linux only, never run by CI: the tree on a 2 MB `tmpfs` filled to the last byte.
+- C57 *Reads during merges.* `list` loops on B while `awt-sync` merges batches of 30 rows from A, 100 merges [15]: no traceback, every output is the pre-merge or the post-merge read (or says it may be partial).
+- C58 *Duplicate import.* Identical hand-made rows on both hosts, the same commits merged twice and a cherry-pick: every row reads once, `records` has one row per id, IS1, IS5.
+- C59 *Lock-order stress.* `effect begin`/`mark`, keyed `init` and `awt-sync` at once on one host, 100 rounds [20]: every process ends within 15 s, no lost row.
 
 ## Migration (`test_migrate_paseo.py`)
 
