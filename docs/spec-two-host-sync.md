@@ -1,17 +1,17 @@
 # Spec: one task tree on two hosts (ledger order, sync lock, private remote, profiles)
 
-Status: draft, 22-Nov-2026. Spec only; the implementation follows on its own branch and PR. The owner approved awt spec, code and test changes for this on 22-Nov-2026 (homelab `docs/paseo-box/SPEC-paseo-box.md` section 12, Q12-3 and Q12-4). The normative text moves into `SPEC.md` and `tests/TEST-SPEC.md` in the implementation PR ("Docs to update"). The end-to-end and chaos rubric is `docs/e2e-two-host-sync.md`.
+Status: draft, 22-Nov-2026. Spec only; the implementation follows on its own branch and PR. The owner approved `awt` spec, code and test changes for this on 22-Nov-2026 (homelab `docs/paseo-box/SPEC-paseo-box.md` section 12, Q12-3 and Q12-4). The normative text moves into `SPEC.md` and `tests/TEST-SPEC.md` in the implementation PR ("Docs to update"). The end-to-end and chaos rubric is `docs/e2e-two-host-sync.md`.
 
 Requirement ids: **HS1-HS62**. Unit and integration tests: **T-HS1-T-HS44**. End-to-end journeys: **E-HS1-E-HS15**. Chaos cases: **C50-C59**. Invariants: **IS1-IS7**. `[unverified]` marks a claim not checked against awt's code or a run.
 
 ## Problem
 
-One task tree is used from two hosts, a Mac and an always-on Linux box. The tree is a git work tree with a private remote, at the same path on both hosts. The awt store's `log/` is copied between the hosts by rsync, and each host builds its own `store.db`.
+One task tree is used from two hosts, a Mac and an always-on Linux box. The tree is a git work tree with a private remote, at the same path on both hosts. The `awt` store's `log/` is copied between the hosts by rsync, and each host builds its own `store.db`.
 
-1. **Merge order.** awt reads "latest = last line of the file" (SPEC, Events, Reading). With `merge=union`, rows that two hosts appended to one node come back as "ours, then theirs". The latest `state`, `status` or `task` can then be a stale row, and an effect whose steps ran on two hosts can be quarantined.
+1. **Merge order.** `awt` reads "latest = last line of the file" (SPEC, Events, Reading). With `merge=union`, rows that two hosts appended to one node come back as "ours, then theirs". The latest `state`, `status` or `task` can then be a stale row, and an effect whose steps ran on two hosts can be quarantined.
 2. **Remotes.** `doctor` warns about any git remote. A remote that the owner declared private should pass. Unexpected or public remotes must still warn.
 3. **Project profiles.** Auto-tagging needs a per-project profile: a placement class plus the commands seen. An inferred profile is machine-knowable, so storing it as events breaks Rule 3. It has to be a derived view.
-4. **Sync safety.** awt has to state what it guarantees when two hosts write and then sync. That covers re-import, `store.db` after a pull, a sync in flight, and a check before every commit.
+4. **Sync safety.** `awt` has to state what it guarantees when two hosts write and then sync. That covers re-import, `store.db` after a pull, a sync in flight, and a check before every commit.
 
 ## Facts this design rests on
 
@@ -66,7 +66,7 @@ One task tree is used from two hosts, a Mac and an always-on Linux box. The tree
 ### 4. Sync safety
 
 - **A kernel lock on the tree top's `.awt/` directory.**
-  - Every awt ledger access takes it shared.
+  - Every `awt` ledger access takes it shared.
   - A sync takes it exclusive while git changes the work tree, and while it heals and stages.
 - **An append-only check of staged ledgers in `doctor --staged`.** This is the pre-commit check, and is the "`--strict` or equivalent".
 - **A shipped stdlib script, `awt-sync`.** It runs the documented procedure. It is a script like `relay`, not a verb.
@@ -94,7 +94,7 @@ Each requirement ends with its acceptance tests.
   
   Accept: T-HS6, T-HS7, E-HS3, IS1.
 - **HS5. Legacy logs are unchanged.** A log with no `v: 2` row reads exactly as in v0.4.1: same `rows`, the same brief, the same `list` output and the same `store.db` (I8). There is no migration step. Existing single-file ledgers are read in place, and new rows are appended as `v: 2`. Accept: T-HS8, E-HS7.
-- **HS6. Late legacy rows.** A `v: 1` row physically after a `v: 2` row means an older awt wrote to a synced node. It still reads in the legacy part, before every `v: 2` row. `doctor` warns `N v1 rows after v2 rows (lines ...): a host runs an older awt; install the same version on every host`. Accept: T-HS9, E-HS14.
+- **HS6. Late legacy rows.** A `v: 1` row physically after a `v: 2` row means an older `awt` wrote to a synced node. It still reads in the legacy part, before every `v: 2` row. `doctor` warns `N v1 rows after v2 rows (lines ...): a host runs an older awt; install the same version on every host`. Accept: T-HS9, E-HS14.
 - **HS7. Host name.** `host` is `AWT_HOST` when it is set and matches `[A-Za-z0-9._-]{1,64}`. Any other value is ignored with one stderr warning. Otherwise it is `socket.gethostname()`. Tests use `AWT_HOST` to simulate two hosts on one machine. Accept: T-HS10.
 - **HS8. Concurrent edits to one node from two hosts.** The result is deterministic and the same on both hosts after convergence:
   - `state` (per scope), `task`, `status`, `ref` (per target): the latest by HS4 wins, which is last-writer-wins by the clock in HS2. Both rows stay in `list state --all`.
@@ -131,7 +131,7 @@ Each requirement ends with its acceptance tests.
 - **HS12. The sync contract.** A tool that changes the tree's work tree from git does it in this order:
   1. `git fetch` without the lock.
   2. Take `LOCK_EX` on the tree top's `.awt/`, waiting up to 30 s. If that fails, skip this run.
-  3. Heal: for each tracked or new `**/.awt/events.jsonl` whose last byte is not `\n`, append `\n`. Under `LOCK_EX` no awt write is in flight, so the tail is torn for good. This is the heal `emit` already does.
+  3. Heal: for each tracked or new `**/.awt/events.jsonl` whose last byte is not `\n`, append `\n`. Under `LOCK_EX` no `awt` write is in flight, so the tail is torn for good. This is the heal `emit` already does.
   4. `git add -A`, then `git commit` if anything is staged. The pre-commit hook runs `awt doctor --staged`. A refused commit stops the run, releases the lock and reports.
   5. `git merge --no-edit FETCH_HEAD` (merge, never rebase). If it fails, run `git merge --abort` and stop.
   6. Release the lock.
@@ -140,8 +140,8 @@ Each requirement ends with its acceptance tests.
   
   Accept: E-HS1, E-HS13, C50, C54.
 - **HS13. Mid-flight guarantees.** While a sync holds `LOCK_EX`:
-  - no awt process writes a node log, so no row can be lost to git replacing a file (fact above);
-  - no awt read sees a half-replaced file, except after the HS11 timeout, which says so.
+  - no `awt` process writes a node log, so no row can be lost to git replacing a file (fact above);
+  - no `awt` read sees a half-replaced file, except after the HS11 timeout, which says so.
   
   A sync killed at any step leaves the ledger either as before or as after the merge. The kernel releases the lock. The next run completes, after `git merge --abort` when `MERGE_HEAD` exists. Git's own `.git/index.lock` after a kill is git's: `awt-sync` reports it with `fix: remove .git/index.lock if no git process is running` and does not delete it. Accept: C50, C57.
 - **HS14. `awt-sync` script.** A stdlib Python 3.9+ script at the repo top level, next to `relay`. It is not a verb: `awt-sync [--dir TOP] [--remote NAME] [--branch B] [--wait S] [--no-push] [--quiet]`.
@@ -220,8 +220,8 @@ Each requirement ends with its acceptance tests.
   Accept: T-HS36, C58.
 - **HS43. Partial copy.** A canonical file that ends in an unterminated line (a partial rsync) is derived without that line, as `file_rows()` already does: the line is skipped and not counted as an error. When the file grows, it is derived again. After the full copy, a plain `ingest` gives the same rows as a rebuild from the full files. Accept: T-HS37, C55.
 - **HS44. One writer per canonical file.**
-  - awt names canonical files by provider session (`log/<src>/<YYYY-MM>/<session>.jsonl`), Paseo agent (`log/paseo/<agent id>.jsonl`) or ccusage `<agent>_<period>`. Each has one writing host when sessions and agents stay on their host.
-  - A file that both hosts wrote is **divergent**. awt derives whatever the local copy holds and never merges two copies.
+  - `awt` names canonical files by provider session (`log/<src>/<YYYY-MM>/<session>.jsonl`), Paseo agent (`log/paseo/<agent id>.jsonl`) or ccusage `<agent>_<period>`. Each has one writing host when sessions and agents stay on their host.
+  - A file that both hosts wrote is **divergent**. `awt` derives whatever the local copy holds and never merges two copies.
   - Detecting divergence needs both copies, so it belongs to the rsync side, which keeps both and reports them (homelab AW-8).
   - awt's guarantee: a divergent file never stops an ingest or a build, and never puts rows from one file under another file's session.
   - [unverified: that a ccusage `period` from the `session` report is unique per host's session.]
@@ -281,7 +281,7 @@ Each requirement ends with its acceptance tests.
 
   - Keys are sorted.
   - A consumer looks up the longest `repos` key that is a path prefix of its cwd.
-  - A repo awt has never seen is absent, and the consumer applies its own default.
+  - A repo `awt` has never seen is absent, and the consumer applies its own default.
   
   Accept: T-HS44.
 - **HS58. Not a classifier contract.** The table in HS53 is coarse and self-contained. Agreeing with any placement classifier outside awt (homelab corral, PL-3) is that consumer's job. It may read `heads` and `manifests` and decide for itself.
@@ -290,9 +290,9 @@ Each requirement ends with its acceptance tests.
 
 - **HS60.** No new verb (16 stay). New: `awt-sync` script, `AWT_HOST`, test seams `AWT_TEST_CLOCK_SKEW_S` (added to the clock in `now()`), `AWT_TEST_SHORT_WRITE` (emit writes that many bytes, then fails as a short write), `AWT_TEST_SYNC_WAIT_S` (replaces the 10 s and 2 s waits of HS11) and `AWT_TEST_GITHUB_BASE`. `doctor` gains lines and no flags.
 - **HS61.** `SPEC.md` Rules: Rule 5 adds "flock on the tree top's `.awt/` directory (the sync lock)". Rule 4 adds the profiles file as a second derived artifact, in the store and not in the tree.
-- **HS62.** The guide and agent text tell agents nothing new. Sync is the host's job, and agents keep using awt as before.
+- **HS62.** The guide and agent text tell agents nothing new. Sync is the host's job, and agents keep using `awt` as before.
 
-## What awt guarantees with two writing hosts
+## What `awt` guarantees with two writing hosts
 
 | Situation | Guarantee | Requirements |
 |---|---|---|
@@ -393,7 +393,7 @@ Existing suites stay green: unittest, `tests/chaos.py`, `cd paseo-plugin && npm 
 ## Open questions (defaults chosen; say if you want otherwise)
 
 1. **`doctor` makes one network request** (HS33) to detect a public GitHub repo. Default: yes. It is unauthenticated, has a 5 s timeout, and `doctor --staged` never makes it. The alternative is no probe, with privacy taken purely on the owner's declaration.
-2. **awt ships `awt-sync`** rather than each host scripting HS12 itself. Default: yes, because macOS has no `flock(1)` and the procedure has ordering traps. The homelab timers call it instead of their own script.
+2. **`awt` ships `awt-sync`** rather than each host scripting HS12 itself. Default: yes, because macOS has no `flock(1)` and the procedure has ordering traps. The homelab timers call it instead of their own script.
 3. **Profile classes and thresholds** (HS53, HS55) are awt's own coarse table. Default: as written. Corral may refine from `heads` and `manifests`.
 4. **Last-writer-wins for concurrent `state`/`status`/`task`** with a `doctor` note only for decisions, answers and effects. Default: yes. A concurrent `state` from two hosts is normal (two agents), not a conflict.
 
