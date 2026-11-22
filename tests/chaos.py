@@ -7,10 +7,11 @@
 Each attack prints one line; a failure prints the seed and the commands that reproduce it.
 Secret-shaped strings are built at runtime so this file contains none.
 """
-import argparse, concurrent.futures as cf, datetime, json, os, random, re, shlex, shutil, signal, socket, subprocess, sys, tempfile, threading, time, zlib
+import argparse, concurrent.futures as cf, datetime, json, os, random, re, shlex, shutil, signal, socket, sqlite3, subprocess, sys, tempfile, threading, time, zlib
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 AWT = os.path.join(os.path.dirname(HERE), "awt")
+AGE = re.compile(r"(\d+[mhd] ago|just now)")
 HOST = socket.gethostname()
 TRACE = "Traceback (most recent call last)"
 IDRX = re.compile(r"\b[dqen]-[0-9a-f]{8}\b")
@@ -2518,6 +2519,500 @@ def a_child_walk_limit(c):
         r = c.raw([sys.executable, "-I", AWT, "--dir", t] + verb, cwd=c.base, args=verb, allow=(0, 1))
         if "tree exceeds depth 8 / 2000 nodes" not in r.out:
             c.fail("%s does not report the walk limit: %s" % (verb[0], r.out[-120:]))
+
+
+# ---------------------------------------------------------------- group sync: one task tree on two hosts (docs/e2e-two-host-sync.md, C50-C59)
+sys.path.insert(0, HERE)
+try:
+    import synchelp as SH
+except ImportError:
+    SH = None
+
+
+class W2:
+    """Fixture H2 plus recording of acknowledged writes (IS2) and the end-of-case checks IS1, IS2, IS4, IS7."""
+
+    def __init__(s, c, hook=True):
+        s.c = c
+        s.h = SH.H2()
+        s.h.setup(hook=hook)
+        s.acked = []
+        s.lock = threading.Lock()
+        s.task = SH.H2.TASK
+        s.argv = None
+
+    def close(s):
+        s.h.cleanup()
+
+    def note(s, host, text, over=None, timeout=60, rel=None):
+        r = s.h.awt(host, "note", text, dir=s.h.node(host, rel or s.task), over=dict({"AWT_TEST_SYNC_WAIT_S": "30"}, **(over or {})), timeout=timeout)
+        s.c.log("note %s %s -> %d" % (host, text, r.returncode))
+        if "Traceback" in r.stderr:
+            s.c.fail("traceback in awt note on %s: %s" % (host, r.stderr[-160:]))
+        if r.returncode == 0:
+            with s.lock:
+                s.acked.append(text)
+        return r
+
+    def converge(s):
+        """cutover until nothing changes; a leftover .git/index.lock is removed as a person would, after the tool named it."""
+        for attempt in range(4):
+            bad = False
+            for h in ("A", "B", "A"):
+                r = s.h.sync(h, timeout=180)
+                s.c.log("awt-sync %s -> %d %s" % (h, r.returncode, r.stdout.strip()[-80:]))
+                if "Traceback" in r.stderr:
+                    s.c.fail("traceback in awt-sync: " + r.stderr[-200:])
+                if r.returncode != 0:
+                    bad = True
+                    if "index.lock" in r.stderr:
+                        s.c.note("index.lock reported with its fix (applied)")
+                        lk = os.path.join(s.h.tree(h), ".git", "index.lock")
+                        if os.path.exists(lk):
+                            os.unlink(lk)
+                    elif "merge" in r.stderr.lower() or "abort" in r.stderr.lower():
+                        pass
+                    else:
+                        s.c.fail("awt-sync %s failed: %s" % (h, r.stderr.strip()[-200:]))
+            if not bad:
+                return
+        s.c.fail("cutover did not converge in 4 attempts")
+
+    def checks(s, is5=False):
+        s.converge()
+        a, b = s.h.all_lines("A"), s.h.all_lines("B")
+        if a != b:
+            s.c.fail("IS1: the hosts hold different ledger lines (%s)" % [k for k in set(a) | set(b) if a.get(k) != b.get(k)][:3])
+        for host in "AB":
+            blob = b"".join(b"\n".join(v) for v in s.h.all_lines(host).values())
+            for t in s.acked:
+                n = blob.count(b'"text":"%s"' % t.encode())
+                if n != 1:
+                    s.c.fail("IS2: acked row %r appears %d times on %s" % (t, n, host))
+                    break
+        bad = SH.check_is4(s.h.remote, s.h.T)
+        if bad:
+            s.c.fail("IS4: " + bad[0])
+        for host in "AB":
+            d = s.h.awt(host, "doctor", dir=s.h.node(host, s.task))
+            if "Traceback" in d.stderr + d.stdout:
+                s.c.fail("traceback in doctor on " + host)
+        if is5:
+            for host in "AB":
+                s.h.awt(host, "ingest")
+                db = os.path.join(s.h.T, host, "store", "store.db")
+                if os.path.exists(db):
+                    x = SH.logical(db)
+                    s.h.awt(host, "ingest", "--rebuild")
+                    if SH.logical(db) != x:
+                        s.c.fail("IS5: store.db differs from a rebuild on " + host)
+
+    def locked_free(s, host):
+        """no lock is left after a kill: LOCK_EX on the tree top's .awt succeeds at once"""
+        import fcntl
+        fd = os.open(os.path.join(s.h.tree(host), ".awt"), os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+
+def sync_attack(f):
+    """Run f(c, w) on a fresh W2, skipped when git is missing; always cleans up."""
+    def run(c):
+        if SH is None or not SH.have_git():
+            c.skipped = "git is not installed"
+            return
+        w = W2(c)
+        try:
+            f(c, w)
+        finally:
+            w.close()
+    run.__doc__ = f.__doc__
+    run.__name__ = f.__name__
+    return run
+
+
+class Writers:
+    """Background writer threads on both hosts; stop() joins them."""
+
+    def __init__(s, w, per_host=2, gap=0.05, **kw):
+        s.w, s.stop_ev, s.threads, s.n = w, threading.Event(), [], 0
+        for host in "AB":
+            for k in range(per_host):
+                t = threading.Thread(target=s.loop, args=(host, k, gap, kw), daemon=True)
+                t.start()
+                s.threads.append(t)
+
+    def loop(s, host, k, gap, kw):
+        i = 0
+        while not s.stop_ev.is_set():
+            i += 1
+            s.w.note(host, "w-%s%d-%d" % (host, k, i), **kw)
+            time.sleep(gap)
+
+    def stop(s):
+        s.stop_ev.set()
+        for t in s.threads:
+            t.join(timeout=120)
+
+
+@attack("sync-C50-kill-mid-sync", solo=True)
+@sync_attack
+def a_sync_kill_sync(c, w):
+    """C50: writers on both hosts while awt-sync is SIGKILLed at random moments: every later sync completes, IS1 IS2 IS4 hold, no lock is left."""
+    wr = Writers(w, 2 if c.quick else 4)
+    n = 30 if c.quick else 200
+    for i in range(n):
+        host = c.rng.choice("AB")
+        p = subprocess.Popen([sys.executable, "-I", SH.SYNC, "--dir", w.h.tree(host)], env=w.h.env(host), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(c.rng.random() * 0.5)
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.wait()
+        if not any(w.locked_free(host) or time.sleep(0.15) for _ in range(30)):  # a live writer holds LOCK_SH for a moment; a LOCK_EX left by the kill would never clear
+            c.fail("a lock is left after the kill: LOCK_EX on %s/.awt is refused for 4 s" % host)
+    wr.stop()
+    w.checks()
+
+
+@attack("sync-C51-kill-mid-write", solo=True)
+@sync_attack
+def a_sync_kill_write(c, w):
+    """C51: writers SIGKILLed at random (and short writes) while each host runs awt-sync: no commit holds a torn tail; a healed fragment is one quarantined row."""
+    stop = threading.Event()
+
+    def syncer(host):
+        while not stop.is_set():
+            r = w.h.sync(host, timeout=120)
+            if "Traceback" in r.stderr:
+                c.fail("traceback in awt-sync: " + r.stderr[-160:])
+            time.sleep(0.2)
+    ths = [threading.Thread(target=syncer, args=(h,), daemon=True) for h in "AB"]
+    for t in ths:
+        t.start()
+    for i in range(40 if c.quick else 300):
+        host = c.rng.choice("AB")
+        text = "k-%s%d" % (host, i)
+        if c.rng.random() < 0.3:
+            w.note(host, text, over={"AWT_TEST_SHORT_WRITE": str(c.rng.randrange(1, 120))})
+            if text in w.acked:
+                w.acked.remove(text)
+            continue
+        p = subprocess.Popen([sys.executable, "-I", SH.AWT, "--dir", w.h.node(host, w.task), "note", text], env=w.h.env(host, AWT_TEST_SYNC_WAIT_S="30"), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+        time.sleep(c.rng.random() * 0.12)
+        done = p.poll() == 0
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        err = p.communicate()[1]
+        if b"Traceback" in err and p.returncode != -9:
+            c.fail("traceback in awt note: " + err.decode()[-160:])
+        if done:
+            w.acked.append(text)
+    stop.set()
+    for t in ths:
+        t.join()
+    w.checks()
+    q = [re.search(r"(\d+) quarantined", w.h.awt(h, "doctor", dir=w.h.node(h, w.task)).stdout).group(1) for h in "AB"]
+    if q[0] != q[1]:
+        c.fail("the hosts disagree on the quarantined rows: %s" % q)
+
+
+@attack("sync-C52-clock-skew", solo=True)
+@sync_attack
+def a_sync_skew(c, w):
+    """C52: random skew per host and NTP steps: causal pairs stay ordered, no negative age, doctor warns exactly over 300 s ahead."""
+    prev = None
+    for rnd in range(8 if c.quick else 50):
+        for h in "AB":
+            w.h.skew[h] = c.rng.randrange(-7200, 7201)
+        first, second = c.rng.choice("AB"), None
+        second = "B" if first == "A" else "A"
+        w.note(first, "s1-%d" % rnd)
+        w.converge()
+        if c.rng.random() < 0.4:
+            w.h.skew[second] -= c.rng.randrange(1, 600)  # an NTP step back
+        w.note(second, "s2-%d" % rnd)
+        a = w.h.awt(second, "list", "notes", "--all", "--json", dir=w.h.node(second, w.task))
+        by = {r.get("text"): r for r in json.loads(a.stdout)}
+        r1, r2 = by.get("s1-%d" % rnd), by.get("s2-%d" % rnd)
+        if r1 and r2 and not r2["ts"] > r1["ts"]:
+            c.fail("IS3: s2-%d (%s) does not sort after s1-%d (%s)" % (rnd, r2["ts"], rnd, r1["ts"]))
+        for h in "AB":
+            out = w.h.awt(h, "resume", dir=w.h.node(h, w.task)).stdout
+            if re.search(r"-\d+[smhd] ago", out):
+                c.fail("negative age in the brief on " + h)
+            d = w.h.awt(h, "doctor", dir=w.h.node(h, w.task)).stdout
+            now = time.time() + (w.h.skew[h] or 0)
+            rows_ts = [x for x in (json.loads(l.decode()) for l in w.h.rows(h, w.task))]
+            ahead = max((datetime.datetime.strptime(x["ts"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=datetime.timezone.utc).timestamp() - now for x in rows_ts if x.get("host") != "host-" + h.lower()), default=0)
+            warned = "ahead of this clock" in d
+            if ahead > 305 and not warned or ahead < 295 and warned:
+                c.fail("doctor warning on %s is wrong: %.0f s ahead, warned=%s" % (h, ahead, warned))
+    for h in "AB":
+        w.h.skew[h] = None
+    w.checks()
+
+
+def divergent_world(c, w):
+    pk = os.path.join(w.h.T, "repos", "parsekit")
+    os.makedirs(pk, exist_ok=True)
+    open(os.path.join(pk, "Cargo.toml"), "w").write("x\n")
+    return pk
+
+
+@attack("sync-C53-divergent-log-file", solo=True)
+@sync_attack
+def a_sync_divergent(c, w):
+    """C53: both stores hold a canonical file with the same name and different content: no crash, each derives its own copy, IS5; growing one copy so the other is a prefix converges."""
+    pk = divergent_world(c, w)
+    sid = "dddd0000-0000-4000-8000-0000000000dd"
+    SH.write_session(w.h.T, "A", sid, pk, ["cargo test", "ls"], "alphaword")
+    SH.write_session(w.h.T, "B", sid, pk, ["cargo build", "ls", "pwd"], "betaword")
+    for h in "AB":
+        r = w.h.awt(h, "ingest")
+        if r.returncode != 0 or "Traceback" in r.stderr:
+            c.fail("ingest on %s: %s" % (h, r.stderr[-160:]))
+    div = SH.rsync(os.path.join(w.h.T, "A", "store"), os.path.join(w.h.T, "B", "store"))
+    if not div:
+        c.fail("the rsync helper did not report the divergent file")
+    for h in "AB":
+        r = w.h.awt(h, "ingest")
+        if r.returncode != 0:
+            c.fail("second ingest on %s failed: %s" % (h, r.stderr[-160:]))
+        db = os.path.join(w.h.T, h, "store", "store.db")
+        cx = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        txt = " ".join(x[0] for x in cx.execute("select text from messages"))
+        cx.close()
+        mine, theirs = ("alphaword", "betaword") if h == "A" else ("betaword", "alphaword")
+        if mine not in txt or theirs in txt:
+            c.fail("host %s holds rows of the other host's copy" % h)
+    # grow A's copy so that B's is a prefix of it: rsync then copies it and B converges
+    pa = [os.path.join(dp, f) for dp, _, fns in os.walk(os.path.join(w.h.T, "A", "store", "log", "claude")) for f in fns][0]
+    pb = pa.replace("/A/store/", "/B/store/")
+    data = open(pb, "rb").read()
+    with open(pa, "wb") as g:
+        g.write(data + b'{"type":"user","uuid":"zz","parentUuid":null,"sessionId":"%s","cwd":"%s","timestamp":"2026-11-22T09:00:00.000Z","message":{"role":"user","content":"grown"}}\n' % (sid.encode(), pk.encode()))
+    SH.rsync(os.path.join(w.h.T, "A", "store"), os.path.join(w.h.T, "B", "store"))
+    w.checks(is5=True)
+
+
+@attack("sync-C54-push-storm", solo=True)
+@sync_attack
+def a_sync_storm(c, w):
+    """C54: both hosts write and awt-sync in tight loops racing for the remote: pushes are only rejected, never forced; the hosts converge."""
+    fake = os.path.join(w.h.T, "fakebin")
+    os.makedirs(fake)
+    log = os.path.join(w.h.T, "argv.log")
+    real = shutil.which("git")
+    open(os.path.join(fake, "git"), "w").write('#!/bin/sh\necho "$@" >> %s\nexec %s "$@"\n' % (log, real))
+    os.chmod(os.path.join(fake, "git"), 0o755)
+    path = fake + os.pathsep + os.environ["PATH"]
+    end = time.time() + (10 if c.quick else 60)
+    rej = [0]
+
+    def loop(host):
+        i = 0
+        while time.time() < end:
+            i += 1
+            w.note(host, "st-%s%d" % (host, i))
+            r = w.h.sync(host, over={"PATH": path}, timeout=180)
+            if "push rejected" in r.stdout:
+                rej[0] += 1
+            if r.returncode not in (0, 1) or "Traceback" in r.stderr:
+                c.fail("awt-sync on %s: %d %s" % (host, r.returncode, r.stderr[-160:]))
+    ths = [threading.Thread(target=loop, args=(h,)) for h in "AB"]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    argv = open(log).read()
+    if re.search(r"--force|--force-with-lease|reset --hard|push \+| -f |rebase", argv):
+        c.fail("IS7: a forbidden git argv was logged")
+    c.note("%d pushes were rejected" % rej[0])
+    w.checks()
+
+
+@attack("sync-C55-partial-rsync", solo=True)
+@sync_attack
+def a_sync_partial(c, w):
+    """C55: random prefixes of A's canonical files copied to B and ingested: exit 0, no error for an unterminated tail, B's own sessions unchanged, IS5 after the full copy."""
+    pk = divergent_world(c, w)
+    for i in range(3):
+        SH.write_session(w.h.T, "A", "aaaa000%d-0000-4000-8000-00000000000%d" % (i, i), pk, ["cargo test"] * (3 + i) + ["ls"], "alpha%d" % i)
+    SH.write_session(w.h.T, "B", "bbbb0000-0000-4000-8000-0000000000bb", pk, ["adb devices", "ls"], "betaword")
+    w.h.awt("A", "ingest")
+    w.h.awt("B", "ingest")
+    dbB = os.path.join(w.h.T, "B", "store", "store.db")
+
+    def mine():
+        cx = sqlite3.connect("file:%s?mode=ro" % dbB, uri=True)
+        try:
+            return cx.execute("select count(*), group_concat(text, '|') from messages where session_id like 'bbbb%'").fetchall()
+        finally:
+            cx.close()
+    base = mine()
+    src = os.path.join(w.h.T, "A", "store")
+    files = sorted(os.path.relpath(os.path.join(dp, f), src) for dp, _, fns in os.walk(os.path.join(src, "log")) for f in fns)
+    n = 15 if c.quick else 100
+    for i in range(n):
+        f = c.rng.choice(files)
+        size = os.path.getsize(os.path.join(src, f))
+        cut = size if i == n - 1 else c.rng.randrange(1, size + 1)
+        SH.rsync(src, os.path.join(w.h.T, "B", "store"), stop=(f, cut))
+        r = w.h.awt("B", "ingest")
+        if r.returncode != 0 or "Traceback" in r.stderr or "failed" in r.stdout:
+            c.fail("ingest after a partial copy: rc=%d %s%s" % (r.returncode, r.stdout[-100:], r.stderr[-100:]))
+        if mine() != base:
+            c.fail("B's own sessions changed after a partial copy")
+    SH.rsync(src, os.path.join(w.h.T, "B", "store"))
+    w.h.awt("B", "ingest")
+    x = SH.logical(dbB)
+    w.h.awt("B", "ingest", "--rebuild")
+    if SH.logical(dbB) != x:
+        c.fail("IS5: B's store differs from a rebuild after the full copy")
+
+
+@attack("sync-C56-disk-full", solo=True)
+@sync_attack
+def a_sync_disk(c, w):
+    """C56 (a)-(c): short writes fail with a fix and heal at the next sync; a low-space ingest refuses and recovers; a truncated working ledger is reported and refused at commit."""
+    for i in range(12 if c.quick else 40):
+        host = c.rng.choice("AB")
+        r = w.note(host, "dz-%d" % i, over={"AWT_TEST_SHORT_WRITE": str(c.rng.randrange(1, 200))})
+        if r.returncode != 1 or "fix:" not in r.stderr:
+            c.fail("a short write did not fail with a fix: rc=%d %s" % (r.returncode, r.stderr[-100:]))
+        w.note(host, "ok-%d" % i)  # the next write heals the tail
+    pk = divergent_world(c, w)
+    SH.write_session(w.h.T, "A", "aaaa9999-0000-4000-8000-000000000999", pk, ["ls"], "alphaword")
+    r = w.h.awt("A", "ingest", over={"AWT_TEST_FREE_BYTES": "1"}, timeout=60)
+    if r.returncode not in (0, 1) or "Traceback" in r.stderr:
+        c.fail("ingest with no space: rc=%d %s" % (r.returncode, r.stderr[-100:]))
+    r = w.h.awt("A", "ingest")
+    if r.returncode != 0:
+        c.fail("ingest after freeing space: " + r.stderr[-100:])
+    w.converge()
+    led = os.path.join(w.h.node("A", w.task), ".awt", "events.jsonl")
+    data = open(led, "rb").read()
+    open(led, "wb").write(data[:c.rng.randrange(len(data) // 3, len(data) - 1)])
+    d = w.h.awt("A", "doctor", dir=w.h.node("A", w.task))
+    if d.returncode != 1 or "not an extension of the committed one" not in d.stdout:
+        c.fail("doctor did not fail on a truncated ledger: %s" % d.stdout[-200:])
+    w.h.git("A", "add", "-A")
+    if w.h.git("A", "commit", "-q", "-m", "x").returncode == 0:
+        c.fail("the pre-commit hook let a truncated ledger through")
+    w.h.git("A", "reset", "-q")
+    w.h.git("A", "checkout", "--", ".")
+    w.checks()
+
+
+@attack("sync-C57-reads-during-merges", solo=True)
+@sync_attack
+def a_sync_reads(c, w):
+    """C57: reads on B while syncB merges big batches from A: each output is the pre-merge or the post-merge read (or says it may be partial)."""
+    mask = lambda s: AGE.sub("AGE", s)
+    for rnd in range(15 if c.quick else 100):
+        for i in range(30):
+            w.note("A", "bt-%d-%d" % (rnd, i))
+        w.h.sync("A")
+        args = ["list", "notes", "--all", "--json"]
+        pre = mask(w.h.awt("B", *args, dir=w.h.node("B", w.task)).stdout)
+        outs, stop = [], threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                r = w.h.awt("B", *args, dir=w.h.node("B", w.task))
+                if "Traceback" in r.stderr:
+                    c.fail("traceback in a read during a merge: " + r.stderr[-120:])
+                outs.append((mask(r.stdout), r.stderr))
+        t = threading.Thread(target=reader)
+        t.start()
+        r = w.h.sync("B", timeout=180)
+        stop.set()
+        t.join()
+        if r.returncode != 0:
+            c.fail("syncB failed: " + r.stderr[-160:])
+        post = mask(w.h.awt("B", *args, dir=w.h.node("B", w.task)).stdout)
+        for o, err in outs:
+            if o not in (pre, post) and "output may be partial" not in err:
+                c.fail("a read during the merge is neither the pre-merge nor the post-merge ledger (round %d)" % rnd)
+                break
+    w.checks()
+
+
+@attack("sync-C58-duplicate-import", solo=True)
+@sync_attack
+def a_sync_dups(c, w):
+    """C58: identical hand-made rows on both hosts and a re-merge of the same commits: every row reads once and records has one row per id."""
+    t = w.task
+    line = json.dumps(dict(v=2, ts="2026-11-22T11:11:11.111111Z", type="note", host="host-x", by="agent", model="m", id="n-dd000001", text="same on both"), separators=(",", ":")) + "\n"
+    for h in "AB":
+        with open(os.path.join(w.h.node(h, t), ".awt", "events.jsonl"), "ab") as g:
+            g.write(line.encode())
+    w.acked.append("same on both")
+    w.checks()
+    # merged twice through a second branch, and a cherry-pick of a ledger commit
+    w.h.git("A", "branch", "again")
+    w.note("A", "dup-extra")
+    w.converge()
+    w.h.git("B", "fetch", "-q", "origin")
+    w.h.git("B", "merge", "-q", "--no-edit", "origin/main")
+    w.h.git("B", "merge", "-q", "--no-edit", "origin/main")
+    head = w.h.git("A", "rev-parse", "HEAD").stdout.strip()
+    w.h.git("B", "cherry-pick", "--allow-empty", "--keep-redundant-commits", head)
+    for h in "AB":
+        D = json.loads(w.h.awt(h, "list", "notes", "--all", "--json", dir=w.h.node(h, t)).stdout)
+        if len([r for r in D if r.get("text") == "same on both"]) != 1:
+            c.fail("the duplicated row reads %d times on %s" % (len([r for r in D if r.get("text") == "same on both"]), h))
+        w.h.awt(h, "ingest")
+        cx = sqlite3.connect("file:%s?mode=ro" % os.path.join(w.h.T, h, "store", "store.db"), uri=True)
+        n = cx.execute("select count(*) from records where record_id = 'n-dd000001'").fetchone()[0]
+        cx.close()
+        if n != 1:
+            c.fail("records holds %d rows for one ledger row on %s" % (n, h))
+    w.checks(is5=True)
+
+
+@attack("sync-C59-lock-order", solo=True)
+@sync_attack
+def a_sync_lock_order(c, w):
+    """C59: effect begin/mark, keyed init and awt-sync all at once on one host: every process ends within 15 s, no row lost."""
+    top = w.h.node("A", w.task)
+    for rnd in range(20 if c.quick else 100):
+        r = w.h.awt("A", "effect", "plan", "--target", "slack:#c59-%d" % rnd, dir=top)
+        m = re.search(r"(e-[0-9a-f]{8})", r.stdout)
+        if not m:
+            c.fail("effect plan failed: " + r.stderr[-120:])
+            return
+        eid = m.group(1)
+        cmds = [["effect", "begin", eid], ["init", "--kind", "workspace", "--name", "k%d" % rnd, "--key", "key-%d" % rnd],
+                ["note", "c59-%d" % rnd]]
+        procs = []
+        for cm in cmds:
+            d = top if cm[0] != "init" else w.h.node("A", "projects/parsekit")
+            procs.append(subprocess.Popen([sys.executable, "-I", SH.AWT, "--dir", d] + cm, env=w.h.env("A", AWT_TEST_SYNC_WAIT_S="30"), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
+        procs.append(subprocess.Popen([sys.executable, "-I", SH.SYNC, "--dir", w.h.tree("A")], env=w.h.env("A"), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
+        for p in procs:
+            try:
+                err = p.communicate(timeout=15)[1]
+            except subprocess.TimeoutExpired:
+                p.kill()
+                c.fail("DEADLOCK: a process did not end in 15 s (round %d)" % rnd)
+                return
+            if b"Traceback" in err:
+                c.fail("traceback: " + err.decode()[-160:])
+        r = w.h.awt("A", "effect", "mark", eid, "sent", "--ref", "r", dir=top)
+        if r.returncode != 0:
+            c.fail("effect mark after the race: " + r.stderr[-120:])
+        w.acked.append("c59-%d" % rnd)
+    w.checks()
 
 
 def main():
