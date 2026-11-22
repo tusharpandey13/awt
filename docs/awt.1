@@ -147,7 +147,7 @@ the reason (required)
 id of the earlier decision this replaces
 .TP
 .B \-\-tag TAG
-tag the decision; `rule` binds every later agent (repeatable)
+tag the decision; `rule` binds every later agent; `profile:light|build\-heavy|media\-device` overrides a project's placement class (repeatable)
 .TP
 .B \-\-related RELATED
 related records to print after writing (0 turns it off)
@@ -186,7 +186,7 @@ short title (required)
 why it matters
 .TP
 .B \-\-kind KIND
-override the guessed kind
+override the guessed kind; `sync` declares the private git remote of a two\-host tree (target: its URL)
 .TP
 .B \-\-no\-access
 mark a link the agent cannot open, so it asks a person to paste it
@@ -214,12 +214,12 @@ Set the task status; done is refused while questions or effects are open.
 .B VALUE
 active, paused or done
 .SS doctor
-Check the task: layout, git, disk, settings, store. Prints ok, warn or fail per check.
+Check the task: layout, git and its remotes, disk, settings, store. Prints ok, warn or fail per check.
 .PP
 .B awt doctor [\-\-staged]
 .TP
 .B \-\-staged
-scan staged git changes for secrets (for .git/hooks/pre\-commit)
+scan staged git changes for secrets, and staged ledgers for a torn tail, changed rows and conflict markers (for .git/hooks/pre\-commit)
 .SS ingest
 Copy agent transcripts into the store and update store.db; with \-\-event, record one tool call.
 .PP

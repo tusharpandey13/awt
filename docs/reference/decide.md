@@ -18,7 +18,7 @@ awt decide --why WHY [--supersedes SUPERSEDES] [--tag TAG] [--related RELATED] C
 |---|---|
 | `--why WHY` | the reason (required) |
 | `--supersedes SUPERSEDES` | id of the earlier decision this replaces |
-| `--tag TAG` | tag the decision; `rule` binds every later agent (repeatable) |
+| `--tag TAG` | tag the decision; `rule` binds every later agent; `profile:light|build-heavy|media-device` overrides a project's placement class (repeatable) |
 | `--related RELATED` | related records to print after writing (0 turns it off) |
 
 Global flags `--dir`, `--by` and `--model` work with every verb. Exit codes: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id.

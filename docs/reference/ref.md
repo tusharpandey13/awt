@@ -18,7 +18,7 @@ awt ref --title TITLE [--why WHY] [--kind KIND] [--no-access] TARGET
 |---|---|
 | `--title TITLE` | short title (required) |
 | `--why WHY` | why it matters |
-| `--kind KIND` | override the guessed kind |
+| `--kind KIND` | override the guessed kind; `sync` declares the private git remote of a two-host tree (target: its URL) |
 | `--no-access` | mark a link the agent cannot open, so it asks a person to paste it |
 
 Global flags `--dir`, `--by` and `--model` work with every verb. Exit codes: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id.
