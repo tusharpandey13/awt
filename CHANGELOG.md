@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (22-Nov-2026)
 
 ### Added
 - One task tree on two hosts (spec: `docs/spec-two-host-sync.md`, e2e rubric `docs/e2e-two-host-sync.md`, contract: `SPEC.md` Two hosts). Verbs are still 16.
