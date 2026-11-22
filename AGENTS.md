@@ -23,7 +23,9 @@ If `awt --version` is not found, add `~/.local/bin` to `PATH` in the shell profi
 
 **Inside one task directory** (no install at all): download `awt` into the directory with the same `curl` line and call it as `./awt`. The rest of this guide writes `awt`; use `./awt` in that case.
 
-**From a clone**, when you also want the migrators: `git clone https://github.com/tusharpandey13/awt.git`. The scripts `awt`, `relay`, `migrate-paseo` and `migrate-wt` sit at the top level.
+**Two hosts** (one task tree in a private git repo, used from two machines): also download `awt-sync` the same way (`curl -fsSLO "$base/awt-sync" && chmod +x awt-sync`) and install the same release of both on every host. See [Two hosts](#two-hosts).
+
+**From a clone**, when you also want the migrators: `git clone https://github.com/tusharpandey13/awt.git`. The scripts `awt`, `awt-sync`, `relay`, `migrate-paseo` and `migrate-wt` sit at the top level.
 
 To update, download again. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
@@ -148,6 +150,26 @@ Settings, read from the daemon's environment:
 To upgrade, install again with the new `--ref`. To remove: `paseo plugin remove awt`; the tree stays on disk.
 
 More: [paseo-plugin/OVERVIEW.md](paseo-plugin/OVERVIEW.md).
+
+## Two hosts
+
+When one task tree is used from two machines (a Mac and an always-on box, say), keep the tree in a git repo with a **private** remote, at the same path on both hosts. Sync is the host's job: agents keep using `awt` as before. A person does this once per tree, in the tree top (the directory that holds `.awt/` and `.git/`):
+
+```sh
+awt ref git@github.com:you/awt-data.git --kind sync --title "private sync remote"   # declares the remote as private
+echo 'events.jsonl merge=union' >> .gitattributes
+printf '#!/bin/sh\nexec awt doctor --staged\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+awt doctor        # until it is clean: no warning about the remote, .gitignore, .gitattributes or the hook
+```
+
+Then run `awt-sync` from a timer and from the session start and end hooks (it prints one line, `synced TOP: committed N files, merged M commits, pushed`). It fetches, takes an exclusive lock on the tree top's `.awt/`, heals a torn ledger tail, commits, merges (never a rebase), releases, pushes (never forced) and runs `awt ingest --hook` when the merge brought files. While it holds the lock, `awt` writes wait up to 10 s. If `awt-sync` says `.git/index.lock`, remove it only when no git process is running.
+
+- Install the same release on both hosts. `doctor` warns when an older one wrote rows.
+- `doctor` makes one unauthenticated request to GitHub to see whether a `github.com` remote is public, and fails if it is. `doctor --staged` (the commit hook) makes none.
+- Concurrent edits to one node are last-writer-wins by the clock; `doctor` names conflicts that need a person (two answers, two superseding decisions, an effect begun on both hosts) and clocks more than 5 minutes apart.
+- The store's `log/` is copied between hosts by rsync (never deleting); each host runs `awt ingest` and builds its own `store.db`. A project's placement profile is derived per host into `$AWT_STORE/views/profiles.json`; override it with `awt decide ... --tag profile:light|build-heavy|media-device`.
+
+Contract: [SPEC.md](SPEC.md#two-hosts).
 
 ## Silent context after compaction
 

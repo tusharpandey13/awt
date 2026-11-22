@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""awt-sync: commit, merge and push one awt task tree between two hosts (SPEC.md, Two hosts).
+
+    awt-sync [--dir TOP] [--remote NAME] [--branch B] [--wait S] [--no-push] [--quiet]
+
+TOP is the tree top: a directory with .awt/ that is also the top of a git work tree. The order is fixed:
+fetch (no lock); take LOCK_EX on TOP/.awt (the lock every awt process holds shared), heal torn ledger tails,
+`git add -A`, commit, `git merge --no-edit FETCH_HEAD`; release; push (never forced); `awt ingest --hook` after a merge that changed files.
+Exit: 0 ok (also when another sync holds the lock), 1 a step failed, 2 usage, 4 TOP is not a tree top in a git work tree.
+"""
+import sys
+sys.dont_write_bytecode = True
+sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
+import argparse, errno, fcntl, os, re, shutil, socket, subprocess, time
+
+CRED = re.compile(r"(://)[^/@\s]+@")
+
+
+def clean(s):
+    """Never print userinfo from a remote URL."""
+    return CRED.sub(r"\1", s)
+
+
+def fail(msg, fix=None, code=1):
+    print("error: " + clean(msg), file=sys.stderr)
+    if fix:
+        print("fix: " + fix, file=sys.stderr)
+    sys.exit(code)
+
+
+def git(top, *args, check=True):
+    try:
+        r = subprocess.run(["git", "-C", top] + list(args), capture_output=True)
+    except FileNotFoundError:
+        fail("git is not installed or not on PATH", "install git; awt never installs it")
+    r.out = r.stdout.decode("utf-8", "replace")
+    r.err = clean(r.stderr.decode("utf-8", "replace")).strip()
+    if check and r.returncode:
+        if "index.lock" in r.err:
+            fail("git step failed: %s" % r.err.splitlines()[0], "remove .git/index.lock if no git process is running")
+        fail("git %s failed: %s" % (args[0], r.err.splitlines()[-1] if r.err else "exit %d" % r.returncode))
+    return r
+
+
+def take_lock(top, wait):
+    fd = os.open(os.path.join(top, ".awt"), os.O_RDONLY)
+    end = time.time() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as x:
+            if x.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                os.close(fd)
+                return -1  # a filesystem without flock: go on, as awt does
+            if time.time() >= end:
+                os.close(fd)
+                return None
+            time.sleep(0.05)
+
+
+def ledgers(top):
+    r = git(top, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    return [p for p in r.out.split("\0") if p == ".awt/events.jsonl" or p.endswith("/.awt/events.jsonl")]
+
+
+def heal(top):
+    for p in ledgers(top):
+        f = os.path.join(top, p)
+        try:
+            if os.path.getsize(f) == 0:
+                continue
+            with open(f, "rb") as g:
+                g.seek(-1, 2)
+                last = g.read(1)
+            if last != b"\n":
+                with open(f, "ab") as g:
+                    g.write(b"\n")
+        except OSError:
+            continue
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="awt-sync", description="Commit, merge and push one awt task tree between two hosts.")
+    ap.add_argument("--dir", default=".")
+    ap.add_argument("--remote")
+    ap.add_argument("--branch")
+    ap.add_argument("--wait", type=float, default=30.0)
+    ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--quiet", action="store_true")
+    a = ap.parse_args()
+    top = os.path.realpath(os.path.expanduser(a.dir))
+    if not os.path.isdir(os.path.join(top, ".awt")):
+        fail("%s is not a tree top: no .awt/" % top, "pass --dir TOP, the directory that holds .awt/ and .git", 4)
+    r = git(top, "rev-parse", "--show-toplevel", check=False)
+    if r.returncode or os.path.realpath(r.out.strip()) != top:
+        fail("%s is not the top of a git work tree" % top, "run git init there, or pass the tree top with --dir", 4)
+    remote = a.remote
+    if not remote:
+        names = git(top, "remote").out.split()
+        remote = "origin" if "origin" in names else (names[0] if names else None)
+    if not remote and not a.no_push:
+        fail("no git remote in %s" % top, "git remote add origin URL, or pass --no-push", 1)
+    branch = a.branch or git(top, "symbolic-ref", "--short", "HEAD").out.strip()
+    git_dir = os.path.realpath(os.path.join(top, git(top, "rev-parse", "--git-dir").out.strip()))
+
+    # 1. fetch, no lock
+    have_remote = False
+    if remote:
+        f = git(top, "fetch", remote, branch, check=False)
+        if f.returncode == 0:
+            have_remote = True
+        elif "couldn't find remote ref" not in f.err and "Couldn't find remote ref" not in f.err:
+            if "index.lock" in f.err:
+                fail("git step failed: " + f.err.splitlines()[0], "remove .git/index.lock if no git process is running")
+            fail("git fetch failed: %s" % (f.err.splitlines()[-1] if f.err else "exit %d" % f.returncode), "check the remote and the network")
+    # 2. the lock
+    fd = take_lock(top, a.wait)
+    if fd is None:
+        print("note: a sync or writer holds %s/.awt; skipped this run" % top, file=sys.stderr)
+        return 0
+    committed = merged = 0
+    pushed = "no push"
+    changed = False
+    try:
+        if os.path.exists(os.path.join(git_dir, "MERGE_HEAD")):
+            git(top, "merge", "--abort")
+        # 3. heal
+        heal(top)
+        # 4. stage and commit
+        git(top, "add", "-A")
+        if git(top, "diff", "--cached", "--quiet", check=False).returncode:
+            committed = len([x for x in git(top, "diff", "--cached", "--name-only", "-z").out.split("\0") if x])
+            c = git(top, "commit", "-q", "-m", "awt-sync: %s" % socket.gethostname(), check=False)
+            if c.returncode:
+                if "index.lock" in c.err:
+                    fail("git step failed: " + c.err.splitlines()[0], "remove .git/index.lock if no git process is running")
+                fail("commit refused: %s" % (c.err or c.out.strip()), "fix what the pre-commit hook names, then run awt-sync again")
+        # 5. merge, never rebase
+        if have_remote:
+            n = int(git(top, "rev-list", "--count", "HEAD..FETCH_HEAD").out.strip() or 0)
+            if n:
+                before = git(top, "rev-parse", "HEAD").out.strip()
+                m = git(top, "merge", "--no-edit", "FETCH_HEAD", check=False)
+                if m.returncode:
+                    git(top, "merge", "--abort", check=False)
+                    fail("merge of %s/%s failed and was aborted: %s" % (remote, branch, (m.err or m.out.strip()).splitlines()[-1] if (m.err or m.out.strip()) else "conflict"),
+                         "add 'events.jsonl merge=union' to .gitattributes; see awt doctor")
+                merged = n
+                changed = git(top, "rev-parse", "HEAD").out.strip() != before
+    finally:
+        if fd >= 0:
+            os.close(fd)  # 6. release
+    # 7. push, no lock, never forced
+    if remote and not a.no_push:
+        ahead = 1
+        if have_remote:
+            ahead = int(git(top, "rev-list", "--count", "FETCH_HEAD..HEAD").out.strip() or 0)
+        if ahead:
+            p = git(top, "push", remote, "HEAD:refs/heads/" + branch, check=False)
+            if p.returncode == 0:
+                pushed = "pushed"
+            elif re.search(r"rejected|non-fast-forward|fetch first", p.err):
+                pushed = "push rejected"
+            else:
+                fail("git push failed: %s" % (p.err.splitlines()[-1] if p.err else "exit %d" % p.returncode), "check the remote and the network")
+    # 8. bring store.db up to date
+    if changed:
+        exe = os.path.join(os.path.dirname(os.path.realpath(__file__)), "awt")
+        exe = exe if os.access(exe, os.X_OK) else shutil.which("awt")
+        if exe:
+            try:
+                subprocess.run([exe, "--dir", top, "ingest", "--hook"], capture_output=True, timeout=600)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    if not a.quiet:
+        print("synced %s: committed %d files, merged %d commits, %s" % (top, committed, merged, pushed))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

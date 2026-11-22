@@ -2,15 +2,25 @@
 import sys
 sys.dont_write_bytecode = True
 sys.path[:] = [p for p in sys.path if p and p != sys.path[0]]
-import argparse, contextlib, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, stat, subprocess, tempfile, time, urllib.parse
-import itertools, io, math
+import argparse, contextlib, datetime, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, socket, stat, subprocess, tempfile, time, urllib.error, urllib.parse, urllib.request
+import itertools, io, math, fnmatch
 try:
     import sqlite3
 except ImportError:  # no _sqlite3: every verb but find --like, ingest and doctor's store line still works
     sqlite3 = None
 
 VERSION = "0.4.1"
-HOST = socket.gethostname()
+def host_name():
+    """HS7: AWT_HOST when it is a plain name (tests simulate two hosts with it), else the machine's name."""
+    h = os.environ.get("AWT_HOST")
+    if h is not None:
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", h):
+            return h
+        print("warn: AWT_HOST is not a plain host name (use 1-64 of A-Za-z0-9._-); using the machine's name", file=sys.stderr)
+    return socket.gethostname()
+
+
+HOST = host_name()
 ROOT = None
 BY = "agent"
 BY_SET = False  # --by was given (or a hook named itself): then emit stamps BY, not the child node's own sub:RUN_KEY
@@ -350,18 +360,18 @@ CLI_HELP = {
     "note": ("Record a small fact for later.", {"text": "the fact"}),
     "decide": ("Record a choice and its reason.", {
         "choice": "the choice", "--why": "the reason (required)", "--supersedes": "id of the earlier decision this replaces",
-        "--tag": "tag the decision; `rule` binds every later agent (repeatable)", "--related": "related records to print after writing (0 turns it off)"}),
+        "--tag": "tag the decision; `rule` binds every later agent; `profile:light|build-heavy|media-device` overrides a project's placement class (repeatable)", "--related": "related records to print after writing (0 turns it off)"}),
     "ask": ("Record a question for a person.", {"text": "the question", "--related": "related records to print after writing (0 turns it off)"}),
     "answer": ("Answer a question.", {"id": "question id, such as q-1a2b3c4d", "text": "the answer"}),
     "ref": ("Record a link instead of copying its content.", {
-        "target": "URL or path; tool-call:ID links a child node to the call that launched it", "--title": "short title (required)", "--why": "why it matters", "--kind": "override the guessed kind",
+        "target": "URL or path; tool-call:ID links a child node to the call that launched it", "--title": "short title (required)", "--why": "why it matters", "--kind": "override the guessed kind; `sync` declares the private git remote of a two-host tree (target: its URL)",
         "--no-access": "mark a link the agent cannot open, so it asks a person to paste it"}),
     "capture": ("Save pasted text that cannot be linked into context/.", {
         "file": "file to read; stdin when absent or -", "--from": "where it came from, such as slack (required)",
         "--title": "short title (required)", "--ref": "URL of the original"}),
     "status": ("Set the task status; done is refused while questions or effects are open.", {"value": "active, paused or done"}),
-    "doctor": ("Check the task: layout, git, disk, settings, store. Prints ok, warn or fail per check.", {
-        "--staged": "scan staged git changes for secrets (for .git/hooks/pre-commit)"}),
+    "doctor": ("Check the task: layout, git and its remotes, disk, settings, store. Prints ok, warn or fail per check.", {
+        "--staged": "scan staged git changes for secrets, and staged ledgers for a torn tail, changed rows and conflict markers (for .git/hooks/pre-commit)"}),
     "ingest": ("Copy agent transcripts into the store and update store.db; with --event, record one tool call.", {
         "--source": "claude, pi, opencode, paseo, ccusage (usage totals) or all; default claude",
         "--hook": "silent, exit 0 on any error (for a hook)", "--rebuild": "delete store.db and build it again from the stored logs",
@@ -416,8 +426,23 @@ def c(s):
     return s.replace("./awt", A)
 
 
+TS_RX = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z")
+TS_ROW = re.compile(rb'^\{"v":\d+,"ts":"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z)"', re.M)
+
+
 def now():
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    skew = float(os.environ.get("AWT_TEST_CLOCK_SKEW_S") or 0)  # test seam: a host whose clock is off
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=skew)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def next_ts(raw):
+    """HS2: the wall clock, or one microsecond past the greatest ts already in this node's log, whichever is later."""
+    t = now()
+    top = max(TS_ROW.findall(raw), default=None)
+    if top is not None and t <= top.decode():
+        d = datetime.datetime.strptime(top.decode(), "%Y-%m-%dT%H:%M:%S.%fZ") + datetime.timedelta(microseconds=1)
+        t = d.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return t
 
 
 def epoch(ts):
@@ -494,6 +519,56 @@ def find_root(explicit=None):
         d = os.path.dirname(d)
 
 
+# ---------- the sync lock (SPEC, Two hosts) ----------
+SYNC = None        # None: not taken yet; an fd: held shared to exit; False: gave up waiting (HS11)
+SYNC_BUSY = False  # taking it: tree_top() reads node_info(), which must not recurse
+SYNC_KIND = "read"  # how long to wait and what to do on timeout: write | hook | read
+SYNC_TOP = None
+
+
+def sync_wait():
+    t = os.environ.get("AWT_TEST_SYNC_WAIT_S")
+    if t:
+        return float(t) if SYNC_KIND == "write" else min(2.0, float(t))
+    return 10.0 if SYNC_KIND == "write" else 2.0
+
+
+def sync_shared(path=None):
+    """HS10: hold LOCK_SH on the tree top's .awt directory from the first ledger access to exit. A sync takes it exclusive while git changes the work tree."""
+    global SYNC, SYNC_BUSY, SYNC_TOP
+    if SYNC is not None or SYNC_BUSY:
+        return
+    SYNC_BUSY = True
+    try:
+        top = tree_top(os.path.realpath(path or ROOT or "."))
+        try:
+            fd = os.open(os.path.join(top, ".awt"), os.O_RDONLY)
+        except OSError:
+            return  # no tree there yet (init): try again at the next access
+        end = time.time() + sync_wait()
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                SYNC, SYNC_TOP = fd, top
+                return
+            except OSError as x:
+                if x.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                    SYNC = False  # a filesystem without flock: go on unlocked, as dir_lock does
+                    os.close(fd)
+                    return
+                if time.time() >= end:
+                    break
+                time.sleep(0.05)
+        os.close(fd)
+        SYNC, SYNC_TOP = False, top
+        if SYNC_KIND == "write":
+            die("a sync of %s is in progress" % top, "rerun in a few seconds")
+        if SYNC_KIND == "read":
+            print("note: %s is being synced; output may be partial" % top, file=sys.stderr)
+    finally:
+        SYNC_BUSY = False
+
+
 def is_node_dir(path):
     return os.path.isdir(os.path.join(path, ".awt"))
 
@@ -501,6 +576,7 @@ def is_node_dir(path):
 def node_info(path):
     """kind, name and key of the node at path, from its first row. No node row reads as a legacy task."""
     info = dict(kind="task", name=os.path.basename(path), key=None, run=None, legacy=True)
+    sync_shared(path)
     try:
         with open(os.path.join(path, ".awt", "events.jsonl"), "rb") as g:
             for ln in g:
@@ -636,21 +712,30 @@ def emit(typ, **f):
     f = {k: v for k, v in f.items() if v is not None}
     by = writer()
     check(typ, dict(f, by=by))
-    row = dict(v=1, ts=now(), type=typ, host=HOST, by=by, model=MODEL)
+    sync_shared()
+    p = P(".awt", "events.jsonl")
+    try:
+        with open(p, "rb") as g:
+            raw = g.read()
+    except OSError:
+        raw = b""
+    row = dict(v=2, ts=next_ts(raw), type=typ, host=HOST, by=by, model=MODEL)
     if os.environ.get("AWT_SESSION", "").strip():
         row["session"] = os.environ["AWT_SESSION"].strip()
     row.update(f)
     data = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     if len(data) > ROWMAX:
         die("event is %d bytes, max %d" % (len(data), ROWMAX), "put the detail in docs/ and reference it")
-    p = P(".awt", "events.jsonl")
+    if SYNC is False and SYNC_KIND == "hook":
+        return row  # a sync holds the tree: a hook's row is dropped (HS11)
     fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
-        with open(p, "rb") as g:
-            if g.seek(0, 2):
-                g.seek(-1, 2)
-                if g.read(1) != b"\n":
-                    data = b"\n" + data
+        if raw and not raw.endswith(b"\n"):
+            data = b"\n" + data
+        cut = os.environ.get("AWT_TEST_SHORT_WRITE")  # test seam: a disk that fills up
+        if cut:
+            os.write(fd, data[:int(cut)])
+            die("short write to events.jsonl", "check disk space and rerun")
         if os.write(fd, data) != len(data):
             die("short write to events.jsonl", "check disk space and rerun")
     finally:
@@ -672,6 +757,8 @@ def valid(r):
         if not ok:
             return False
     t = r.get("type")
+    if r.get("v") == 2 and not TS_RX.fullmatch(r.get("ts", "")):
+        return False  # HS1: a v2 row's ts is the sort key
     if "ts" not in r or t not in REQ or any(k not in r for k in REQ[t]):
         return False
     for k, vals in ENUM.items():
@@ -725,6 +812,7 @@ def derive(e):
 
 
 def load():
+    sync_shared()
     unread = None
     try:
         with open(P(".awt", "events.jsonl"), "rb") as g:
@@ -733,23 +821,33 @@ def load():
         raw = b""
     except OSError as x:
         raw, unread = b"", x.strerror or str(x)
-    rows, bad, bad_lines = [], 0, []
+    legacy, v2, bad, bad_lines, dups, seen, v1_late = [], [], 0, [], 0, set(), []
     for n, ln in enumerate(raw.split(b"\n"), 1):
         if not ln.strip():
             continue
+        if ln in seen:  # HS3: a union merge can keep one row twice; a row carries ts, host and a random id, so equal bytes are one row
+            dups += 1
+            continue
+        seen.add(ln)
         try:
             r = json.loads(ln.decode("utf-8"))
         except (ValueError, RecursionError):
             bad += 1
             bad_lines.append(n)
             continue
-        if valid(r):
-            rows.append(r)
-        else:
+        if not valid(r):
             bad += 1
             bad_lines.append(n)
+        elif r.get("v") == 2:
+            v2.append((r["ts"], str(r.get("host", "")), ln, r))
+        else:
+            legacy.append(r)
+            if v2:
+                v1_late.append(n)
+    v2.sort(key=lambda t: t[:3])
+    rows = legacy + [t[3] for t in v2]  # HS4: legacy rows in file order, then v2 rows by (ts, host, bytes)
     D = dict(rows=rows, task=None, status="active", states={}, hist=[], notes=[], dec={}, sup={}, q={}, ans={},
-             refs={}, caps=[], docs=[], eff={}, bad_lines=bad_lines, unread=unread)
+             refs={}, caps=[], docs=[], eff={}, bad_lines=bad_lines, unread=unread, dups=dups, v1_late=v1_late)
     for r in rows:
         t = r["type"]
         if t == "task":
@@ -778,6 +876,11 @@ def load():
             D["docs"].append(r)
         elif t == "effect" and not fold_effect(D, r):
             bad += 1
+            e = D["eff"].get(r["id"])
+            if e and r.get("step") == "begun":
+                first = next((h for h in e["hist"] if h["step"] == "begun" and h.get("attempt", 1) == r.get("attempt", 1)), None)
+                if first and first.get("host") != r.get("host"):
+                    D.setdefault("xbegun", []).append((r["id"], first.get("host"), r.get("host"), r.get("attempt", 1)))
     for e in D["eff"].values():
         e["state"] = derive(e)
     D["bad"] = bad
@@ -1324,6 +1427,7 @@ def init_child(a):
     lockfd = None
     if a.key:
         top = tree_top(ROOT)
+        sync_shared()
         lockfd = os.open(os.path.join(top, ".awt", "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             fcntl.flock(lockfd, fcntl.LOCK_EX)
@@ -2385,7 +2489,13 @@ def passive_section():
         return ""
 
 
+PROFILE_CLASSES = ("light", "build-heavy", "media-device")
+
+
 def cmd_decide(a):
+    for t in a.tag or []:
+        if t.startswith("profile:") and t[8:] not in PROFILE_CLASSES:
+            die("tag %s is not a profile class" % t, "use --tag profile:light|build-heavy|media-device")
     D = load()
     if a.supersedes:
         if a.supersedes not in D["dec"]:
@@ -2522,6 +2632,7 @@ def cmd_status(a):
 # ---------- effects ----------
 def lock(wait=None):
     """Take the log lock, held to exit: check-then-write must not interleave. wait: seconds to try before giving up (False); None blocks."""
+    sync_shared()
     fd = os.open(P(".awt", "events.jsonl"), os.O_RDONLY | os.O_CREAT, 0o644)
     end = time.time() + (wait or 0)
     while True:
@@ -3167,6 +3278,7 @@ def launch_keys(ev):
 @contextlib.contextmanager
 def node_flock(path, wait=3):
     """Exclusive lock on path's log for a check-then-write; yields False when it could not be taken in time."""
+    sync_shared(path)
     fd = os.open(os.path.join(path, ".awt", "events.jsonl"), os.O_RDONLY | os.O_CREAT, 0o644)
     end, got = time.time() + wait, False
     try:
@@ -3409,7 +3521,7 @@ def store_checks(line):
             errs = errs if isinstance(errs, dict) else {}
         except (OSError, ValueError, AttributeError):
             last, errs = None, {}
-        for src in ("claude", "pi", "opencode", "paseo"):
+        for src in ("claude", "pi", "opencode", "paseo", "profiles"):
             offp = os.path.join(store, "ingest", src + ".offsets.json")
             if src != "claude":
                 errs = load_state(offp)[1]
@@ -3443,8 +3555,47 @@ def store_checks(line):
         line("warn", "store check failed: %s" % x)
 
 
+def is_ledger(path):
+    return path == ".awt/events.jsonl" or path.endswith("/.awt/events.jsonl")
+
+
+def ledger_checks(g, f, b):
+    """HS21-HS24 for one staged ledger blob b at path f: (fails, warns). Reads blobs only; names no row text."""
+    fails, warns = [], []
+    if b and not b.endswith(b"\n"):
+        fails.append(("%s: ledger does not end with a newline (torn tail)" % f, "run awt-sync, or printf '\\n' >> %s while no awt is writing, then git add %s" % (f, f)))
+    h = g("cat-file", "blob", "HEAD:" + f)
+    head = h.stdout if h.returncode == 0 else None
+    if head is not None and not b.startswith(head):
+        fails.append(("%s: ledger rows were changed or removed since HEAD" % f, "git restore --staged %s; the ledger is append-only" % f))
+        head = None
+    start = len(head) if head is not None else 0
+    added = b[start:]
+    first = b[:start].count(b"\n") + 1
+    seen = set(ln for ln in b[:start].split(b"\n") if ln.strip())
+    marks = False
+    for i, ln in enumerate(added.split(b"\n")):
+        if not ln.strip():
+            continue
+        if ln.startswith((b"<<<<<<< ", b">>>>>>> ")) or ln == b"=======":
+            marks = True
+            continue
+        try:
+            ok = valid(json.loads(ln.decode("utf-8")))
+        except (ValueError, RecursionError):
+            ok = False
+        if ln in seen:
+            ok = False
+        seen.add(ln)
+        if not ok:
+            warns.append("%s:%d: row would be quarantined" % (f, first + i))
+    if marks:
+        fails.append(("%s: ledger has merge conflict markers" % f, "git checkout --theirs/--ours is wrong for ledgers; abort the merge and add 'events.jsonl merge=union' to .gitattributes"))
+    return fails, warns
+
+
 def doctor_staged(a):
-    """Secret scan of the staged blobs of the git repo at --dir (default: cwd). For a pre-commit hook."""
+    """Secret scan and ledger checks of the staged blobs of the git repo at --dir (default: cwd). For a pre-commit hook."""
     d = a.dir or os.getcwd()
 
     def g(*x):
@@ -3454,20 +3605,190 @@ def doctor_staged(a):
             die("git is not installed or not on PATH", "install git; awt never installs it")
     if g("rev-parse", "--show-toplevel").returncode:
         die("not a git repo: " + d, "run awt doctor --staged inside a git work tree")
-    held = []
+    held, led_fails, led_warns = [], [], []
     for f in [x.decode("utf-8", "replace") for x in g("diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z").stdout.split(b"\0") if x]:
         r = g("cat-file", "blob", ":" + f)
         b = r.stdout
-        if r.returncode or len(b) > K["big"] or b"\0" in b:
+        if r.returncode:
+            continue
+        if is_ledger(f):
+            fl, wl = ledger_checks(g, f, b)
+            led_fails += fl
+            led_warns += wl
+        if len(b) > K["big"] or b"\0" in b:
             continue
         n = secret(b.decode("utf-8", "replace"))
         if n:
             held.append("%s (%s)" % (f, n))
+    for w in led_warns:
+        print("warn: " + w)
     if held:
         for h in held:
             print("error: staged file looks like it holds a secret: " + h, file=sys.stderr)
+    if led_fails:
+        for m, fx in led_fails:
+            print("error: " + m, file=sys.stderr)
+            print("fix: " + fx, file=sys.stderr)
+        sys.exit(1)
+    if held:
         die("%d staged file(s) look like secrets" % len(held), "git restore --staged FILE, remove the secret, and commit again")
     out("ok no secrets in staged files")
+
+
+# ---------- remotes (HS30-HS34) ----------
+def norm_url(u):
+    """HS31: host/path of a git URL (no scheme, no userinfo, no .git); a local path or file:// URL is its real path."""
+    u = u.strip()
+    if u.startswith("file://"):
+        u = u[7:]
+    if u.startswith(("/", "./", "../", "~")) or os.path.exists(u):
+        return os.path.realpath(os.path.expanduser(u)).rstrip("/")
+    m = re.match(r"^(?:ssh|https?|git|git\+ssh)://(?:[^@/]*@)?([^/:]+)(?::\d+)?/(.*)$", u) or re.match(r"^(?:[^@/:]+@)?([^/:@]+):(.*)$", u)
+    if not m:
+        return u
+    host, path = m.group(1).lower(), m.group(2).strip("/")
+    path = path[:-4] if path.endswith(".git") else path
+    path = path.rstrip("/")
+    return "%s/%s" % (host, path.lower() if host == "github.com" else path)
+
+
+def declared_remotes(top):
+    """Normalised targets of the current refs of kind sync, access ok, in the node at top."""
+    try:
+        refs = load_at(top)["refs"].values()
+    except Exception:
+        return set()
+    return {norm_url(r["target"]) for r in refs if r.get("kind") == "sync" and r.get("access") == "ok"}
+
+
+def remote_urls(top, name):
+    urls = []
+    for extra in ((), ("--push",)):
+        r = git(top, "remote", "get-url", "--all", *extra, name)
+        urls += [x for x in r.stdout.split("\n") if x.strip()] if r.returncode == 0 else []
+    return urls
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *x, **y):
+        return None
+
+
+def probe_github(norm):
+    """HS33: the HTTP status of the repo's public page, or None offline. No credentials, no cookies, no redirects, 5 s."""
+    base = os.environ.get("AWT_TEST_GITHUB_BASE") or "https://github.com"
+    owner_repo = "/".join(norm.split("/")[1:3])
+    opener = urllib.request.build_opener(NoRedirect)
+    req = urllib.request.Request("%s/%s" % (base.rstrip("/"), owner_repo), method="HEAD", headers={"User-Agent": "awt-doctor"})
+    try:
+        with opener.open(req, timeout=5) as resp:
+            return resp.status
+    except urllib.error.HTTPError as x:
+        return x.code
+    except Exception:
+        return None
+
+
+def remote_checks(top, line):
+    """HS32-HS34 for the git top-level node at top, one line per remote, by name only."""
+    names = git(top, "remote").stdout.split()
+    declared = declared_remotes(top)
+    used = set()
+    for name in names:
+        urls = [norm_url(u) for u in remote_urls(top, name)]
+        used.update(urls)
+        ok = bool(urls) and all(u in declared for u in urls)
+        if ok:
+            line("ok", "git remote %s: declared private sync remote" % name)
+        else:
+            line("warn", 'git remote %s: not declared; task data would be pushed if committed; if it is private: awt ref URL --kind sync --title "private sync remote"' % name)
+        gh = next((u for u in urls if u.startswith("github.com/")), None)
+        if gh:
+            st = probe_github(gh)
+            if st == 200:
+                line("fail", "git remote %s is public: task data must not go there" % name)
+            elif st != 404:
+                line("warn", "git remote %s: visibility not checked (%s)" % (name, "OFFLINE" if st is None else "HTTP %d" % st))
+        elif not ok:
+            line("warn", "git remote %s: visibility not checked (only github.com is probed)" % name)
+    for t in sorted(declared - used):
+        line("warn", "declared sync remote not configured in git: " + t)
+    if not names:
+        line("ok", "no git remote")
+    return declared
+
+
+def ignored(top, path):
+    return git(top, "check-ignore", "-q", "--no-index", path).returncode == 0
+
+
+def hook_ok(top):
+    r = git(top, "rev-parse", "--git-path", "hooks")
+    hooks = r.stdout.strip()
+    cfg = git(top, "config", "core.hooksPath").stdout.strip()
+    d = os.path.expanduser(cfg) if cfg else hooks
+    d = d if os.path.isabs(d) else os.path.join(top, d)
+    p = os.path.join(d, "pre-commit")
+    try:
+        with open(p, encoding="utf-8", errors="replace") as g:
+            return os.access(p, os.X_OK) and "awt doctor --staged" in g.read()
+    except OSError:
+        return False
+
+
+def sync_top_checks(top, line):
+    """HS15-HS17 at a tree top with a declared sync remote."""
+    for p, name in (("BRIEF.md", "BRIEF.md"), ("scratch/x", "scratch/"), (".awt/claims/x", ".awt/claims/"), (".awt/runs/x", ".awt/runs/"), (".awt/x.tmp", ".awt/*.tmp")):
+        if not ignored(top, p):
+            line("warn", "git does not ignore %s: add the line '%s' to %s/.gitignore" % (p, name, top))
+    attr = git(top, "check-attr", "merge", "--", ".awt/events.jsonl").stdout.strip().rsplit(": ", 1)[-1]
+    if attr != "union":
+        line("warn", "events.jsonl is not merged as union: add the line 'events.jsonl merge=union' to %s/.gitattributes" % top)
+    if not hook_ok(top):
+        line("warn", "the pre-commit hook is missing, not executable, or does not run 'awt doctor --staged'")
+
+
+def ledger_vs_head(root, top, line):
+    """HS25: the working ledger must extend the committed one."""
+    if os.path.exists(os.path.join(git(root, "rev-parse", "--absolute-git-dir").stdout.strip(), "MERGE_HEAD")):
+        return
+    rel_path = os.path.relpath(os.path.join(root, ".awt", "events.jsonl"), top)
+    r = subprocess.run(["git", "-C", top, "cat-file", "blob", "HEAD:" + rel_path], capture_output=True)
+    if r.returncode:
+        return
+    try:
+        with open(os.path.join(root, ".awt", "events.jsonl"), "rb") as g:
+            work = g.read()
+    except OSError:
+        work = b""
+    if not work.startswith(r.stdout):
+        line("fail", "ledger is not an extension of the committed one (rows lost?); fix: git diff -- %s; git checkout -- %s restores the committed rows" % (rel_path, rel_path))
+
+
+def conflict_checks(D, line):
+    """HS6, HS8, HS9: what two hosts writing one node can leave for a person."""
+    if D["v1_late"]:
+        line("warn", "%d v1 rows after v2 rows (lines %s): a host runs an older awt; install the same version on every host" % (len(D["v1_late"]), ", ".join(map(str, D["v1_late"][:20]))))
+    sup = {}
+    ans = {}
+    for r in D["rows"]:
+        if r["type"] == "decision" and r.get("supersedes"):
+            sup.setdefault(r["supersedes"], []).append(r)
+        elif r["type"] == "answer":
+            ans.setdefault(r["ref"], []).append(r)
+    for x, rs in sorted(sup.items()):
+        if len(rs) > 1:
+            line("warn", "decision %s superseded by %s rows (%s): supersede one of them" % (x, "two" if len(rs) == 2 else len(rs), ", ".join("%s@%s" % (r["id"], r.get("host", "?")) for r in rs)))
+    for x, rs in sorted(ans.items()):
+        hosts = sorted({r.get("host", "?") for r in rs})
+        if len(rs) > 1 and len(hosts) > 1:
+            line("warn", "question %s answered twice (hosts %s)" % (x, ", ".join(hosts)))
+    for i, h1, h2, n in D.get("xbegun", []):
+        line("warn", "effect %s: begun on %s and %s (attempt %d); check the target and mark it" % (i, h1, h2, n))
+    t = epoch(now())
+    far = max(((epoch(r["ts"]) - t, r.get("host", "?")) for r in D["rows"] if r.get("host") != HOST), default=(0, "?"))  # this host's own rows are raised by causality (HS2), not by its clock
+    if far[0] > 300:
+        line("warn", "rows up to %d s ahead of this clock (host %s): check NTP on both hosts" % (far[0], far[1]))
 
 
 def cmd_doctor(a):
@@ -3567,10 +3888,25 @@ def cmd_doctor(a):
         if not probs:
             line("ok", "node tree is consistent")
     try:
-        rem = git(ROOT, "remote").stdout.split() if git(ROOT, "rev-parse", "--show-toplevel").stdout.strip() == ROOT else []
+        gtop = os.path.realpath(git(ROOT, "rev-parse", "--show-toplevel").stdout.strip() or "/nonexistent")
     except Exception:
-        rem = []
-    line("warn" if rem else "ok", "git remote %s: task data would be pushed if committed; check it is private" % rem[0] if rem else "no git remote")
+        gtop = None
+    try:
+        if gtop == ROOT:
+            decl = remote_checks(ROOT, line)
+        else:
+            decl = set()
+            line("ok", "no git remote")
+        if decl:
+            sync_top_checks(ROOT, line)
+        elif gtop:
+            top_node = gtop if is_node_dir(gtop) else None
+            decl = declared_remotes(top_node) if top_node else set()
+        if decl and gtop:
+            ledger_vs_head(ROOT, gtop, line)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    conflict_checks(D, line)
     try:
         with open(P(".claude", "settings.json"), encoding="utf-8", errors="replace") as g:
             old = ["line %d: %s" % (n, x.strip()) for n, x in enumerate(g.read().splitlines(), 1) if "awt effect apply" in x]
@@ -4277,7 +4613,10 @@ def cmd_ingest(a):
                             raise
                         res.append(((0, 0, 1), what))  # one source failing must not stop the rest
         private_dir(os.path.join(store, "ingest"))
-        built = sync_store(store, ingest_tree(store, a.dir), a.rebuild, quiet=bool(a.hook or a.stdin))
+        iroot = ingest_tree(store, a.dir)
+        built = sync_store(store, iroot, a.rebuild, quiet=bool(a.hook or a.stdin))
+        if profiles_wanted(store, built):
+            refresh_profiles(store, iroot, bool(a.hook))
     except BaseException as x:
         if isinstance(x, KeyboardInterrupt):
             raise
@@ -4291,6 +4630,263 @@ def cmd_ingest(a):
             out("ingested %d rows from %d %s into %s%s" % (n, f, what, store, "; %d files failed (awt doctor shows which)" % bad if bad else ""))
         if built:
             out("%s store.db: %d sessions, %d messages, %d records" % ("rebuilt" if a.rebuild else "updated", built["sessions"], built["messages"], built["records"]))
+
+
+# ---------- project profiles (HS50-HS58): a derived view, per host, never synced ----------
+PROFILE_DAYS = 90
+SUBCMD = {"cargo", "go", "npm", "pnpm", "yarn", "bun", "swift", "xcrun", "xcodebuild", "docker", "git", "uv", "pip", "pip3", "brew", "apt", "apt-get", "pod", "bundle", "vite", "gh", "kubectl", "make"}
+SAFE_WORD = re.compile(r"[a-z0-9._+-]+")
+SEG_SPLIT = re.compile(r"&&|\|\||;|\||\n")
+PKG = ("npm", "pnpm", "yarn", "bun")
+MANIFESTS = ("package.json", "Cargo.toml", "build.gradle*", "settings.gradle*", "*.xcodeproj", "Package.swift", "Dockerfile", "node_modules/", "target/", ".gradle/")
+HEAVY = ("Cargo.toml", "build.gradle*", "settings.gradle*", "*.xcodeproj", "Package.swift", "Dockerfile", "node_modules/", "target/", ".gradle/")
+CLASSES = ("device", "media", "test", "build", "install", "other")
+
+
+def command_heads(cmd):
+    """HS53: [(class, head)] of the shell segments of one command. Arguments, paths and values are never kept."""
+    res = []
+    for seg in SEG_SPLIT.split(cmd):
+        w = seg.split()
+        while w and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0]) or w[0] in ("sudo", "env", "command", "time", "nohup", "exec")):
+            w = w[1:]
+        if not w or w[0] == "cd":
+            continue
+        w0 = w[0][2:] if w[0].startswith("./") else w[0]
+        w1 = w[1] if len(w) > 1 else ""
+        rest = w[1:]
+        if "/" in w0 or not SAFE_WORD.fullmatch(w0.lower()):
+            res.append(("other", "other"))
+            continue
+        pyt = w0.startswith("python") and w1 == "-m" and len(w) > 2
+        cls = "other"
+        if w0 in ("adb", "emulator", "fastboot", "ios-deploy", "maestro") or w0.startswith("idevice") or (w0 == "xcrun" and w1 in ("simctl", "devicectl")):
+            cls = "device"
+        elif w0 in ("ffmpeg", "ffprobe", "magick", "convert", "sips", "sox"):
+            cls = "media"
+        elif (w0 in ("pytest", "jest", "vitest", "playwright") or (pyt and w[2] in ("pytest", "unittest")) or (w0, w1) in (("cargo", "test"), ("go", "test"), ("swift", "test"), ("xcodebuild", "test"))
+              or (w0 in PKG and (w1 == "test" or w1 == "run" and len(w) > 2 and w[2].startswith("test")))
+              or (w0.startswith("gradle") and any("test" in x.lower() for x in rest)) or (w0 == "xcodebuild" and "test" in rest)):
+            cls = "test"
+        elif (w0 in ("make", "cmake", "ninja", "bazel", "mvn", "tsc", "webpack") or w0.startswith("gradle") or w0 == "xcodebuild"
+              or (w0 == "cargo" and w1 in ("build", "run", "check", "clippy")) or (w0, w1) in (("go", "build"), ("swift", "build"), ("vite", "build"), ("docker", "build"))
+              or (w0 in PKG and w1 == "run" and len(w) > 2 and w[2].startswith("build"))):
+            cls = "build"
+        elif ((w0 in PKG and w1 in ("install", "ci", "add")) or (w0 in ("pip", "pip3") and w1 == "install") or (w0 == "uv" and w1 in ("sync", "pip"))
+              or (w0, w1) in (("cargo", "install"), ("brew", "install"), ("pod", "install"), ("bundle", "install")) or (w0 in ("apt", "apt-get") and w1 == "install")):
+            cls = "install"
+        head = w0
+        if pyt and SAFE_WORD.fullmatch(w[2]):
+            head = "%s -m %s" % (w0, w[2])
+        elif w0 in SUBCMD and SAFE_WORD.fullmatch(w1) and w1 != "-":
+            head = "%s %s" % (w0, w1)
+        res.append((cls, head))
+    return res
+
+
+def git_top(path, cache):
+    """The directory with .git at or above path, or None. Plain stat calls, no git process."""
+    d = path
+    seen = []
+    while d and d not in cache:
+        seen.append(d)
+        if os.path.exists(os.path.join(d, ".git")):
+            cache[d] = d
+            break
+        up = os.path.dirname(d)
+        if up == d:
+            cache[d] = None
+            break
+        d = up
+    top = cache.get(d)
+    for x in seen:
+        cache[x] = top
+    return top
+
+
+def repo_facts(path):
+    names = []
+    try:
+        listing = os.listdir(path)
+    except OSError:
+        listing = []
+    for m in MANIFESTS:
+        if m.endswith("/"):
+            if os.path.isdir(os.path.join(path, m[:-1])) and not os.path.islink(os.path.join(path, m[:-1])):
+                names.append(m)
+        elif any(fnmatch.fnmatch(f, m) for f in listing):
+            names.append(m)
+    tracked = None
+    try:
+        r = subprocess.run(["git", "-C", path, "ls-files", "-z"], capture_output=True, timeout=10)
+        if r.returncode == 0:
+            tracked = len([x for x in r.stdout.split(b"\0") if x])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return names, tracked
+
+
+def class_of(override, counts, manifests, tracked):
+    """HS55: (class, source), first rule that applies."""
+    if override:
+        return override, "override"
+    total = sum(counts.values())
+    if counts["device"] + counts["media"] >= 3:
+        return "media-device", "observed"
+    heavy = counts["build"] + counts["test"] + counts["install"]
+    if heavy >= 5 and heavy * 10 >= total:
+        return "build-heavy", "observed"
+    if any(m in HEAVY for m in manifests) or (tracked or 0) > 5000:
+        return "build-heavy", "manifest"
+    return "light", "default"
+
+
+def build_profiles(store, deadline=None):
+    """HS50-HS57: write $AWT_STORE/views/profiles.json from store.db and the repos that exist on this host. Raises TimeoutError past the deadline."""
+    def check():
+        if deadline and time.time() > deadline:
+            raise TimeoutError("over budget")
+    db = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.join(store, "store.db")), uri=True, timeout=busy_s(5))
+    try:
+        since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=PROFILE_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
+        projects = [r[0] for r in db.execute("SELECT project_id FROM projects WHERE kind = 'project' ORDER BY project_id")]
+        nodes = {r[0]: (r[1], r[2]) for r in db.execute("SELECT node_id, parent_id, project_id FROM nodes")}
+        sess = db.execute("SELECT s.session_id, s.cwd, s.started_at, n.project_id FROM sessions s LEFT JOIN nodes n ON n.node_id = s.node_id ORDER BY s.session_id").fetchall()
+        calls = {}
+        for sid, name, args, st in db.execute("SELECT session_id, tool_name, args, started_at FROM tool_calls WHERE tool_name IN ('Bash', 'bash') AND started_at >= ? ORDER BY session_id, started_at", (since,)):
+            try:
+                cmd = json.loads(args).get("command")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(cmd, str):
+                calls.setdefault(sid, []).extend(command_heads(cmd))
+        check()
+        # decisions: the current ones (not superseded), with their node and tags
+        decs, sup = [], set()
+        for nid, ts, fj in db.execute("SELECT node_id, ts, fields FROM records WHERE type = 'decision' ORDER BY ts"):
+            try:
+                f = json.loads(fj)
+            except ValueError:
+                continue
+            decs.append((nid, ts, f))
+            if f.get("supersedes"):
+                sup.add(f["supersedes"])
+        refs = {}
+        for nid, ts, fj in db.execute("SELECT node_id, ts, fields FROM records WHERE type = 'ref' ORDER BY ts"):
+            try:
+                f = json.loads(fj)
+            except ValueError:
+                continue
+            refs[(nid, f.get("target"))] = f
+    finally:
+        db.close()
+    cache = {}
+    unassigned = "unassigned"
+
+    def override(node):
+        while node:
+            best = None
+            for nid, ts, f in decs:
+                if nid == node and f.get("id") not in sup:
+                    for t in f.get("tags") or []:
+                        if t.startswith("profile:") and t[8:] in PROFILE_CLASSES:
+                            best = t[8:]
+            if best:
+                return best
+            node = (nodes.get(node) or (None,))[0]
+        return None
+
+    def tally(sids):
+        counts, heads, last = {c: 0 for c in CLASSES}, {}, None
+        for sid in sids:
+            for cls, head in calls.get(sid, []):
+                counts[cls] += 1
+                k = head if SAFE_WORD.fullmatch(head.replace(" ", "")) else "other"
+                heads[k] = heads.get(k, 0) + 1
+        return counts, sorted(heads.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+
+    by_repo, by_proj = {}, {}
+    for sid, cwd_, st, proj in sess:
+        top = git_top(os.path.realpath(cwd_), cache) if cwd_ and os.path.isdir(cwd_) else None
+        pj = proj if proj and proj != unassigned else None
+        by_proj.setdefault(pj, []).append((sid, st))
+        if top:
+            by_repo.setdefault((top, pj), []).append((sid, st))
+    repos_of = {p: set() for p in projects}
+    for (nid, target), f in refs.items():
+        if f.get("kind") == "repo" and f.get("path") and os.path.isdir(f["path"]):
+            pj = (nodes.get(nid) or (None, None))[1]
+            if pj in repos_of:
+                repos_of[pj].add(os.path.realpath(f["path"]))
+    for (top, pj) in by_repo:
+        if pj in repos_of:
+            repos_of[pj].add(top)
+    check()
+    facts = {}
+
+    def fact(path):
+        if path not in facts:
+            check()
+            facts[path] = repo_facts(path)
+        return facts[path]
+
+    def last_seen(items):
+        return max((st for _, st in items if st), default=None)
+
+    out_repos, out_projects = {}, {}
+    for pj in projects:
+        sids = by_proj.get(pj, [])
+        counts, heads = tally([s for s, _ in sids])
+        ov = override(pj)
+        man, tr = set(), 0
+        for r in sorted(repos_of[pj]):
+            m, t = fact(r)
+            man.update(m)
+            tr = max(tr, t or 0)
+            own = by_repo.get((r, pj), [])
+            rc, rh = tally([s for s, _ in own])
+            cl, src = class_of(ov, counts, m, t)
+            out_repos[r] = dict(project=pj, **{"class": cl}, source=src, manifests=m, tracked_files=t, commands=rc, heads=rh, sessions=len(own), last_seen=last_seen(own))
+        cl, src = class_of(ov, counts, sorted(man), tr)
+        out_projects[pj] = dict(**{"class": cl}, source=src, repos=sorted(repos_of[pj]), commands=counts, heads=heads, sessions=len(sids), last_seen=last_seen(sids))
+    for (top, pj), own in sorted(by_repo.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
+        if pj is None and top not in out_repos:
+            rc, rh = tally([s for s, _ in own])
+            m, t = fact(top)
+            cl, src = class_of(None, rc, m, t)
+            out_repos[top] = dict(project=None, **{"class": cl}, source=src, manifests=m, tracked_files=t, commands=rc, heads=rh, sessions=len(own), last_seen=last_seen(own))
+    doc = dict(v=1, built=now(), host=HOST, window_days=PROFILE_DAYS, projects=out_projects, repos=out_repos)
+    vd = os.path.join(store, "views")
+    private_dir(vd, store)
+    tmp = os.path.join(vd, "profiles.json.%d.tmp" % os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as g:
+        json.dump(doc, g, sort_keys=True, separators=(",", ":"))
+    os.replace(tmp, os.path.join(vd, "profiles.json"))
+
+
+def profiles_wanted(store, built):
+    path = os.path.join(store, "views", "profiles.json")
+    try:
+        return bool(built) or time.time() - os.path.getmtime(path) > 86400
+    except OSError:
+        return True
+
+
+def refresh_profiles(store, root, hook):
+    """HS51: after an ingest that built or updated store.db, and when the file is missing or over a day old. A hook run has 5 s."""
+    meta = store_meta(store)
+    if not meta or store_old(meta, root) or store_newer(meta):
+        return
+    offp = os.path.join(store, "ingest", "profiles.offsets.json")
+    errs = load_state(offp)[1]
+    try:
+        build_profiles(store, time.time() + 5 if hook else None)
+        if errs:
+            save_offsets(offp, {}, {})
+    except Exception as x:
+        private_dir(os.path.join(store, "ingest"), store)
+        save_offsets(offp, {}, {"profiles": "%s: %s" % (type(x).__name__, str(x)[:200])})
 
 
 # ---------- ui ----------
@@ -4501,6 +5097,7 @@ CREATE INDEX ix_fts_ref ON fts_ref(kind, ref);
 def store_inputs(store, root):
     """[(kind, path, size)] sorted: the canonical files and node logs a build reads. Sizes only, so the list is a function of the inputs' content (the logs are append-only)."""
     res = []
+    sync_shared(root)
     for dp, dns, fns in os.walk(os.path.join(store, "log")):
         dns.sort()
         res += [("canonical", os.path.join(dp, f), os.path.getsize(os.path.join(dp, f))) for f in sorted(fns) if f.endswith(".jsonl")]
@@ -5459,6 +6056,11 @@ def main(argv):
         die("effect apply, --run, --snapshot, --verify, --class and --timeout were removed: awt never runs commands",
             "send it yourself; ./awt effect plan --target T [--body FILE] [--how TEXT], ./awt effect begin ID, then ./awt effect mark ID sent", 2)
     a.dir = d
+    global SYNC_KIND
+    if getattr(a, "hook", False) or getattr(a, "event", False):
+        SYNC_KIND = "hook"
+    elif a.verb in WRITES or a.verb == "init" or (a.verb == "effect" and a.eop not in (None, "show")):
+        SYNC_KIND = "write"
     if a.verb is None or (a.verb == "effect" and not a.eop):
         die("missing verb", USAGE_HEAD, 2)
     if a.verb == "help":

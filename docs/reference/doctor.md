@@ -1,6 +1,6 @@
 # awt doctor
 
-Check the task: layout, git, disk, settings, store. Prints ok, warn or fail per check.
+Check the task: layout, git and its remotes, disk, settings, store. Prints ok, warn or fail per check.
 
 ```
 awt doctor [--staged]
@@ -10,7 +10,7 @@ awt doctor [--staged]
 
 | Flag | Meaning |
 |---|---|
-| `--staged` | scan staged git changes for secrets (for .git/hooks/pre-commit) |
+| `--staged` | scan staged git changes for secrets, and staged ledgers for a torn tail, changed rows and conflict markers (for .git/hooks/pre-commit) |
 
 Global flags `--dir`, `--by` and `--model` work with every verb. Exit codes: 0 ok, 1 refused, 2 usage, 3 permissions, 4 no task or id.
 

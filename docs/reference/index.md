@@ -16,7 +16,7 @@ One page per verb. Start with [concepts](../concepts.md); `awt --help` prints th
 | [`ref`](ref.md) | Record a link instead of copying its content. |
 | [`capture`](capture.md) | Save pasted text that cannot be linked into context/. |
 | [`status`](status.md) | Set the task status; done is refused while questions or effects are open. |
-| [`doctor`](doctor.md) | Check the task: layout, git, disk, settings, store. Prints ok, warn or fail per check. |
+| [`doctor`](doctor.md) | Check the task: layout, git and its remotes, disk, settings, store. Prints ok, warn or fail per check. |
 | [`ingest`](ingest.md) | Copy agent transcripts into the store and update store.db; with --event, record one tool call. |
 | [`ui`](ui.md) | Browse store.db in a read-only web page (needs datasette). |
 | [`help`](help.md) | Print this summary; help agents prints the agent reference. |

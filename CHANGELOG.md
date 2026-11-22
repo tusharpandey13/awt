@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- One task tree on two hosts (spec: `docs/spec-two-host-sync.md`, e2e rubric `docs/e2e-two-host-sync.md`, contract: `SPEC.md` Two hosts). Verbs are still 16.
+  - Ledger order. Every row is written as `v: 2` with a `ts` never earlier than any row already in that node's log (the larger of the wall clock and the greatest `ts` plus 1 microsecond). `load()` reads legacy rows (`v` 1 or none) first, in file order, then `v: 2` rows sorted by `(ts, host, bytes)`, and reads a byte-identical repeated line once. Two hosts that appended to one node and merged the files (`merge=union`) read the same rows in the same order, whatever their clocks. A log with no `v: 2` row reads exactly as before and needs no migration; v0.4.1 reads `v: 2` rows without quarantine. `AWT_HOST` names a host (for tests, two hosts on one machine).
+  - `awt-sync`, a new stdlib script next to `relay` (not a verb): `awt-sync [--dir TOP] [--remote NAME] [--branch B] [--wait S] [--no-push] [--quiet]`. Fetch, exclusive lock on the tree top's `.awt/`, heal torn tails, `git add -A`, commit, `git merge --no-edit FETCH_HEAD`, release, push (never forced), `awt ingest --hook`. The lock is `flock` on the tree top's `.awt/` directory (no lock file), held shared by every `awt` ledger access: writes wait up to 10 s, `--hook` paths and reads 2 s.
+  - `doctor`: a git remote is `ok` when it is declared with `awt ref URL --kind sync --title "private sync remote"`, otherwise it still warns; a `github.com` remote is probed once, unauthenticated, and a public one fails (never from `doctor --staged`); at a tree top with a declared remote it warns about missing `.gitignore` lines, a missing `merge=union` attribute and a missing pre-commit hook, and fails when the working ledger is not an extension of the committed one. New warnings for rows from an older awt, two decisions superseding one, two answers, an effect begun on two hosts, and rows more than 300 s ahead of the clock.
+  - `doctor --staged` also checks staged ledgers: it fails on a torn tail, rows changed or removed since `HEAD` and conflict markers, and warns (never refuses) on unreadable rows without printing them.
+  - Project profiles: `awt ingest` writes `$AWT_STORE/views/profiles.json` per host (placement class, observed command counts and heads, manifests; never command text, never synced, not in `store.db`). `decide --tag profile:light|build-heavy|media-device` overrides a project's class; other `profile:` tags are refused.
+- Tests: `tests/test_sync.py` (T-HS1 to T-HS44), `tests/test_sync_e2e.py` (E-HS1 to E-HS15), chaos group `sync` (C50 to C59), fixture `tests/synchelp.py`.
+
+### Changed
+- `SPEC.md` Reading: "file order is canonical" is replaced by the order above. Rule 4 gains the profiles file, Rule 5 the sync lock.
+- Checked locally and noted in the spec: `git remote get-url --all` and `--push --all` apply `insteadOf` and `pushInsteadOf` and together list every URL; a future `ts` reads as age 0 in the brief; on macOS a shared `flock` on a directory fd blocks an exclusive one. Directory `flock` on Linux and the uniqueness of a ccusage period per host are still unchecked.
+
 ## 0.4.1 (19-Nov-2026)
 
 ### Changed

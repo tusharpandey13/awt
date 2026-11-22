@@ -141,6 +141,10 @@ The tradeoff is lost context between workers: each knows only what the files say
 - **Secret scanning is pattern-based.** It catches common token formats and will miss others.
 - **Use a local disk.** Atomic appends aren't guaranteed on network drives or synced folders, and `./awt doctor` warns about them.
 
+## One tree on two hosts
+
+A task tree can live in a private git repo and be used from two machines. Rows keep their order whatever the clocks say, `doctor` checks the remote and the commit hook, and the optional `awt-sync` script commits, merges and pushes under a lock so a sync never loses a row. Setup is in [AGENTS.md](AGENTS.md#two-hosts) and the contract in [SPEC.md](SPEC.md#two-hosts).
+
 ## Keep task data private
 
 A task directory often holds internal chats and documents. Commit it with plain `git commit`; run `awt doctor --staged` (for example from `.git/hooks/pre-commit`) to catch secrets first. If you add a remote, make sure it is private; `./awt doctor` warns when a remote exists.
